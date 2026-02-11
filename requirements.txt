@@ -1,0 +1,10 @@
+numpy>=2.1.0
+sounddevice>=0.4.6
+opuslib==3.0.1
+loguru==0.7.0
+PyYAML>=6.0.2
+pynput==1.7.6
+Flask==2.3.2
+flask-socketio==5.3.4
+python-socketio==5.9.0
+PySide6>=6.7.0

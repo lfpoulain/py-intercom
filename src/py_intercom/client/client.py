@@ -1,0 +1,746 @@
+from __future__ import annotations
+
+import json
+import socket
+import threading
+import time
+from dataclasses import dataclass
+from typing import Optional
+
+import numpy as np
+import sounddevice as sd
+from loguru import logger
+
+from ..common.audio import apply_gain_db, rms_dbfs
+from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, FRAME_SAMPLES, SAMPLE_RATE
+from ..common.opus_codec import OpusDecoder, OpusEncoder
+from ..common.packets import pack_audio_packet, unpack_audio_packet
+
+
+@dataclass
+class ClientConfig:
+    server_ip: str
+    server_port: int = AUDIO_UDP_PORT
+    control_port: Optional[int] = None
+
+    name: str = ""
+    mode: str = "always_on"
+    ptt_key: Optional[str] = None
+    client_uuid: str = ""
+    input_device: Optional[int] = None
+    output_device: Optional[int] = None
+    input_gain_db: float = 0.0
+    output_gain_db: float = 0.0
+    muted: bool = False
+    sidetone_enabled: bool = False
+    sidetone_gain_db: float = -12.0
+
+
+class IntercomClient:
+    def __init__(self, client_id: int, config: ClientConfig):
+        self.client_id = client_id & 0xFFFFFFFF
+        self.config = config
+
+        if self.config.control_port is None:
+            self.config.control_port = int(self.config.server_port) + int(CONTROL_PORT_OFFSET)
+
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.bind(("0.0.0.0", 0))
+        self._server_addr = (self.config.server_ip, int(self.config.server_port))
+        self._sock.settimeout(0.5)
+
+        self._enc = OpusEncoder()
+        self._dec = OpusDecoder()
+
+        self._opus_ok: bool = True
+        self._opus_err: str = ""
+        self._opuslib_version: str = ""
+        try:
+            import opuslib  # type: ignore
+
+            self._opuslib_version = str(getattr(opuslib, "__version__", ""))
+            test_payload = self._enc.encode(np.zeros((FRAME_SAMPLES,), dtype=np.float32))
+            test_frame = self._dec.decode(test_payload)
+            self._opus_ok = bool(getattr(test_frame, "shape", None) is not None and int(test_frame.shape[0]) == int(FRAME_SAMPLES))
+        except Exception as e:
+            self._opus_ok = False
+            self._opus_err = str(e)
+
+        self._seq = 0
+        self._stop = threading.Event()
+
+        self._kicked: bool = False
+        self._kick_message: str = ""
+
+        self._state_lock = threading.Lock()
+        self._input_gain_db = float(self.config.input_gain_db)
+        self._output_gain_db = float(self.config.output_gain_db)
+        self._muted = bool(self.config.muted)
+        self._sidetone_enabled = bool(self.config.sidetone_enabled)
+        self._sidetone_gain_db = float(self.config.sidetone_gain_db)
+        self._in_vu_dbfs = -60.0
+        self._out_vu_dbfs = -60.0
+
+        self._in_channels = 1
+        self._out_channels = 1
+
+        self._in_samplerate = SAMPLE_RATE
+        self._in_phase = 0.0
+        self._capture_buf = np.zeros((0,), dtype=np.float32)
+
+        self._out_samplerate = SAMPLE_RATE
+        self._out_phase = 0.0
+        self._playback_buf = np.zeros((0,), dtype=np.float32)
+
+        self._sidetone_phase = 0.0
+        self._sidetone_buf = np.zeros((0,), dtype=np.float32)
+
+        self._tx_packets = 0
+        self._tx_udp_sent = 0
+        self._rx_packets = 0
+        self._opus_encode_errors = 0
+        self._opus_decode_errors = 0
+        self._tx_socket_errors = 0
+        self._rx_socket_errors = 0
+        self._last_stats_log = time.monotonic()
+
+        self._in_stream: Optional[sd.InputStream] = None
+        self._out_stream: Optional[sd.OutputStream] = None
+
+        self._ctrl_sock: Optional[socket.socket] = None
+        self._ctrl_thread: Optional[threading.Thread] = None
+        self._ctrl_send_lock = threading.Lock()
+        self._ctrl_connected: bool = False
+        self._ctrl_last_rx_monotonic: float = 0.0
+        self._ctrl_last_tx_monotonic: float = 0.0
+        self._ctrl_remote_muted: Optional[bool] = None
+        self._ctrl_routes: Optional[dict] = None
+
+    def get_stats_snapshot(self) -> dict:
+        with self._state_lock:
+            try:
+                capture_samples = int(self._capture_buf.size)
+            except Exception:
+                capture_samples = 0
+            try:
+                playback_samples = int(self._playback_buf.size)
+            except Exception:
+                playback_samples = 0
+            try:
+                sidetone_samples = int(self._sidetone_buf.size)
+            except Exception:
+                sidetone_samples = 0
+
+            ctrl_age_s = (
+                max(0.0, time.monotonic() - float(self._ctrl_last_rx_monotonic)) if self._ctrl_connected else None
+            )
+            ctrl_tx_age_s = (
+                max(0.0, time.monotonic() - float(self._ctrl_last_tx_monotonic)) if self._ctrl_connected else None
+            )
+
+            return {
+                "muted": self._muted,
+                "input_gain_db": self._input_gain_db,
+                "output_gain_db": self._output_gain_db,
+                "sidetone_enabled": self._sidetone_enabled,
+                "sidetone_gain_db": self._sidetone_gain_db,
+                "in_vu_dbfs": self._in_vu_dbfs,
+                "out_vu_dbfs": self._out_vu_dbfs,
+                "in_channels": self._in_channels,
+                "out_channels": self._out_channels,
+                "in_samplerate": self._in_samplerate,
+                "out_samplerate": self._out_samplerate,
+                "capture_samples": int(capture_samples),
+                "playback_samples": int(playback_samples),
+                "sidetone_samples": int(sidetone_samples),
+                "tx_packets": int(self._tx_packets),
+                "tx_udp_sent": int(self._tx_udp_sent),
+                "rx_packets": int(self._rx_packets),
+                "opus_encode_errors": int(self._opus_encode_errors),
+                "opus_decode_errors": int(self._opus_decode_errors),
+                "tx_socket_errors": int(self._tx_socket_errors),
+                "rx_socket_errors": int(self._rx_socket_errors),
+                "opus_ok": bool(self._opus_ok),
+                "opus_err": str(self._opus_err),
+                "opuslib_version": str(self._opuslib_version),
+                "stopped": bool(self._stop.is_set()),
+                "kicked": bool(self._kicked),
+                "kick_message": str(self._kick_message),
+                "control_connected": bool(self._ctrl_connected),
+                "control_age_s": ctrl_age_s,
+                "control_tx_age_s": ctrl_tx_age_s,
+                "name": str(self.config.name or ""),
+                "mode": str(self.config.mode or ""),
+                "ptt_key": self.config.ptt_key,
+            }
+
+    def set_muted(self, muted: bool, from_control: bool = False) -> None:
+        with self._state_lock:
+            self._muted = bool(muted)
+
+        if not from_control:
+            self._control_send_state(muted=bool(muted))
+
+    def set_input_gain_db(self, gain_db: float) -> None:
+        with self._state_lock:
+            self._input_gain_db = float(gain_db)
+
+    def set_output_gain_db(self, gain_db: float) -> None:
+        with self._state_lock:
+            self._output_gain_db = float(gain_db)
+
+    def set_sidetone_enabled(self, enabled: bool) -> None:
+        with self._state_lock:
+            self._sidetone_enabled = bool(enabled)
+
+    def set_sidetone_gain_db(self, gain_db: float) -> None:
+        with self._state_lock:
+            self._sidetone_gain_db = float(gain_db)
+
+    def start(self) -> None:
+        logger.info(
+            "client starting: server={}:{} in_dev={} out_dev={} sr={} frame={}",
+            self.config.server_ip,
+            self.config.server_port,
+            str(self.config.input_device),
+            str(self.config.output_device),
+            SAMPLE_RATE,
+            FRAME_SAMPLES,
+        )
+
+        rx = threading.Thread(target=self._rx_loop, name="udp-rx", daemon=True)
+        rx.start()
+
+        self._ctrl_thread = threading.Thread(target=self._control_loop, name="ctrl", daemon=True)
+        self._ctrl_thread.start()
+
+        self._out_stream = self._open_output_stream()
+        self._out_stream.start()
+
+        self._in_stream = self._open_input_stream()
+        self._in_stream.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            if self._in_stream is not None:
+                self._in_stream.stop()
+                self._in_stream.close()
+        except Exception:
+            pass
+        try:
+            if self._out_stream is not None:
+                self._out_stream.stop()
+                self._out_stream.close()
+        except Exception:
+            pass
+        try:
+            if self._ctrl_sock is not None:
+                self._ctrl_sock.close()
+        except Exception:
+            pass
+        try:
+            self._sock.close()
+        except Exception:
+            pass
+
+    def _control_send(self, sock: socket.socket, msg: dict) -> None:
+        data = (json.dumps(msg, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+        with self._ctrl_send_lock:
+            sock.sendall(data)
+
+    def _control_send_state(self, muted: Optional[bool] = None) -> None:
+        sock = self._ctrl_sock
+        if sock is None or not self._ctrl_connected:
+            return
+        msg: dict = {"type": "state", "client_id": int(self.client_id)}
+        if muted is not None:
+            msg["muted"] = bool(muted)
+        try:
+            self._control_send(sock, msg)
+        except Exception as e:
+            logger.debug("control send state failed: {}", e)
+            return
+
+    def _control_handle_msg(self, msg: dict) -> None:
+        mtype = str(msg.get("type") or "").lower()
+        if mtype == "kick":
+            try:
+                with self._state_lock:
+                    self._kicked = True
+                    self._kick_message = str(msg.get("message") or "Tu as été kick")
+            except Exception:
+                pass
+            try:
+                self.stop()
+            except Exception:
+                pass
+            return
+        if mtype in ("welcome", "update"):
+            cfg = msg.get("config") if isinstance(msg.get("config"), dict) else None
+            if cfg is None and mtype == "update":
+                cfg = msg
+
+            if isinstance(cfg, dict):
+                if "muted" in cfg:
+                    try:
+                        self._ctrl_remote_muted = bool(cfg.get("muted"))
+                        self.set_muted(bool(cfg.get("muted")), from_control=True)
+                    except Exception:
+                        pass
+                if "routes" in cfg and isinstance(cfg.get("routes"), dict):
+                    try:
+                        self._ctrl_routes = dict(cfg.get("routes") or {})
+                    except Exception:
+                        pass
+        elif mtype == "pong":
+            return
+
+    def _control_loop(self) -> None:
+        backoff_s = 1.0
+        buf = b""
+
+        while not self._stop.is_set():
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(3.0)
+                sock.connect((self.config.server_ip, int(self.config.control_port or 0)))
+                sock.settimeout(0.5)
+                self._ctrl_sock = sock
+                self._ctrl_connected = True
+                self._ctrl_last_rx_monotonic = time.monotonic()
+                self._ctrl_last_tx_monotonic = time.monotonic()
+
+                hello = {
+                    "type": "hello",
+                    "version": 1,
+                    "client_id": int(self.client_id),
+                    "client_uuid": str(self.config.client_uuid or ""),
+                    "name": str(self.config.name or ""),
+                    "mode": str(self.config.mode or "always_on"),
+                    "ptt_key": self.config.ptt_key,
+                }
+                self._control_send(sock, hello)
+
+                buf = b""
+                while not self._stop.is_set():
+                    now = time.monotonic()
+                    if now - float(self._ctrl_last_tx_monotonic) >= 2.0:
+                        try:
+                            self._control_send(sock, {"type": "ping", "t": int(time.time() * 1000)})
+                            self._ctrl_last_tx_monotonic = now
+                        except Exception:
+                            break
+
+                    try:
+                        chunk = sock.recv(4096)
+                        if not chunk:
+                            break
+                        buf += chunk
+                    except socket.timeout:
+                        continue
+                    except Exception:
+                        break
+
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            msg = json.loads(line.decode("utf-8", errors="replace"))
+                        except Exception:
+                            continue
+                        if isinstance(msg, dict):
+                            self._ctrl_last_rx_monotonic = time.monotonic()
+                            self._control_handle_msg(msg)
+
+            except Exception as e:
+                logger.debug("control loop error: {}", e)
+            finally:
+                self._ctrl_connected = False
+                try:
+                    if self._ctrl_sock is not None:
+                        self._ctrl_sock.close()
+                except Exception:
+                    pass
+                self._ctrl_sock = None
+
+            if self._stop.is_set():
+                break
+            time.sleep(backoff_s)
+
+    def _open_input_stream(self) -> sd.InputStream:
+        dev_info = None
+        try:
+            if self.config.input_device is not None:
+                dev_info = sd.query_devices(self.config.input_device)
+        except Exception:
+            dev_info = None
+
+        if dev_info is not None:
+            logger.debug(
+                "input device: name={} hostapi={} max_in={} default_sr={}",
+                dev_info.get("name"),
+                dev_info.get("hostapi"),
+                dev_info.get("max_input_channels"),
+                dev_info.get("default_samplerate"),
+            )
+
+        max_in = 2
+        if dev_info is not None:
+            try:
+                max_in = int(dev_info.get("max_input_channels", 2))
+            except Exception:
+                max_in = 2
+        candidate_channels = []
+        for ch in (1, 2, max_in):
+            if isinstance(ch, int) and ch > 0 and ch not in candidate_channels:
+                candidate_channels.append(ch)
+
+        samplerates = [SAMPLE_RATE]
+        if dev_info is not None:
+            try:
+                dsr = int(float(dev_info.get("default_samplerate", SAMPLE_RATE)))
+            except Exception:
+                dsr = SAMPLE_RATE
+            if dsr not in samplerates:
+                samplerates.append(dsr)
+
+        errors = []
+        for sr in samplerates:
+            for ch in candidate_channels:
+                blocksize_20ms = int(round(float(FRAME_SAMPLES) * float(sr) / float(SAMPLE_RATE)))
+                blocksize_20ms = max(0, blocksize_20ms)
+                for blocksize in (blocksize_20ms, 0):
+                    for latency in ("low", None):
+                        try:
+                            logger.debug(
+                                "opening InputStream: dev={} ch={} blocksize={} latency={} sr={}",
+                                str(self.config.input_device),
+                                ch,
+                                str(blocksize),
+                                latency,
+                                sr,
+                            )
+                            st = sd.InputStream(
+                                samplerate=sr,
+                                channels=ch,
+                                dtype="float32",
+                                blocksize=blocksize,
+                                device=self.config.input_device,
+                                latency=latency,
+                                callback=self._in_callback,
+                            )
+                            with self._state_lock:
+                                self._in_channels = ch
+                                self._in_samplerate = int(sr)
+                                self._in_phase = 0.0
+                                self._capture_buf = np.zeros((0,), dtype=np.float32)
+                            return st
+                        except Exception as e:
+                            errors.append(f"sr={sr} ch={ch} blocksize={blocksize} latency={latency}: {e}")
+                            logger.warning("InputStream open failed: {}", errors[-1])
+
+        raise RuntimeError("failed to open input stream. attempts:\n" + "\n".join(errors))
+
+    def _open_output_stream(self) -> sd.OutputStream:
+        dev_info = None
+        try:
+            if self.config.output_device is not None:
+                dev_info = sd.query_devices(self.config.output_device)
+        except Exception:
+            dev_info = None
+
+        if dev_info is not None:
+            logger.debug(
+                "output device: name=%r hostapi=%r max_out=%s default_sr=%s",
+                dev_info.get("name"),
+                dev_info.get("hostapi"),
+                dev_info.get("max_output_channels"),
+                dev_info.get("default_samplerate"),
+            )
+
+        max_out = 2
+        if dev_info is not None:
+            try:
+                max_out = int(dev_info.get("max_output_channels", 2))
+            except Exception:
+                max_out = 2
+        candidate_channels = []
+        for ch in (1, 2, max_out):
+            if isinstance(ch, int) and ch > 0 and ch not in candidate_channels:
+                candidate_channels.append(ch)
+
+        samplerates = [SAMPLE_RATE]
+        if dev_info is not None:
+            try:
+                dsr = int(float(dev_info.get("default_samplerate", SAMPLE_RATE)))
+            except Exception:
+                dsr = SAMPLE_RATE
+            if dsr not in samplerates:
+                samplerates.append(dsr)
+
+        errors = []
+        for sr in samplerates:
+            for ch in candidate_channels:
+                for blocksize in (FRAME_SAMPLES if sr == SAMPLE_RATE else 0, 0):
+                    for latency in ("low", None):
+                        try:
+                            logger.debug(
+                                "opening OutputStream: dev={} ch={} blocksize={} latency={} sr={}",
+                                str(self.config.output_device),
+                                ch,
+                                str(blocksize),
+                                latency,
+                                sr,
+                            )
+                            st = sd.OutputStream(
+                                samplerate=sr,
+                                channels=ch,
+                                dtype="float32",
+                                blocksize=blocksize,
+                                device=self.config.output_device,
+                                latency=latency,
+                                callback=self._out_callback,
+                            )
+                            with self._state_lock:
+                                self._out_channels = ch
+                                self._out_samplerate = sr
+                                self._out_phase = 0.0
+                                self._playback_buf = np.zeros((0,), dtype=np.float32)
+                                self._sidetone_phase = 0.0
+                                self._sidetone_buf = np.zeros((0,), dtype=np.float32)
+                            return st
+                        except Exception as e:
+                            errors.append(f"sr={sr} ch={ch} blocksize={blocksize} latency={latency}: {e}")
+                            logger.warning("OutputStream open failed: {}", errors[-1])
+
+        raise RuntimeError("failed to open output stream. attempts:\n" + "\n".join(errors))
+
+    def run_forever(self) -> None:
+        self.start()
+        try:
+            while not self._stop.is_set():
+                time.sleep(0.2)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.stop()
+
+    def _in_callback(self, indata, frames, time_info, status) -> None:
+        if status:
+            logger.debug("audio in status: {}", status)
+
+        with self._state_lock:
+            muted = self._muted
+            gain_db = self._input_gain_db
+            in_sr = int(self._in_samplerate)
+
+        if muted:
+            return
+
+        if indata.ndim == 1:
+            mono = indata.astype(np.float32, copy=False)
+        else:
+            if indata.shape[1] == 1:
+                mono = indata[:, 0].astype(np.float32, copy=False)
+            else:
+                mono = np.mean(indata.astype(np.float32, copy=False), axis=1)
+
+        mono = apply_gain_db(mono, gain_db)
+
+        mono = mono.astype(np.float32, copy=False)
+
+        with self._state_lock:
+            if self._capture_buf.size == 0:
+                self._capture_buf = mono
+            else:
+                self._capture_buf = np.concatenate((self._capture_buf, mono))
+
+            max_samples = int(in_sr * 3)
+            if self._capture_buf.size > max_samples:
+                self._capture_buf = self._capture_buf[-max_samples:]
+
+        ratio = float(in_sr) / float(SAMPLE_RATE)
+
+        while True:
+            with self._state_lock:
+                phase = float(self._in_phase)
+                src = self._capture_buf
+
+            need = int(np.ceil((FRAME_SAMPLES - 1) * ratio + phase + 2))
+            if src.size < need:
+                return
+
+            positions = phase + np.arange(FRAME_SAMPLES, dtype=np.float32) * ratio
+            idx0 = np.floor(positions).astype(np.int64)
+            frac = (positions - idx0.astype(np.float32)).astype(np.float32)
+            idx1 = idx0 + 1
+
+            if int(idx1.max(initial=0)) >= int(src.size):
+                return
+
+            y = src[idx0] * (1.0 - frac) + src[idx1] * frac
+
+            new_phase = float(positions[-1] + ratio)
+            drop = int(new_phase)
+            new_phase = new_phase - drop
+
+            with self._state_lock:
+                self._in_phase = new_phase
+                if drop > 0 and self._capture_buf.size >= drop:
+                    self._capture_buf = self._capture_buf[drop:]
+                self._in_vu_dbfs = rms_dbfs(y)
+
+                if self._sidetone_enabled:
+                    if self._sidetone_buf.size == 0:
+                        self._sidetone_buf = y.astype(np.float32, copy=False)
+                    else:
+                        self._sidetone_buf = np.concatenate((self._sidetone_buf, y.astype(np.float32, copy=False)))
+
+                    max_samples = int(SAMPLE_RATE * 1)
+                    if self._sidetone_buf.size > max_samples:
+                        self._sidetone_buf = self._sidetone_buf[-max_samples:]
+
+            try:
+                payload = self._enc.encode(y.astype(np.float32, copy=False))
+            except Exception:
+                self._opus_encode_errors += 1
+                return
+
+            self._tx_packets += 1
+            self._seq = (self._seq + 1) & 0xFFFFFFFF
+            ts_ms = int(time.time() * 1000) & 0xFFFFFFFF
+            pkt = pack_audio_packet(self.client_id, ts_ms, self._seq, payload)
+
+            try:
+                self._sock.sendto(pkt, self._server_addr)
+            except Exception as e:
+                self._tx_socket_errors += 1
+                logger.debug("udp send failed: {}", e)
+                return
+
+            self._tx_udp_sent += 1
+
+    def _rx_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                data = self._sock.recv(2048)
+            except socket.timeout:
+                continue
+            except OSError:
+                self._rx_socket_errors += 1
+                return
+
+            try:
+                pkt = unpack_audio_packet(data)
+                frame = self._dec.decode(pkt.payload)
+            except Exception:
+                self._opus_decode_errors += 1
+                continue
+
+            self._rx_packets += 1
+
+            # move rx frames into a single playback buffer to allow resampling
+            with self._state_lock:
+                if self._playback_buf.size == 0:
+                    self._playback_buf = frame.astype(np.float32, copy=False)
+                else:
+                    self._playback_buf = np.concatenate((self._playback_buf, frame.astype(np.float32, copy=False)))
+
+                # cap to ~3 seconds to avoid unbounded memory growth
+                max_samples = int(SAMPLE_RATE * 3)
+                if self._playback_buf.size > max_samples:
+                    self._playback_buf = self._playback_buf[-max_samples:]
+
+            now = time.monotonic()
+            if now - self._last_stats_log >= 5.0:
+                self._last_stats_log = now
+                with self._state_lock:
+                    playback_samples = int(self._playback_buf.size)
+                logger.debug(
+                    "stats: tx_pkts={} rx_pkts={} enc_err={} dec_err={} tx_sock_err={} rx_sock_err={} playback_samples={}",
+                    self._tx_packets,
+                    self._rx_packets,
+                    self._opus_encode_errors,
+                    self._opus_decode_errors,
+                    self._tx_socket_errors,
+                    self._rx_socket_errors,
+                    playback_samples,
+                )
+
+    def _out_callback(self, outdata, frames, time_info, status) -> None:
+        if status:
+            logger.debug("audio out status: {}", status)
+
+        with self._state_lock:
+            out_channels = self._out_channels
+            out_sr = int(self._out_samplerate)
+            phase = float(self._out_phase)
+            src = self._playback_buf
+
+            out_gain_db = float(self._output_gain_db)
+            sidetone_enabled = bool(self._sidetone_enabled)
+            sidetone_gain_db = float(self._sidetone_gain_db)
+            s_phase = float(self._sidetone_phase)
+            s_src = self._sidetone_buf
+
+        y_net = np.zeros((int(frames),), dtype=np.float32)
+        have_net = False
+
+        if src.size >= 2:
+            ratio = float(SAMPLE_RATE) / float(out_sr)
+            need = int(np.ceil((frames - 1) * ratio + phase + 2))
+            if src.size >= need:
+                positions = phase + np.arange(frames, dtype=np.float32) * ratio
+                idx0 = np.floor(positions).astype(np.int64)
+                frac = (positions - idx0.astype(np.float32)).astype(np.float32)
+                idx1 = idx0 + 1
+                y_net = src[idx0] * (1.0 - frac) + src[idx1] * frac
+                have_net = True
+
+                new_phase = float(positions[-1] + ratio)
+                drop = int(new_phase)
+                new_phase = new_phase - drop
+
+                with self._state_lock:
+                    self._out_phase = new_phase
+                    if drop > 0:
+                        self._playback_buf = self._playback_buf[drop:]
+
+        y_side = np.zeros((int(frames),), dtype=np.float32)
+        if sidetone_enabled and s_src.size >= 2:
+            ratio_s = float(SAMPLE_RATE) / float(out_sr)
+            need_s = int(np.ceil((frames - 1) * ratio_s + s_phase + 2))
+            if s_src.size >= need_s:
+                positions_s = s_phase + np.arange(frames, dtype=np.float32) * ratio_s
+                idx0_s = np.floor(positions_s).astype(np.int64)
+                frac_s = (positions_s - idx0_s.astype(np.float32)).astype(np.float32)
+                idx1_s = idx0_s + 1
+                y_side = s_src[idx0_s] * (1.0 - frac_s) + s_src[idx1_s] * frac_s
+                y_side = apply_gain_db(y_side.astype(np.float32, copy=False), sidetone_gain_db)
+
+                new_s_phase = float(positions_s[-1] + ratio_s)
+                drop_s = int(new_s_phase)
+                new_s_phase = new_s_phase - drop_s
+
+                with self._state_lock:
+                    self._sidetone_phase = new_s_phase
+                    if drop_s > 0:
+                        self._sidetone_buf = self._sidetone_buf[drop_s:]
+
+        y = y_net + y_side
+        y = apply_gain_db(y.astype(np.float32, copy=False), out_gain_db)
+        y = np.clip(y, -1.0, 1.0)
+
+        with self._state_lock:
+            self._out_vu_dbfs = rms_dbfs(y)
+
+        y = y.astype(np.float32, copy=False)
+        if outdata.ndim == 1:
+            outdata[:] = y
+        elif outdata.shape[1] == 1:
+            outdata[:] = y.reshape(int(frames), 1)
+        else:
+            outdata[:] = np.repeat(y.reshape(int(frames), 1), repeats=outdata.shape[1], axis=1)
