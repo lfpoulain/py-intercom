@@ -23,7 +23,9 @@ Ce que couvre la V1 :
 
 - Un serveur unique.
 - Des clients Python (GUI) qui envoient leur micro et reçoivent un retour casque.
-- Routage par bus (bus fixes), mute et gain par client, configuration d’outputs côté serveur.
+- Routage par bus (bus fixes), mute et gain par client, configuration d'outputs côté serveur.
+- **PTT** (Push-To-Talk) : général + par bus, avec raccourcis clavier globaux OS.
+- **Mute mic par bus** : le client peut couper son micro sur un bus spécifique.
 - Presets JSON pour persister la config serveur et la config client.
 - Canal de contrôle TCP (keepalive + push config + kick).
 
@@ -53,6 +55,14 @@ Attributs gérés côté serveur :
 - gain (dB)
 - routage vers bus
 - état control TCP (connecté / âge)
+
+Attributs gérés côté client :
+
+- mode : `always_on` (micro toujours ouvert) ou `ptt` (micro activé par touche)
+- PTT général (active le micro sur tous les bus)
+- PTT par bus (active le micro sur un bus spécifique)
+- mute mic par bus (coupe le micro sur un bus spécifique, persisté dans le preset)
+- raccourcis clavier globaux OS via `pynput` (capturés même si l'app n'a pas le focus)
 
 ### Bus
 
@@ -98,12 +108,37 @@ Le serveur renvoie à chaque client un flux UDP (mix-minus), via `sendto()` vers
 
 Types actuellement utilisés :
 
-- `hello` (client -> serveur) : `client_id`, `client_uuid`, `name`, `mode`, `ptt_key`
+- `hello` (client -> serveur) : `client_id`, `client_uuid`, `name`, `mode`
 - `welcome` (serveur -> client)
 - `update` (serveur -> client) : push config (mute + routes)
-- `state` (client -> serveur) : état client (ex: mute)
+- `state` (client -> serveur) : `ptt_general`, `ptt_buses`, `mute_buses`, optionnellement `muted`
 - `ping`/`pong` (keepalive)
 - `kick` (serveur -> client)
+
+### Auto-discovery (UDP broadcast)
+
+- Transport : **UDP broadcast** (`255.255.255.255`)
+- Port : `AUDIO_UDP_PORT + 2` (par défaut `5002`)
+- Intervalle : toutes les 2 secondes (`DISCOVERY_BEACON_INTERVAL_S`)
+- Expiration : un serveur disparaît de la liste client après 6 secondes sans beacon (`DISCOVERY_EXPIRY_S`)
+
+Le serveur envoie un beacon JSON :
+
+```json
+{
+  "type": "py-intercom-beacon",
+  "server_name": "<nom configurable>",
+  "audio_port": 5000,
+  "control_port": 5001,
+  "version": 1
+}
+```
+
+Côté client, un `DiscoveryListener` écoute sur le port discovery et maintient une liste de serveurs détectés. La GUI client affiche un combo "Discovered" qui remplit automatiquement l'IP et le port quand un serveur est sélectionné.
+
+Côté serveur, le beacon est activable via la checkbox "Discovery" dans la GUI, et le nom du serveur est configurable via le champ "Name".
+
+Module : `common/discovery.py` (`DiscoveryBeacon`, `DiscoveryListener`, `DiscoveredServer`).
 
 ## 5) Audio / codec
 
@@ -134,19 +169,23 @@ Les presets sont **effectivement implémentés** en JSON, avec écriture atomiqu
 - Contenu :
   - serveur (ip/port)
   - devices (input/output)
-  - identité (`client_uuid`, name, mode, ptt_key)
+  - identité (`client_uuid`, name, mode)
   - gains, sidetone
+  - `ptt_general_key` : raccourci clavier PTT général
+  - `ptt_bus_keys` : mapping `bus_id -> raccourci` pour PTT par bus
+  - `mute_buses` : mapping `bus_id -> bool` pour mute mic par bus
 
 ## 7) Stack technique (dev)
 
 ### Langage / libs
 
 - Python (projet `src/`)
-- UI : **PySide6**
+- UI : **PySide6** + **qt-material** (thème `dark_teal.xml`)
 - Audio IO : **sounddevice**
 - DSP / buffers : **numpy**
 - Codec : **opuslib**
 - Logging : **loguru**
+- Hotkeys globaux : **pynput**
 
 Note : le `requirements.txt` contient aussi des dépendances liées à une piste “web” (Flask / SocketIO), mais **le client web n’est pas implémenté** dans la V1.
 
@@ -157,6 +196,8 @@ Note : le `requirements.txt` contient aussi des dépendances liées à une piste
   - paquets (pack/unpack)
   - codec Opus
   - utilitaires (devices, json I/O, logging)
+  - `discovery.py` : auto-discovery LAN (beacon + listener)
+  - `theme.py` : application du thème qt-material + widget `VuMeter` (barre colorée vert/jaune/rouge)
 
 - `py_intercom/server/`
   - `IntercomServer` : réception UDP, mix, broadcast, contrôle TCP, presets
@@ -196,7 +237,6 @@ Conseil : garder un device de sortie “VMix” séparé (VB-Cable) en output se
 
 - Les bus sont **fixes** (pas de création/renommage dynamique via UI).
 - Le resampling serveur (si output != 48kHz) est volontairement simple (objectif : robustesse avant qualité audiophile).
-- Pas d’auto-discovery : l’IP serveur est saisie côté client.
 - Pas de chiffrement/authentification : usage LAN.
 
 ## 10) Dépannage rapide
@@ -214,18 +254,20 @@ Conseil : garder un device de sortie “VMix” séparé (VB-Cable) en output se
   - vérifier que le TCP control est joignable sur `5001` (pare-feu Windows)
   - lancer avec `--debug` pour logs réseau
 
+- Si le son ne passe plus après déconnexion/reconnexion du client :
+  - le client réutilise le même socket UDP (même port éphémère) pour éviter un blocage par le pare-feu Windows
+  - si le problème persiste, vérifier les règles de pare-feu pour le port UDP utilisé
+
 ## 11) Roadmap (non implémenté)
 
 Tout ce qui suit n’est **pas** implémenté dans la V1.
 
 - Client web “plateau”
 - Backend web (Flask / SocketIO) + WebAudio
-- Auto-discovery LAN
 - Jitter buffer adaptatif / réordonnancement
 - AEC (annulation d’écho)
 - Presets multiples (save-as / liste / load)
 - Bus dynamiques (création / renommage via UI)
-- PTT au niveau bus
 - Enregistrement multi-bus (WAV/FLAC)
 - EQ/comp/gate
 - Contrôle externe (REST/OSC/MIDI)

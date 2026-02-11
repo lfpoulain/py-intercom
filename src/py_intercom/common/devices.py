@@ -22,15 +22,6 @@ def list_devices(
     hard_refresh: bool = False,
     validate: bool = False,
 ) -> List[DeviceInfo]:
-    return _list_devices(hostapi_substring=hostapi_substring, hard_refresh=hard_refresh, validate=validate)
-
-
-def _list_devices(
-    hostapi_substring: Optional[str] = "WASAPI",
-    *,
-    hard_refresh: bool = False,
-    validate: bool = False,
-) -> List[DeviceInfo]:
     if hard_refresh and os.name == "nt":
         try:
             sd._terminate()  # type: ignore[attr-defined]

@@ -8,9 +8,12 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
+from pynput import keyboard
 
 from ..common.devices import list_devices
+from ..common.discovery import DiscoveredServer, DiscoveryListener
 from ..common.jsonio import atomic_write_json, read_json_file
+from ..common.theme import VuMeter, apply_theme, patch_combo
 from .client import ClientConfig, IntercomClient
 
 
@@ -49,18 +52,201 @@ def _db_to_progress(db: float) -> int:
     return int(round((db + 60.0) / 60.0 * 100.0))
 
 
+class _ShortcutKeySequenceEdit(QtWidgets.QKeySequenceEdit):
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # noqa: N802
+        try:
+            if event.key() == int(QtCore.Qt.Key.Key_Escape):
+                self.clearFocus()
+                return
+            if event.key() in (int(QtCore.Qt.Key.Key_Delete), int(QtCore.Qt.Key.Key_Backspace)):
+                self.setKeySequence(QtGui.QKeySequence(""))
+                self.clearFocus()
+                return
+        except Exception:
+            pass
+        super().keyPressEvent(event)
+
+
+def _norm_key(k) -> Optional[str]:
+    try:
+        if isinstance(k, keyboard.Key):
+            return f"key:{k.name}"
+        if isinstance(k, keyboard.KeyCode):
+            if k.char:
+                return f"char:{str(k.char).lower()}"
+            if k.vk is not None:
+                return f"vk:{int(k.vk)}"
+    except Exception:
+        return None
+    return None
+
+
+def _parse_qt_shortcut(seq_text: str) -> list[set[str]]:
+    if not seq_text:
+        return []
+
+    tokens = [t.strip() for t in str(seq_text).split("+") if t.strip()]
+    groups: list[set[str]] = []
+
+    def _mod_group(name: str) -> set[str]:
+        n = str(name).lower()
+        if n in ("ctrl", "control"):
+            return {"key:ctrl", "key:ctrl_l", "key:ctrl_r"}
+        if n == "shift":
+            return {"key:shift", "key:shift_l", "key:shift_r"}
+        if n in ("alt", "option"):
+            return {"key:alt", "key:alt_l", "key:alt_r", "key:alt_gr"}
+        if n in ("meta", "win", "super", "cmd", "command"):
+            return {"key:cmd", "key:cmd_l", "key:cmd_r"}
+        return set()
+
+    special = {
+        "space": {"key:space"},
+        "tab": {"key:tab"},
+        "enter": {"key:enter"},
+        "return": {"key:enter"},
+        "esc": {"key:esc"},
+        "escape": {"key:esc"},
+        "backspace": {"key:backspace"},
+        "delete": {"key:delete"},
+        "insert": {"key:insert"},
+        "home": {"key:home"},
+        "end": {"key:end"},
+        "pageup": {"key:page_up"},
+        "pagedown": {"key:page_down"},
+        "up": {"key:up"},
+        "down": {"key:down"},
+        "left": {"key:left"},
+        "right": {"key:right"},
+    }
+
+    for t in tokens:
+        mg = _mod_group(t)
+        if mg:
+            groups.append(mg)
+            continue
+
+        low = str(t).lower()
+        if low in special:
+            groups.append(set(special[low]))
+            continue
+
+        if low.startswith("f") and low[1:].isdigit():
+            groups.append({f"key:{low}"})
+            continue
+
+        if len(low) == 1:
+            groups.append({f"char:{low}"})
+            continue
+
+        groups.append({f"char:{low}"})
+
+    return groups
+
+
+class _GlobalPttHotkeys:
+    def __init__(self, window: "ClientWindow") -> None:
+        self._window = window
+        self._listener: Optional[keyboard.Listener] = None
+        self._pressed: set[str] = set()
+        self._active_general = False
+        self._active_buses: dict[int, bool] = {}
+
+    def start(self) -> None:
+        if self._listener is not None:
+            return
+        self._listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
+        self._listener.daemon = True
+        self._listener.start()
+
+    def stop(self) -> None:
+        if self._listener is None:
+            return
+        try:
+            self._listener.stop()
+        except Exception:
+            pass
+        self._listener = None
+        self._pressed.clear()
+        self._active_general = False
+        self._active_buses = {}
+
+    def _combo_active(self, groups: list[set[str]]) -> bool:
+        if not groups:
+            return False
+        for g in groups:
+            if not any(k in self._pressed for k in g):
+                return False
+        return True
+
+    def _update(self) -> None:
+        cli = self._window._client
+        if cli is None:
+            return
+
+        gen_groups = _parse_qt_shortcut(self._window._ptt_general_key.keySequence().toString())
+        gen_active = self._combo_active(gen_groups)
+        if gen_active != self._active_general:
+            self._active_general = bool(gen_active)
+            try:
+                cli.set_ptt_general(bool(gen_active))
+            except Exception:
+                pass
+
+        for bid, edit in self._window._ptt_bus_keys.items():
+            groups = _parse_qt_shortcut(edit.keySequence().toString())
+            active = self._combo_active(groups)
+            prev = bool(self._active_buses.get(int(bid), False))
+            if bool(active) != prev:
+                self._active_buses[int(bid)] = bool(active)
+                try:
+                    cli.set_ptt_bus(int(bid), bool(active))
+                except Exception:
+                    pass
+
+    def _on_press(self, key) -> None:
+        k = _norm_key(key)
+        if k:
+            self._pressed.add(k)
+            self._update()
+
+    def _on_release(self, key) -> None:
+        k = _norm_key(key)
+        if k and k in self._pressed:
+            try:
+                self._pressed.remove(k)
+            except KeyError:
+                pass
+            self._update()
+
+
 class ClientWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Py-Intercom Client")
 
         self._client: Optional[IntercomClient] = None
+        self._connected: bool = False
 
         self._preset: dict = {}
         self._preset = self._load_preset()
 
         central = QtWidgets.QWidget(self)
         self.setCentralWidget(central)
+
+        self._discovered_servers = QtWidgets.QComboBox()
+        patch_combo(self._discovered_servers)
+        self._discovered_servers.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._discovered_servers.setMinimumContentsLength(30)
+        self._discovered_servers.addItem("(manual)", None)
+        self._discovered_servers.currentIndexChanged.connect(self._on_discovered_server_selected)
+
+        self._discovery_listener: Optional[DiscoveryListener] = None
+        self._discovery_pending_update: bool = False
+        self._discovery_signal = QtCore.QTimer(self)
+        self._discovery_signal.setInterval(100)
+        self._discovery_signal.timeout.connect(self._poll_discovery_updates)
+        self._start_discovery_listener()
 
         self._server_ip = QtWidgets.QLineEdit(str(self._preset_get("server_ip", "")))
         self._server_port = QtWidgets.QSpinBox()
@@ -84,24 +270,104 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         self._name = QtWidgets.QLineEdit(str(self._preset_get("name", "")))
         self._mode = QtWidgets.QComboBox()
+        patch_combo(self._mode)
         self._mode.addItem("Always-on", "always_on")
         self._mode.addItem("PTT", "ptt")
-        self._ptt_key = QtWidgets.QLineEdit(str(self._preset_get("ptt_key", "")))
+
+        self._ptt_general_key = _ShortcutKeySequenceEdit()
+        self._ptt_bus_keys: dict[int, QtWidgets.QKeySequenceEdit] = {
+            0: _ShortcutKeySequenceEdit(),
+            1: _ShortcutKeySequenceEdit(),
+            2: _ShortcutKeySequenceEdit(),
+        }
+
+        self._ptt_general_key.setToolTip("Click then press shortcut. Esc cancels. Del clears.")
+        for edit in self._ptt_bus_keys.values():
+            edit.setToolTip("Click then press shortcut. Esc cancels. Del clears.")
+
+        self._ptt_general_clear = QtWidgets.QToolButton()
+        self._ptt_general_clear.setText("✕")
+        self._ptt_general_clear.setFixedSize(22, 22)
+        self._ptt_general_clear.setToolTip("Clear shortcut")
+        self._ptt_general_clear.clicked.connect(lambda: self._ptt_general_key.setKeySequence(QtGui.QKeySequence("")))
+
+        self._ptt_bus_clear: dict[int, QtWidgets.QToolButton] = {}
+        for bid, edit in self._ptt_bus_keys.items():
+            b = QtWidgets.QToolButton()
+            b.setText("✕")
+            b.setFixedSize(22, 22)
+            b.setToolTip("Clear shortcut")
+            b.clicked.connect(lambda _checked=False, e=edit: e.setKeySequence(QtGui.QKeySequence("")))
+            self._ptt_bus_clear[int(bid)] = b
+
+        self._shortcut_widgets: list[QtWidgets.QWidget] = []
+
+        def _wrap_shortcut(edit: QtWidgets.QKeySequenceEdit, clear_btn: QtWidgets.QToolButton) -> QtWidgets.QWidget:
+            w = QtWidgets.QWidget()
+            lay = QtWidgets.QHBoxLayout(w)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.addWidget(edit, 1)
+            lay.addWidget(clear_btn, 0)
+            self._shortcut_widgets.append(w)
+            return w
+
+        self._mute_bus_widgets: dict[int, QtWidgets.QCheckBox] = {
+            0: QtWidgets.QCheckBox("Mute mic on Regie"),
+            1: QtWidgets.QCheckBox("Mute mic on Plateau"),
+            2: QtWidgets.QCheckBox("Mute mic on VMix"),
+        }
+
+        self._route_bus_widgets: dict[int, QtWidgets.QCheckBox] = {
+            0: QtWidgets.QCheckBox("Routed to Regie"),
+            1: QtWidgets.QCheckBox("Routed to Plateau"),
+            2: QtWidgets.QCheckBox("Routed to VMix"),
+        }
+        for w in self._route_bus_widgets.values():
+            w.setEnabled(False)
+
+        try:
+            self._ptt_general_key.setKeySequence(QtGui.QKeySequence(str(self._preset_get("ptt_general_key", ""))))
+        except Exception:
+            pass
+
+        try:
+            bus_keys = self._preset_get("ptt_bus_keys", {})
+            if isinstance(bus_keys, dict):
+                for bid, edit in self._ptt_bus_keys.items():
+                    try:
+                        edit.setKeySequence(QtGui.QKeySequence(str(bus_keys.get(str(bid), ""))))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        try:
+            mute_buses = self._preset_get("mute_buses", {})
+            if isinstance(mute_buses, dict):
+                for bid, cb in self._mute_bus_widgets.items():
+                    cb.setChecked(bool(mute_buses.get(str(bid), False)))
+        except Exception:
+            pass
         saved_mode = str(self._preset_get("mode", "always_on"))
         i = self._mode.findData(saved_mode)
         if i >= 0:
             self._mode.setCurrentIndex(i)
 
         self._input_device = QtWidgets.QComboBox()
+        patch_combo(self._input_device)
         self._output_device = QtWidgets.QComboBox()
+        patch_combo(self._output_device)
         self._input_device.currentIndexChanged.connect(self._on_input_device_changed)
         self._output_device.currentIndexChanged.connect(self._on_output_device_changed)
         self._show_all_devices = QtWidgets.QCheckBox("Show all devices")
         self._refresh_devices_btn = QtWidgets.QPushButton("Refresh devices")
+        self._refresh_devices_btn.setProperty("class", "warning")
         self._device_status = QtWidgets.QLabel("")
 
         self._connect_btn = QtWidgets.QPushButton("Connect")
+        self._connect_btn.setProperty("class", "success")
         self._disconnect_btn = QtWidgets.QPushButton("Disconnect")
+        self._disconnect_btn.setProperty("class", "danger")
         self._disconnect_btn.setEnabled(False)
 
         self._mute = QtWidgets.QCheckBox("Mute mic")
@@ -128,58 +394,90 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._hp_gain.setValue(0)
         self._hp_gain.setEnabled(False)
 
-        self._in_vu = QtWidgets.QProgressBar()
-        self._in_vu.setRange(0, 100)
-        self._in_vu.setValue(0)
+        self._in_vu = VuMeter()
+        self._out_vu = VuMeter()
 
-        self._out_vu = QtWidgets.QProgressBar()
-        self._out_vu.setRange(0, 100)
-        self._out_vu.setValue(0)
+        # -- Connection group --
+        conn_box = QtWidgets.QGroupBox("Connection")
+        conn_lay = QtWidgets.QGridLayout(conn_box)
+        conn_lay.setContentsMargins(6, 4, 6, 4)
+        conn_lay.setVerticalSpacing(2)
+        conn_lay.addWidget(QtWidgets.QLabel("Discovered"), 0, 0)
+        conn_lay.addWidget(self._discovered_servers, 0, 1, 1, 3)
+        conn_lay.addWidget(QtWidgets.QLabel("Server IP"), 1, 0)
+        conn_lay.addWidget(self._server_ip, 1, 1)
+        conn_lay.addWidget(QtWidgets.QLabel("Port"), 1, 2)
+        conn_lay.addWidget(self._server_port, 1, 3)
+        conn_lay.addWidget(self._client_id_label, 2, 0)
+        conn_lay.addWidget(self._client_id, 2, 1, 1, 3)
+        conn_lay.addWidget(QtWidgets.QLabel("Name"), 3, 0)
+        conn_lay.addWidget(self._name, 3, 1)
+        conn_lay.addWidget(QtWidgets.QLabel("Mode"), 3, 2)
+        conn_lay.addWidget(self._mode, 3, 3)
 
-        form = QtWidgets.QGridLayout()
-        form.addWidget(QtWidgets.QLabel("Server IP"), 0, 0)
-        form.addWidget(self._server_ip, 0, 1)
-        form.addWidget(QtWidgets.QLabel("Port"), 0, 2)
-        form.addWidget(self._server_port, 0, 3)
-        form.addWidget(self._client_id_label, 1, 0)
-        form.addWidget(self._client_id, 1, 1, 1, 3)
+        # -- Audio devices group --
+        dev_box = QtWidgets.QGroupBox("Audio Devices")
+        dev_lay = QtWidgets.QGridLayout(dev_box)
+        dev_lay.setContentsMargins(6, 4, 6, 4)
+        dev_lay.setVerticalSpacing(2)
+        dev_lay.addWidget(QtWidgets.QLabel("Microphone"), 0, 0)
+        dev_lay.addWidget(self._input_device, 0, 1, 1, 3)
+        dev_lay.addWidget(QtWidgets.QLabel("Headphones"), 1, 0)
+        dev_lay.addWidget(self._output_device, 1, 1, 1, 3)
+        dev_lay.addWidget(self._show_all_devices, 2, 0)
+        dev_lay.addWidget(self._refresh_devices_btn, 2, 1)
+        dev_lay.addWidget(self._connect_btn, 2, 2)
+        dev_lay.addWidget(self._disconnect_btn, 2, 3)
+        dev_lay.addWidget(self._device_status, 3, 0, 1, 4)
 
-        form.addWidget(QtWidgets.QLabel("Name"), 2, 0)
-        form.addWidget(self._name, 2, 1)
-        form.addWidget(QtWidgets.QLabel("Mode"), 2, 2)
-        form.addWidget(self._mode, 2, 3)
-        form.addWidget(QtWidgets.QLabel("PTT key"), 3, 0)
-        form.addWidget(self._ptt_key, 3, 1, 1, 3)
+        # -- Audio controls group --
+        ctrl_box = QtWidgets.QGroupBox("Audio Controls")
+        ctrl_lay = QtWidgets.QGridLayout(ctrl_box)
+        ctrl_lay.setContentsMargins(6, 4, 6, 4)
+        ctrl_lay.setVerticalSpacing(2)
+        ctrl_lay.addWidget(self._mute, 0, 0)
+        ctrl_lay.addWidget(self._sidetone, 0, 1, 1, 3)
+        ctrl_lay.addWidget(QtWidgets.QLabel("Mic gain (dB)"), 1, 0)
+        ctrl_lay.addWidget(self._mic_gain, 1, 1, 1, 3)
+        ctrl_lay.addWidget(QtWidgets.QLabel("Headphones gain (dB)"), 2, 0)
+        ctrl_lay.addWidget(self._hp_gain, 2, 1, 1, 3)
+        ctrl_lay.addWidget(QtWidgets.QLabel("Sidetone gain (dB)"), 3, 0)
+        ctrl_lay.addWidget(self._sidetone_gain, 3, 1, 1, 3)
 
-        form.addWidget(QtWidgets.QLabel("Microphone"), 4, 0)
-        form.addWidget(self._input_device, 4, 1, 1, 3)
-        form.addWidget(QtWidgets.QLabel("Headphones"), 5, 0)
-        form.addWidget(self._output_device, 5, 1, 1, 3)
+        # -- PTT / Routing group --
+        ptt_box = QtWidgets.QGroupBox("PTT / Routing")
+        ptt_lay = QtWidgets.QGridLayout(ptt_box)
+        ptt_lay.setContentsMargins(6, 4, 6, 4)
+        ptt_lay.setVerticalSpacing(2)
+        ptt_lay.addWidget(QtWidgets.QLabel("PTT general"), 0, 0)
+        ptt_lay.addWidget(_wrap_shortcut(self._ptt_general_key, self._ptt_general_clear), 0, 1)
+        ptt_lay.addWidget(QtWidgets.QLabel("PTT Regie"), 0, 2)
+        ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[0], self._ptt_bus_clear[0]), 0, 3)
+        ptt_lay.addWidget(QtWidgets.QLabel("PTT Plateau"), 1, 0)
+        ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[1], self._ptt_bus_clear[1]), 1, 1)
+        ptt_lay.addWidget(QtWidgets.QLabel("PTT VMix"), 1, 2)
+        ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[2], self._ptt_bus_clear[2]), 1, 3)
+        ptt_lay.addWidget(self._route_bus_widgets[0], 2, 0)
+        ptt_lay.addWidget(self._route_bus_widgets[1], 2, 1)
+        ptt_lay.addWidget(self._route_bus_widgets[2], 2, 2)
+        ptt_lay.addWidget(self._mute_bus_widgets[0], 3, 0)
+        ptt_lay.addWidget(self._mute_bus_widgets[1], 3, 1)
+        ptt_lay.addWidget(self._mute_bus_widgets[2], 3, 2)
 
-        form.addWidget(self._show_all_devices, 6, 0)
-        form.addWidget(self._refresh_devices_btn, 6, 1)
-        form.addWidget(self._connect_btn, 6, 2)
-        form.addWidget(self._disconnect_btn, 6, 3)
-
-        form.addWidget(self._device_status, 10, 0, 1, 4)
-
-        form.addWidget(self._mute, 7, 0)
-        form.addWidget(self._sidetone, 7, 1, 1, 3)
-        form.addWidget(QtWidgets.QLabel("Mic gain (dB)"), 8, 0)
-        form.addWidget(self._mic_gain, 8, 1, 1, 3)
-        form.addWidget(QtWidgets.QLabel("Headphones gain (dB)"), 9, 0)
-        form.addWidget(self._hp_gain, 9, 1, 1, 3)
-        form.addWidget(QtWidgets.QLabel("Sidetone gain (dB)"), 11, 0)
-        form.addWidget(self._sidetone_gain, 11, 1, 1, 3)
-
-        meters = QtWidgets.QGridLayout()
-        meters.addWidget(QtWidgets.QLabel("Input VU"), 0, 0)
-        meters.addWidget(self._in_vu, 0, 1)
-        meters.addWidget(QtWidgets.QLabel("Output VU"), 1, 0)
-        meters.addWidget(self._out_vu, 1, 1)
+        # -- Meters group --
+        meters_box = QtWidgets.QGroupBox("Meters")
+        meters_lay = QtWidgets.QGridLayout(meters_box)
+        meters_lay.setContentsMargins(6, 4, 6, 4)
+        meters_lay.setVerticalSpacing(2)
+        meters_lay.addWidget(QtWidgets.QLabel("Input VU"), 0, 0)
+        meters_lay.addWidget(self._in_vu, 0, 1)
+        meters_lay.addWidget(QtWidgets.QLabel("Output VU"), 1, 0)
+        meters_lay.addWidget(self._out_vu, 1, 1)
 
         self._info_btn = QtWidgets.QToolButton()
-        self._info_btn.setText("i")
+        self._info_btn.setText("ℹ")
+        self._info_btn.setFixedSize(26, 26)
+        self._info_btn.setToolTip("Info / Debug")
         self._info_btn.clicked.connect(self._show_geek_info)
 
         bottom = QtWidgets.QHBoxLayout()
@@ -187,8 +485,13 @@ class ClientWindow(QtWidgets.QMainWindow):
         bottom.addWidget(self._info_btn)
 
         layout = QtWidgets.QVBoxLayout(central)
-        layout.addLayout(form)
-        layout.addLayout(meters)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+        layout.addWidget(conn_box)
+        layout.addWidget(dev_box)
+        layout.addWidget(ctrl_box)
+        layout.addWidget(ptt_box)
+        layout.addWidget(meters_box)
         layout.addLayout(bottom)
 
         self._refresh_devices_btn.clicked.connect(self._start_device_refresh)
@@ -201,6 +504,13 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._hp_gain.valueChanged.connect(self._on_hp_gain_changed)
         self._sidetone.stateChanged.connect(self._on_sidetone_changed)
         self._sidetone_gain.valueChanged.connect(self._on_sidetone_gain_changed)
+
+        self._ptt_general_key.keySequenceChanged.connect(self._on_ptt_general_key_changed)
+        for bid, edit in self._ptt_bus_keys.items():
+            edit.keySequenceChanged.connect(lambda _seq, bus_id=int(bid): self._on_ptt_bus_key_changed(bus_id))
+
+        for bid, cb in self._mute_bus_widgets.items():
+            cb.stateChanged.connect(lambda state, bus_id=int(bid): self._on_mute_bus_changed(bus_id, state))
 
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(100)
@@ -215,10 +525,67 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._server_lost_notified: bool = False
         self._was_control_connected: bool = False
 
+        self._global_ptt: Optional[_GlobalPttHotkeys] = None
+
         QtCore.QTimer.singleShot(0, self._start_device_refresh)
 
+    def _start_discovery_listener(self) -> None:
+        if self._discovery_listener is not None:
+            return
+        self._discovery_listener = DiscoveryListener(
+            on_update=self._on_discovery_update,
+        )
+        self._discovery_listener.start()
+        self._discovery_signal.start()
+
+    def _stop_discovery_listener(self) -> None:
+        self._discovery_signal.stop()
+        if self._discovery_listener is not None:
+            self._discovery_listener.stop()
+            self._discovery_listener = None
+
+    def _on_discovery_update(self, _servers) -> None:
+        self._discovery_pending_update = True
+
+    def _poll_discovery_updates(self) -> None:
+        if not self._discovery_pending_update:
+            return
+        self._discovery_pending_update = False
+        if self._discovery_listener is None:
+            return
+        servers = self._discovery_listener.get_servers()
+        self._refresh_discovered_combo(servers)
+
+    def _refresh_discovered_combo(self, servers: dict) -> None:
+        current_data = self._discovered_servers.currentData()
+        self._discovered_servers.blockSignals(True)
+        try:
+            self._discovered_servers.clear()
+            self._discovered_servers.addItem("(manual)", None)
+            for key in sorted(servers.keys()):
+                srv = servers[key]
+                label = f"{srv.server_name}  ({srv.ip}:{srv.audio_port})"
+                self._discovered_servers.addItem(label, key)
+            if current_data is not None:
+                i = self._discovered_servers.findData(current_data)
+                if i >= 0:
+                    self._discovered_servers.setCurrentIndex(i)
+        finally:
+            self._discovered_servers.blockSignals(False)
+
+    def _on_discovered_server_selected(self, index: int) -> None:
+        key = self._discovered_servers.currentData()
+        if key is None or self._discovery_listener is None:
+            return
+        servers = self._discovery_listener.get_servers()
+        srv = servers.get(str(key))
+        if srv is None:
+            return
+        self._server_ip.setText(srv.ip)
+        self._server_port.setValue(srv.audio_port)
+
     def _reset_total_config(self) -> None:
-        if self._client is not None:
+        if self._connected:
             QtWidgets.QMessageBox.warning(self, "Connected", "Disconnect first to reset config")
             return
 
@@ -231,6 +598,14 @@ class ClientWindow(QtWidgets.QMainWindow):
             != QtWidgets.QMessageBox.StandardButton.Yes
         ):
             return
+
+        # Fully stop persistent client (releases audio devices)
+        if self._client is not None:
+            try:
+                self._client.stop()
+            except Exception:
+                pass
+            self._client = None
 
         p = self._preset_path()
         try:
@@ -259,7 +634,12 @@ class ClientWindow(QtWidgets.QMainWindow):
         i = self._mode.findData("always_on")
         if i >= 0:
             self._mode.setCurrentIndex(i)
-        self._ptt_key.setText("")
+        try:
+            self._ptt_general_key.setKeySequence(QtGui.QKeySequence(""))
+            for edit in self._ptt_bus_keys.values():
+                edit.setKeySequence(QtGui.QKeySequence(""))
+        except Exception:
+            pass
 
         self._client_id.setText(str(stable_id))
 
@@ -283,13 +663,9 @@ class ClientWindow(QtWidgets.QMainWindow):
         loaded = read_json_file(p)
         return loaded if isinstance(loaded, dict) else {}
 
-    def _preset_atomic_write(self, data: dict) -> None:
-        p = self._preset_path()
-        atomic_write_json(p, data)
-
     def _preset_save(self) -> None:
         try:
-            self._preset_atomic_write(self._preset)
+            atomic_write_json(self._preset_path(), self._preset)
         except Exception:
             return
 
@@ -310,6 +686,64 @@ class ClientWindow(QtWidgets.QMainWindow):
             return
         self._preset_save()
 
+    def _on_ptt_general_key_changed(self, seq: QtGui.QKeySequence) -> None:
+        if str(seq.toString()) in {"Ctrl", "Alt", "Shift", "Meta"}:
+            try:
+                self._ptt_general_key.setKeySequence(QtGui.QKeySequence(""))
+            except Exception:
+                pass
+            return
+        try:
+            self._preset_set("ptt_general_key", str(seq.toString()))
+        except Exception:
+            return
+
+        try:
+            self._ptt_general_key.clearFocus()
+            self.centralWidget().setFocus()
+        except Exception:
+            pass
+
+    def _on_ptt_bus_key_changed(self, bus_id: int) -> None:
+        try:
+            if str(self._ptt_bus_keys[int(bus_id)].keySequence().toString()) in {"Ctrl", "Alt", "Shift", "Meta"}:
+                self._ptt_bus_keys[int(bus_id)].setKeySequence(QtGui.QKeySequence(""))
+                return
+        except Exception:
+            return
+        try:
+            cur = self._preset_get("ptt_bus_keys", {})
+            if not isinstance(cur, dict):
+                cur = {}
+            seq = self._ptt_bus_keys[int(bus_id)].keySequence()
+            cur[str(int(bus_id))] = str(seq.toString())
+            self._preset_set("ptt_bus_keys", cur)
+        except Exception:
+            return
+
+        try:
+            self._ptt_bus_keys[int(bus_id)].clearFocus()
+            self.centralWidget().setFocus()
+        except Exception:
+            pass
+
+    def _on_mute_bus_changed(self, bus_id: int, state: int) -> None:
+        muted = _is_checked(state)
+        try:
+            cur = self._preset_get("mute_buses", {})
+            if not isinstance(cur, dict):
+                cur = {}
+            cur[str(int(bus_id))] = bool(muted)
+            self._preset_set("mute_buses", cur)
+        except Exception:
+            pass
+
+        if self._client is not None:
+            try:
+                self._client.set_mute_bus(int(bus_id), bool(muted))
+            except Exception:
+                pass
+
     def _on_input_device_changed(self, _idx: int) -> None:
         try:
             dev = self._input_device.currentData()
@@ -329,7 +763,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             return
 
     def _reset_identity(self) -> None:
-        if self._client is not None:
+        if self._connected:
             QtWidgets.QMessageBox.warning(self, "Connected", "Disconnect first to reset identity")
             return
 
@@ -355,7 +789,6 @@ class ClientWindow(QtWidgets.QMainWindow):
         client_id = self._client_id.text().strip()
         name = self._name.text().strip()
         mode = str(self._mode.currentData() or "always_on")
-        ptt_key = self._ptt_key.text().strip()
 
         st = self._client.get_stats_snapshot() if self._client is not None else {}
 
@@ -371,7 +804,6 @@ class ClientWindow(QtWidgets.QMainWindow):
                 f"Server: {server_ip}:{server_port}",
                 f"Name: {name}",
                 f"Mode: {mode}",
-                f"PTT key: {ptt_key or '-'}",
                 f"Client UUID: {client_uuid or '-'}",
                 f"Client ID: {client_id or '-'}",
                 f"Control connected: {st.get('control_connected', False)}",
@@ -414,7 +846,28 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._reset_identity()
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        self._disconnect()
+        # Full stop: network + audio streams
+        try:
+            self._stop_discovery_listener()
+        except Exception:
+            pass
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+        try:
+            if self._global_ptt is not None:
+                self._global_ptt.stop()
+        except Exception:
+            pass
+        self._global_ptt = None
+        if self._client is not None:
+            try:
+                self._client.stop()
+            except Exception:
+                pass
+            self._client = None
+        self._connected = False
         super().closeEvent(event)
 
     def _start_device_refresh(self) -> None:
@@ -542,7 +995,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._output_device.blockSignals(False)
 
     def _connect(self) -> None:
-        if self._client is not None:
+        if self._connected:
             return
 
         server_ip = self._server_ip.text().strip()
@@ -579,25 +1032,20 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         name = self._name.text().strip()
         mode = str(self._mode.currentData() or "always_on")
-        ptt_key = self._ptt_key.text().strip()
-        if not ptt_key:
-            ptt_key = None
 
         self._preset_set("server_ip", server_ip)
         self._preset_set("server_port", int(self._server_port.value()))
         self._preset_set("name", name)
         self._preset_set("mode", mode)
-        self._preset_set("ptt_key", ptt_key or "")
 
         client_uuid = str(self._preset_get("client_uuid", ""))
 
         cfg = ClientConfig(
             server_ip=server_ip,
             server_port=int(server_port),
-            control_port=None,
+            control_port=int(server_port) + 1,
             name=name,
             mode=mode,
-            ptt_key=ptt_key,
             client_uuid=client_uuid,
             input_device=int(input_device),
             output_device=int(output_device),
@@ -606,15 +1054,72 @@ class ClientWindow(QtWidgets.QMainWindow):
             muted=self._mute.isChecked(),
             sidetone_enabled=self._sidetone.isChecked(),
             sidetone_gain_db=float(self._sidetone_gain.value()),
+            ptt_general_key=str(self._ptt_general_key.keySequence().toString()),
+            ptt_bus_keys=dict(self._preset_get("ptt_bus_keys", {}) or {}),
+            mute_buses=dict(self._preset_get("mute_buses", {}) or {}),
+        )
+
+        # Reuse existing client if audio devices haven't changed (avoids PortAudio reopen issues on Windows)
+        can_reuse = (
+            self._client is not None
+            and self._client.config.input_device == cfg.input_device
+            and self._client.config.output_device == cfg.output_device
         )
 
         try:
-            self._client = IntercomClient(client_id=client_id, config=cfg)
-            self._client.start()
+            if can_reuse:
+                # Update config fields that may have changed
+                self._client.config.server_ip = cfg.server_ip
+                self._client.config.server_port = cfg.server_port
+                self._client.config.control_port = int(cfg.server_port) + 1
+                self._client.config.name = cfg.name
+                self._client.config.mode = cfg.mode
+                self._client.config.client_uuid = cfg.client_uuid
+                self._client.config.muted = cfg.muted
+                self._client.config.ptt_general_key = cfg.ptt_general_key
+                self._client.config.ptt_bus_keys = cfg.ptt_bus_keys
+                self._client.config.mute_buses = cfg.mute_buses
+                self._client.set_input_gain_db(cfg.input_gain_db)
+                self._client.set_output_gain_db(cfg.output_gain_db)
+                self._client.set_muted(cfg.muted)
+                self._client.set_sidetone_enabled(cfg.sidetone_enabled)
+                self._client.set_sidetone_gain_db(cfg.sidetone_gain_db)
+                self._client.reconnect_network()
+            else:
+                # Full stop of old client if devices changed
+                if self._client is not None:
+                    try:
+                        self._client.stop()
+                    except Exception:
+                        pass
+                self._client = IntercomClient(client_id=client_id, config=cfg)
+                self._client.start()
         except Exception as e:
             self._client = None
+            self._connected = False
             QtWidgets.QMessageBox.critical(self, "Connect failed", str(e))
             return
+
+        self._connected = True
+
+        try:
+            if self._global_ptt is not None:
+                self._global_ptt.stop()
+            self._global_ptt = _GlobalPttHotkeys(self)
+            self._global_ptt.start()
+        except Exception as e:
+            self._global_ptt = None
+            QtWidgets.QMessageBox.warning(self, "PTT", f"Global hotkeys failed to start: {e}")
+
+        try:
+            self._ptt_general_key.setEnabled(False)
+            for edit in self._ptt_bus_keys.values():
+                edit.setEnabled(False)
+            self._ptt_general_clear.setEnabled(False)
+            for b in self._ptt_bus_clear.values():
+                b.setEnabled(False)
+        except Exception:
+            pass
 
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
@@ -623,19 +1128,40 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._hp_gain.setEnabled(True)
         self._sidetone.setEnabled(True)
         self._sidetone_gain.setEnabled(True)
+
+        for cb in self._mute_bus_widgets.values():
+            cb.setEnabled(True)
+
         self._timer.start()
 
     def _disconnect(self) -> None:
-        if self._client is None:
+        if not self._connected:
             return
         self._kick_notified = False
         self._server_lost_notified = False
         self._was_control_connected = False
         try:
             self._timer.stop()
-            self._client.stop()
+            try:
+                if self._client is not None:
+                    self._client.set_ptt_general(False)
+                    for bid in self._ptt_bus_keys.keys():
+                        self._client.set_ptt_bus(int(bid), False)
+            except Exception:
+                pass
+
+            try:
+                if self._global_ptt is not None:
+                    self._global_ptt.stop()
+            except Exception:
+                pass
+            self._global_ptt = None
+
+            # Only disconnect network, keep audio streams alive for fast reconnect
+            if self._client is not None:
+                self._client.disconnect_network()
         finally:
-            self._client = None
+            self._connected = False
             self._connect_btn.setEnabled(True)
             self._disconnect_btn.setEnabled(False)
             self._mute.setEnabled(False)
@@ -643,8 +1169,27 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._hp_gain.setEnabled(False)
             self._sidetone.setEnabled(False)
             self._sidetone_gain.setEnabled(False)
-            self._in_vu.setValue(0)
-            self._out_vu.setValue(0)
+            self._in_vu.set_level(-60.0)
+            self._out_vu.set_level(-60.0)
+
+            try:
+                self._ptt_general_key.setEnabled(True)
+                for edit in self._ptt_bus_keys.values():
+                    edit.setEnabled(True)
+                self._ptt_general_clear.setEnabled(True)
+                for b in self._ptt_bus_clear.values():
+                    b.setEnabled(True)
+            except Exception:
+                pass
+
+            for cb in self._mute_bus_widgets.values():
+                cb.setEnabled(False)
+
+            for cb in self._route_bus_widgets.values():
+                try:
+                    cb.setChecked(False)
+                except Exception:
+                    pass
 
     def _on_mute_changed(self, state: int) -> None:
         if self._client is None:
@@ -692,18 +1237,27 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._disconnect()
             return
 
-        self._in_vu.setValue(_db_to_progress(st.get("in_vu_dbfs", -60.0)))
-        self._out_vu.setValue(_db_to_progress(st.get("out_vu_dbfs", -60.0)))
-
-        muted = bool(st.get("muted", False))
         try:
-            self._mute.blockSignals(True)
-            try:
-                self._mute.setChecked(muted)
-            finally:
-                self._mute.blockSignals(False)
+            muted = bool(st.get("muted", False))
+            if bool(self._mute.isChecked()) != bool(muted):
+                self._mute.blockSignals(True)
+                try:
+                    self._mute.setChecked(bool(muted))
+                finally:
+                    self._mute.blockSignals(False)
         except Exception:
             pass
+
+        self._in_vu.set_level(float(st.get("in_vu_dbfs", -60.0)))
+        self._out_vu.set_level(float(st.get("out_vu_dbfs", -60.0)))
+
+        routes = st.get("routes")
+        if isinstance(routes, dict):
+            for bid, cb in self._route_bus_widgets.items():
+                try:
+                    cb.setChecked(bool(routes.get(str(int(bid)), False)))
+                except Exception:
+                    pass
 
 
 def run_gui(
@@ -713,6 +1267,7 @@ def run_gui(
     output_device: int = -1,
 ) -> int:
     app = QtWidgets.QApplication(sys.argv)
+    apply_theme(app)
     win = ClientWindow()
 
     if server_ip:

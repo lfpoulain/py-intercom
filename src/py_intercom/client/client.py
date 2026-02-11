@@ -25,7 +25,6 @@ class ClientConfig:
 
     name: str = ""
     mode: str = "always_on"
-    ptt_key: Optional[str] = None
     client_uuid: str = ""
     input_device: Optional[int] = None
     output_device: Optional[int] = None
@@ -34,6 +33,10 @@ class ClientConfig:
     muted: bool = False
     sidetone_enabled: bool = False
     sidetone_gain_db: float = -12.0
+
+    ptt_general_key: Optional[str] = None
+    ptt_bus_keys: Optional[dict] = None
+    mute_buses: Optional[dict] = None
 
 
 class IntercomClient:
@@ -107,14 +110,25 @@ class IntercomClient:
         self._in_stream: Optional[sd.InputStream] = None
         self._out_stream: Optional[sd.OutputStream] = None
 
+        self._rx_thread: Optional[threading.Thread] = None
+
         self._ctrl_sock: Optional[socket.socket] = None
         self._ctrl_thread: Optional[threading.Thread] = None
         self._ctrl_send_lock = threading.Lock()
         self._ctrl_connected: bool = False
         self._ctrl_last_rx_monotonic: float = 0.0
         self._ctrl_last_tx_monotonic: float = 0.0
-        self._ctrl_remote_muted: Optional[bool] = None
         self._ctrl_routes: Optional[dict] = None
+
+        self._ptt_general: bool = False
+        self._ptt_buses: dict[int, bool] = {}
+        self._mute_buses: dict[int, bool] = {}
+        try:
+            if isinstance(self.config.mute_buses, dict):
+                for k, v in self.config.mute_buses.items():
+                    self._mute_buses[int(k)] = bool(v)
+        except Exception:
+            self._mute_buses = {}
 
     def get_stats_snapshot(self) -> dict:
         with self._state_lock:
@@ -169,10 +183,28 @@ class IntercomClient:
                 "control_connected": bool(self._ctrl_connected),
                 "control_age_s": ctrl_age_s,
                 "control_tx_age_s": ctrl_tx_age_s,
+                "ptt_general": bool(self._ptt_general),
+                "ptt_buses": dict(self._ptt_buses),
+                "mute_buses": dict(self._mute_buses),
+                "routes": dict(self._ctrl_routes or {}),
                 "name": str(self.config.name or ""),
                 "mode": str(self.config.mode or ""),
-                "ptt_key": self.config.ptt_key,
             }
+
+    def set_ptt_general(self, active: bool) -> None:
+        with self._state_lock:
+            self._ptt_general = bool(active)
+        self._control_send_state()
+
+    def set_ptt_bus(self, bus_id: int, active: bool) -> None:
+        with self._state_lock:
+            self._ptt_buses[int(bus_id)] = bool(active)
+        self._control_send_state()
+
+    def set_mute_bus(self, bus_id: int, muted: bool) -> None:
+        with self._state_lock:
+            self._mute_buses[int(bus_id)] = bool(muted)
+        self._control_send_state()
 
     def set_muted(self, muted: bool, from_control: bool = False) -> None:
         with self._state_lock:
@@ -198,6 +230,16 @@ class IntercomClient:
             self._sidetone_gain_db = float(gain_db)
 
     def start(self) -> None:
+        try:
+            self._stop.clear()
+        except Exception:
+            pass
+
+        try:
+            sd.stop()
+        except Exception:
+            pass
+
         logger.info(
             "client starting: server={}:{} in_dev={} out_dev={} sr={} frame={}",
             self.config.server_ip,
@@ -208,8 +250,8 @@ class IntercomClient:
             FRAME_SAMPLES,
         )
 
-        rx = threading.Thread(target=self._rx_loop, name="udp-rx", daemon=True)
-        rx.start()
+        self._rx_thread = threading.Thread(target=self._rx_loop, name="udp-rx", daemon=True)
+        self._rx_thread.start()
 
         self._ctrl_thread = threading.Thread(target=self._control_loop, name="ctrl", daemon=True)
         self._ctrl_thread.start()
@@ -220,29 +262,109 @@ class IntercomClient:
         self._in_stream = self._open_input_stream()
         self._in_stream.start()
 
-    def stop(self) -> None:
+    def _stop_network(self) -> None:
+        """Tear down control TCP and network threads. UDP socket is kept alive."""
         self._stop.set()
-        try:
-            if self._in_stream is not None:
-                self._in_stream.stop()
-                self._in_stream.close()
-        except Exception:
-            pass
-        try:
-            if self._out_stream is not None:
-                self._out_stream.stop()
-                self._out_stream.close()
-        except Exception:
-            pass
+
         try:
             if self._ctrl_sock is not None:
                 self._ctrl_sock.close()
         except Exception:
             pass
+        self._ctrl_sock = None
+
+        # Do NOT close self._sock (UDP) here — it stays alive so the
+        # same ephemeral port is reused on reconnect (Windows firewall).
+
+        try:
+            if self._ctrl_thread is not None and self._ctrl_thread.is_alive():
+                self._ctrl_thread.join(timeout=2.0)
+        except Exception:
+            pass
+        self._ctrl_thread = None
+
+        try:
+            if self._rx_thread is not None and self._rx_thread.is_alive():
+                self._rx_thread.join(timeout=2.0)
+        except Exception:
+            pass
+        self._rx_thread = None
+
+        self._ctrl_connected = False
+
+    def disconnect_network(self) -> None:
+        """Disconnect from server (network only). Audio streams stay alive."""
+        self._stop_network()
+
+    def reconnect_network(self) -> None:
+        """Reconnect to server (network only). Audio streams and UDP socket stay alive."""
+        self._stop_network()
+
+        # Reuse existing UDP socket (same ephemeral port — avoids Windows firewall issues)
+        self._server_addr = (self.config.server_ip, int(self.config.server_port))
+
+        # Reset audio buffers and phase to avoid stale data
+        with self._state_lock:
+            self._capture_buf = np.zeros((0,), dtype=np.float32)
+            self._in_phase = 0.0
+            self._playback_buf = np.zeros((0,), dtype=np.float32)
+            self._out_phase = 0.0
+            self._sidetone_buf = np.zeros((0,), dtype=np.float32)
+            self._sidetone_phase = 0.0
+
+        # Reset network state and diagnostic counters
+        self._stop.clear()
+        self._kicked = False
+        self._kick_message = ""
+        self._ctrl_connected = False
+        self._ctrl_routes = None
+        self._tx_packets = 0
+        self._tx_udp_sent = 0
+        self._rx_packets = 0
+        self._tx_socket_errors = 0
+        self._rx_socket_errors = 0
+
+        # Restart network threads
+        self._rx_thread = threading.Thread(target=self._rx_loop, name="udp-rx", daemon=True)
+        self._rx_thread.start()
+
+        self._ctrl_thread = threading.Thread(target=self._control_loop, name="ctrl", daemon=True)
+        self._ctrl_thread.start()
+
+        logger.info("network reconnected to {}:{}", self.config.server_ip, self.config.server_port)
+
+    def stop(self) -> None:
+        """Full stop: network + audio streams + UDP socket."""
+        self._stop_network()
+
+        # Close UDP socket only on full stop
         try:
             self._sock.close()
         except Exception:
             pass
+
+        try:
+            if self._in_stream is not None:
+                try:
+                    self._in_stream.abort()
+                except Exception:
+                    pass
+                self._in_stream.stop()
+                self._in_stream.close()
+        except Exception:
+            pass
+        self._in_stream = None
+        try:
+            if self._out_stream is not None:
+                try:
+                    self._out_stream.abort()
+                except Exception:
+                    pass
+                self._out_stream.stop()
+                self._out_stream.close()
+        except Exception:
+            pass
+        self._out_stream = None
 
     def _control_send(self, sock: socket.socket, msg: dict) -> None:
         data = (json.dumps(msg, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
@@ -253,7 +375,17 @@ class IntercomClient:
         sock = self._ctrl_sock
         if sock is None or not self._ctrl_connected:
             return
-        msg: dict = {"type": "state", "client_id": int(self.client_id)}
+        with self._state_lock:
+            ptt_general = bool(self._ptt_general)
+            ptt_buses = dict(self._ptt_buses)
+            mute_buses = dict(self._mute_buses)
+        msg: dict = {
+            "type": "state",
+            "client_id": int(self.client_id),
+            "ptt_general": bool(ptt_general),
+            "ptt_buses": dict(ptt_buses),
+            "mute_buses": dict(mute_buses),
+        }
         if muted is not None:
             msg["muted"] = bool(muted)
         try:
@@ -261,6 +393,22 @@ class IntercomClient:
         except Exception as e:
             logger.debug("control send state failed: {}", e)
             return
+
+    def _can_transmit_audio(self) -> bool:
+        with self._state_lock:
+            if bool(self._muted):
+                return False
+            mode = str(self.config.mode or "always_on")
+            ptt_general = bool(self._ptt_general)
+            ptt_buses = dict(self._ptt_buses)
+
+        if mode != "ptt":
+            return True
+
+        if ptt_general:
+            return True
+
+        return any(bool(v) for v in ptt_buses.values())
 
     def _control_handle_msg(self, msg: dict) -> None:
         mtype = str(msg.get("type") or "").lower()
@@ -272,7 +420,7 @@ class IntercomClient:
             except Exception:
                 pass
             try:
-                self.stop()
+                self.disconnect_network()
             except Exception:
                 pass
             return
@@ -284,7 +432,6 @@ class IntercomClient:
             if isinstance(cfg, dict):
                 if "muted" in cfg:
                     try:
-                        self._ctrl_remote_muted = bool(cfg.get("muted"))
                         self.set_muted(bool(cfg.get("muted")), from_control=True)
                     except Exception:
                         pass
@@ -298,12 +445,11 @@ class IntercomClient:
 
     def _control_loop(self) -> None:
         backoff_s = 1.0
-        buf = b""
 
         while not self._stop.is_set():
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(3.0)
+                sock.settimeout(1.0)
                 sock.connect((self.config.server_ip, int(self.config.control_port or 0)))
                 sock.settimeout(0.5)
                 self._ctrl_sock = sock
@@ -318,9 +464,10 @@ class IntercomClient:
                     "client_uuid": str(self.config.client_uuid or ""),
                     "name": str(self.config.name or ""),
                     "mode": str(self.config.mode or "always_on"),
-                    "ptt_key": self.config.ptt_key,
                 }
                 self._control_send(sock, hello)
+
+                self._control_send_state(muted=bool(self._muted))
 
                 buf = b""
                 while not self._stop.is_set():
@@ -454,7 +601,7 @@ class IntercomClient:
 
         if dev_info is not None:
             logger.debug(
-                "output device: name=%r hostapi=%r max_out=%s default_sr=%s",
+                "output device: name={} hostapi={} max_out={} default_sr={}",
                 dev_info.get("name"),
                 dev_info.get("hostapi"),
                 dev_info.get("max_output_channels"),
@@ -532,13 +679,16 @@ class IntercomClient:
         if status:
             logger.debug("audio in status: {}", status)
 
+        # Network disconnected — keep callback alive but skip processing
+        if self._stop.is_set():
+            return
+
+        if not self._can_transmit_audio():
+            return
+
         with self._state_lock:
-            muted = self._muted
             gain_db = self._input_gain_db
             in_sr = int(self._in_samplerate)
-
-        if muted:
-            return
 
         if indata.ndim == 1:
             mono = indata.astype(np.float32, copy=False)
@@ -549,8 +699,6 @@ class IntercomClient:
                 mono = np.mean(indata.astype(np.float32, copy=False), axis=1)
 
         mono = apply_gain_db(mono, gain_db)
-
-        mono = mono.astype(np.float32, copy=False)
 
         with self._state_lock:
             if self._capture_buf.size == 0:
@@ -675,7 +823,6 @@ class IntercomClient:
             logger.debug("audio out status: {}", status)
 
         with self._state_lock:
-            out_channels = self._out_channels
             out_sr = int(self._out_samplerate)
             phase = float(self._out_phase)
             src = self._playback_buf

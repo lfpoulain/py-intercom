@@ -8,3 +8,4 @@ Flask==2.3.2
 flask-socketio==5.3.4
 python-socketio==5.9.0
 PySide6>=6.7.0
+qt-material>=2.14
