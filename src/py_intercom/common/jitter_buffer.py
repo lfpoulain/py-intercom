@@ -226,6 +226,27 @@ class OpusPacketJitterBuffer:
             if len(self._buf) == 0:
                 return None
 
+            # Find nearest frame ahead of expected_seq
+            nearest_key = None
+            nearest_dist = None
+            for k in self._buf.keys():
+                d = _seq_distance(int(k), exp)
+                if d > 0 and (nearest_dist is None or d < nearest_dist):
+                    nearest_dist = d
+                    nearest_key = int(k)
+
+            if nearest_key is None:
+                return None
+
+            if nearest_dist > int(self.start_frames):
+                # Large gap: fast-forward to nearest available frame
+                out = self._buf.pop(nearest_key)
+                self._expected_seq = (nearest_key + 1) & 0xFFFFFFFF
+                self.stats.played += 1
+                self.stats.missing += int(nearest_dist)
+                return out
+
+            # Small gap: PLC crawl if enough buffer depth
             max_ahead = max(_seq_distance(int(k), exp) for k in self._buf.keys())
             if int(max_ahead) >= int(self.start_frames):
                 self._expected_seq = (exp + 1) & 0xFFFFFFFF
