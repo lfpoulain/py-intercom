@@ -10,6 +10,5 @@ flask-socketio>=5.3.6
 python-socketio>=5.11.0
 python-engineio>=4.9.0
 simple-websocket>=1.0.0
-cryptography>=42.0.0
 PySide6>=6.7.0
 qt-material>=2.14

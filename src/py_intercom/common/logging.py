@@ -13,3 +13,5 @@ def setup_logging(debug: bool) -> None:
 
     if debug:
         logger.add(sys.stderr, level="DEBUG")
+    else:
+        logger.add(sys.stderr, level="WARNING")

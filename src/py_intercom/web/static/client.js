@@ -265,6 +265,14 @@
     }
     logLine(`audio: sr=${audioCtx.sampleRate} state=${audioCtx.state}`);
 
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
+      try { await audioCtx.close(); } catch (_) {}
+      audioCtx = null;
+      throw new Error(
+        "Micro indisponible: navigateur en HTTP non sécurisé. Ouvre l'UI en HTTPS (ou localhost) puis réessaie."
+      );
+    }
+
     try {
       micStream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false }

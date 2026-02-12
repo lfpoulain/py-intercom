@@ -93,7 +93,7 @@ class JitterBuffer:
 
             if len(self._buf) > int(self.max_frames):
                 if self._expected_seq is None:
-                    key = sorted(self._buf.keys())[0]
+                    key = min(self._buf.keys())
                     del self._buf[key]
                 else:
                     exp = int(self._expected_seq)
@@ -105,7 +105,7 @@ class JitterBuffer:
             if not self._started:
                 if len(self._buf) < int(self.start_frames):
                     return None
-                key = sorted(self._buf.keys())[0]
+                key = min(self._buf.keys())
                 self._expected_seq = int(key)
                 self._started = True
 
@@ -196,7 +196,7 @@ class OpusPacketJitterBuffer:
 
             if len(self._buf) > int(self.max_frames):
                 if self._expected_seq is None:
-                    key = sorted(self._buf.keys())[0]
+                    key = min(self._buf.keys())
                     del self._buf[key]
                 else:
                     exp = int(self._expected_seq)
@@ -208,7 +208,7 @@ class OpusPacketJitterBuffer:
             if not self._started:
                 if len(self._buf) < int(self.start_frames):
                     return None
-                key = sorted(self._buf.keys())[0]
+                key = min(self._buf.keys())
                 self._expected_seq = int(key)
                 self._started = True
 

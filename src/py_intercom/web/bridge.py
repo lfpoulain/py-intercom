@@ -130,6 +130,16 @@ class IntercomBridge:
         except Exception:
             pass
 
+        for t in (self._ctrl_thread, self._rx_thread, self._playout_thread):
+            if t is not None and t.is_alive():
+                try:
+                    t.join(timeout=2.0)
+                except Exception:
+                    pass
+        self._ctrl_thread = None
+        self._rx_thread = None
+        self._playout_thread = None
+
     def _send_udp_frame_f32(self, frame_f32: np.ndarray) -> None:
         if frame_f32.shape[0] != int(FRAME_SAMPLES):
             if frame_f32.shape[0] < int(FRAME_SAMPLES):
@@ -245,6 +255,7 @@ class IntercomBridge:
 
                 self._ctrl_sock = sock
                 self._ctrl_connected = True
+                backoff_s = 1.0
 
                 hello = {
                     "type": "hello",
@@ -306,6 +317,7 @@ class IntercomBridge:
                 break
 
             time.sleep(backoff_s)
+            backoff_s = min(backoff_s * 2.0, 10.0)
 
     def _rx_loop(self) -> None:
         while not self._stop.is_set():

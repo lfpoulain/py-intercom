@@ -314,6 +314,13 @@ class IntercomClient:
 
         self._ctrl_connected = False
 
+    def _deferred_disconnect(self) -> None:
+        """Disconnect from a separate thread (used by kick handler to avoid self-join deadlock)."""
+        try:
+            self.disconnect_network()
+        except Exception:
+            pass
+
     def disconnect_network(self) -> None:
         """Disconnect from server (network only). Audio streams stay alive."""
         self._stop_network()
@@ -450,10 +457,10 @@ class IntercomClient:
                     self._kick_message = str(msg.get("message") or "Tu as été kick")
             except Exception:
                 pass
-            try:
-                self.disconnect_network()
-            except Exception:
-                pass
+            # Defer disconnect to a separate thread to avoid deadlock:
+            # we are ON the control thread, so calling disconnect_network()
+            # here would try to join the control thread from itself.
+            threading.Thread(target=self._deferred_disconnect, daemon=True).start()
             return
         if mtype in ("welcome", "update"):
             cfg = msg.get("config") if isinstance(msg.get("config"), dict) else None
@@ -487,6 +494,7 @@ class IntercomClient:
                 self._ctrl_connected = True
                 self._ctrl_last_rx_monotonic = time.monotonic()
                 self._ctrl_last_tx_monotonic = time.monotonic()
+                backoff_s = 1.0
 
                 hello = {
                     "type": "hello",
@@ -547,6 +555,7 @@ class IntercomClient:
             if self._stop.is_set():
                 break
             time.sleep(backoff_s)
+            backoff_s = min(backoff_s * 2.0, 10.0)
 
     def _open_input_stream(self) -> sd.InputStream:
         dev_info = None
@@ -797,7 +806,10 @@ class IntercomClient:
                 continue
             except OSError:
                 self._rx_socket_errors += 1
-                return
+                if self._stop.is_set():
+                    return
+                time.sleep(0.1)
+                continue
 
             try:
                 pkt = unpack_audio_packet(data)

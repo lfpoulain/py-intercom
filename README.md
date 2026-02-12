@@ -28,6 +28,7 @@ Les scripts dans `lunch script/` créent automatiquement le virtualenv `.venv` e
 | `lunch script\lancer_client_gui.bat` | Client en mode GUI (sans console) |
 | `lunch script\lancer_serveur_debug.bat` | Serveur en mode GUI + console avec logs debug |
 | `lunch script\lancer_client_debug.bat` | Client en mode GUI + console avec logs debug |
+| `lunch script\lancer_web.bat` | Client Web (HTTPS, auto-détection IP LAN) |
 
 ## Lancement manuel
 
@@ -87,19 +88,28 @@ En cas de crash au démarrage (mode windowed), un fichier est écrit ici:
 
 ### Client Web (Plateau)
 
-Pour les personnes sur plateau sans le client Python :
+Pour les personnes sur plateau sans le client Python (PC, tablette Android, iPad) :
 
 ```powershell
-.\.venv\Scripts\python run_web.py --port 8000
+# Défaut : HTTPS adhoc, port 8443, IP LAN auto-détectée
+.\.venv\Scripts\python run_web.py
+
+# Personnalisé
+.\.venv\Scripts\python run_web.py --host 0.0.0.0 --port 8000 --ssl-adhoc --debug
 ```
 
-Ouvrir `http://<ip>:8000/` dans un navigateur. Options : `--host`, `--port`, `--debug`.
+Ouvrir `https://<ip>:8443/` dans un navigateur.
+
+Options : `--host`, `--port`, `--debug`, `--ssl-adhoc`, `--ssl-cert`, `--ssl-key`.
+
+> **Android / iOS** : HTTPS est obligatoire pour l'accès micro. Le certificat auto-signé (`--ssl-adhoc`) déclenche un avertissement navigateur à accepter une fois (Avancé → Continuer). Les serveurs intercom sont détectés automatiquement via le dropdown "Détection auto".
 
 ## Ports
 
 - Audio (UDP): `5000` (par défaut)
 - Contrôle (TCP): `5001` (par défaut)
-- Client Web (HTTP): `8000` (par défaut)
+- Discovery (UDP broadcast): `5002` (par défaut)
+- Client Web (HTTPS): `8443` (par défaut)
 
 ## Presets
 

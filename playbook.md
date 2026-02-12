@@ -214,7 +214,7 @@ Note : le `requirements.txt` contient aussi des dépendances liées à une piste
   - codec Opus
   - utilitaires (devices, json I/O, logging)
   - `discovery.py` : auto-discovery LAN (beacon + listener)
-  - `theme.py` : application du thème qt-material + widget `VuMeter` (barre colorée vert/jaune/rouge)
+  - `theme.py` : application du thème qt-material + widgets `VuMeter` (barre colorée vert/jaune/rouge) et `StatusIndicator` (pastille en ligne/hors ligne)
 
 - `py_intercom/server/`
   - `IntercomServer` : réception UDP, mix, broadcast, contrôle TCP, presets
@@ -250,14 +250,15 @@ Note : le `requirements.txt` contient aussi des dépendances liées à une piste
 ## 8) Workflow recommandé (opérationnel)
 
 1. Lancer le serveur (GUI) sur la machine régie.
-2. Configurer les **outputs** (device + bus) côté serveur.
+2. Configurer les **outputs** (device + bus) dans la section Outputs (Refresh devices, sélection device/bus, Add output).
 3. Lancer un client (GUI), renseigner IP/port du serveur, sélectionner devices input/output, puis se connecter.
-4. Sur l’UI serveur :
-   - ajuster les routes (cases bus)
+4. Sur l'UI serveur :
+   - la table clients affiche un **indicateur de statut** (pastille verte = en ligne, rouge = hors ligne) ; les clients déconnectés sont grisés
+   - ajuster les routes (cases Regie / Plateau / VMix)
    - régler mute/gain par client
-5. Utiliser le bouton `i` côté client/serveur pour diagnostiquer rapidement (ports, stats, buffers, underflows, control age).
+5. Utiliser le bouton **ℹ** (en bas à droite) côté client/serveur pour diagnostiquer rapidement (ports, stats, buffers, underflows, control age, adresses clients).
 
-Conseil : garder un device de sortie “VMix” séparé (VB-Cable) en output serveur si besoin d’intégration VMix.
+Conseil : garder un device de sortie "VMix" séparé (VB-Cable) en output serveur si besoin d'intégration VMix.
 
 ## 9) Latence end-to-end estimée (LAN)
 
@@ -298,17 +299,33 @@ Conseil : garder un device de sortie “VMix” séparé (VB-Cable) en output se
 
 ## 12) Client web (plateau)
 
-Un client léger en **WebAudio + WebSocket** pour les personnes sur plateau qui n'ont pas le client Python.
+Un client léger en **WebAudio + WebSocket** pour les personnes sur plateau qui n'ont pas le client Python. Fonctionne sur PC, tablette Android et iPad.
 
 ### Architecture
 
 ```bash
-Navigateur  ←Socket.IO→  Flask/SocketIO (bridge)  ←UDP/TCP→  IntercomServer
+Navigateur  ←Socket.IO (wss)→  Flask/SocketIO (bridge)  ←UDP/TCP→  IntercomServer
 ```
 
 - **`IntercomBridge`** (`web/bridge.py`) : client headless qui gère UDP audio (Opus encode/decode) et TCP control vers le serveur intercom.
-- **`app.py`** : application Flask + Socket.IO qui relaie audio PCM (int16 LE) et messages de contrôle entre le navigateur et le bridge.
+- **`app.py`** : application Flask + Socket.IO qui relaie audio PCM (int16 LE) et messages de contrôle entre le navigateur et le bridge. Intègre un `DiscoveryListener` pour la détection automatique des serveurs.
 - **Frontend** (`client.js`) : capture micro via WebAudio `ScriptProcessor`, playback via `ScriptProcessor` + `GainNode`, communication via Socket.IO.
+
+### HTTPS (obligatoire pour mobile)
+
+Les navigateurs mobiles (Android, iOS) **bloquent `getUserMedia`** (accès micro) sur les connexions HTTP non sécurisées. Le serveur web supporte HTTPS :
+
+- **`--ssl-adhoc`** : certificat auto-signé généré à la volée (nécessite `cryptography`). Le navigateur affichera un avertissement à accepter une fois.
+- **`--ssl-cert` + `--ssl-key`** : certificat fourni (ex: via `mkcert` pour un certificat local de confiance).
+
+Par défaut, `run_web.py` (sans arguments) lance en **HTTPS adhoc** sur le port **8443** avec détection automatique de l'IP LAN.
+
+### Auto-discovery
+
+- **Backend** : un `DiscoveryListener` écoute les beacons UDP sur le port 5002.
+- **REST** : endpoint `GET /api/discovery` retourne la liste des serveurs détectés en JSON.
+- **Socket.IO** : événement `discovery` émis au connect avec la liste courante.
+- **Frontend** : dropdown "Détection auto" peuplé par polling toutes les 3s. Sélectionner un serveur remplit automatiquement IP et port. Si le champ IP est vide, le premier serveur détecté est auto-sélectionné.
 
 ### Pipeline audio
 
@@ -317,24 +334,38 @@ Navigateur  ←Socket.IO→  Flask/SocketIO (bridge)  ←UDP/TCP→  IntercomSer
 
 ### Fonctionnalités
 
-- **PTT** : bouton + raccourci `Espace`
-- **Mute** : bouton + raccourci `M`
+- **PTT** : bouton + raccourci `Espace` (touch-friendly sur mobile)
+- **Mute** : bouton avec icônes toggle (mic/mic-off) + raccourci `M`
 - **Mode** : PTT ou Always-on (modifiable en cours de connexion)
 - **Volume** : slider 0–150% via `GainNode`
-- **VU mètres** : TX et RX (peak decay)
-- **Indicateur de connexion** : dot vert/gris
+- **VU mètres** : TX (vert) et RX (bleu) avec peak decay
+- **Indicateur de connexion** : dot vert/gris + label texte
+- **Auto-discovery** : dropdown serveurs détectés + bouton rafraîchir
 - **Persistance** : UUID client + settings (IP, port, nom, mode, volume) en `localStorage`
 - **Jitter buffer** : `OpusPacketJitterBuffer` côté bridge (identique au client Python)
+- **Mobile** : `AudioContext.resume()` pour débloquer l'audio sur Android/iOS, détection de contexte non sécurisé avec message explicite, responsive CSS, boutons tactiles
+
+### Interface
+
+- Design dark avec tokens CSS (surfaces, bordures, accents)
+- Layout card-based : carte Connexion, carte Audio, carte Journal
+- Icônes SVG inline (pas de dépendance externe)
+- Font Inter (Google Fonts)
+- Media query mobile (`max-width: 560px`) : boutons plus grands, inputs `font-size: 16px` (évite le zoom auto iOS/Android)
 
 ### Lancement
 
 ```powershell
-.\.venv\Scripts\python run_web.py --port 8000
+# Défaut : HTTPS adhoc, port 8443, IP LAN auto-détectée
+.\.venv\Scripts\python run_web.py
+
+# Personnalisé
+.\.venv\Scripts\python run_web.py --host 0.0.0.0 --port 8000 --ssl-adhoc --debug
 ```
 
-Options : `--host`, `--port`, `--debug`.
+Options : `--host`, `--port`, `--debug`, `--ssl-adhoc`, `--ssl-cert`, `--ssl-key`.
 
-Le client web est accessible à `http://<ip>:8000/`.
+Le client web est accessible à `https://<ip>:8443/` (HTTPS).
 
 ### Latence supplémentaire (vs client Python)
 

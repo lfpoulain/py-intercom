@@ -6,10 +6,9 @@ import socket
 import threading
 import time
 import zlib
-from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Deque, Dict, Optional, Set, Tuple
+from typing import Dict, Optional, Set, Tuple
 
 import numpy as np
 import sounddevice as sd
@@ -27,7 +26,6 @@ from ..common.packets import unpack_audio_packet, pack_audio_packet
 @dataclass
 class ClientState:
     addr: Tuple[str, int]
-    frames: Deque[np.ndarray]
     last_packet_monotonic: float
     decoder: OpusDecoder = field(default_factory=OpusDecoder, repr=False)
     encoder: OpusEncoder = field(default_factory=OpusEncoder, repr=False)
@@ -115,9 +113,6 @@ class IntercomServer:
         self._sock.bind((self.bind_ip, self.port))
         self._sock.settimeout(0.5)
 
-        self._decoder = OpusDecoder()
-        self._encoder = OpusEncoder()
-
         self._opus_ok: bool = True
         self._opus_err: str = ""
         self._opuslib_version: str = ""
@@ -125,8 +120,10 @@ class IntercomServer:
             import opuslib  # type: ignore
 
             self._opuslib_version = str(getattr(opuslib, "__version__", ""))
-            test_payload = self._encoder.encode(np.zeros((FRAME_SAMPLES,), dtype=np.float32))
-            test_frame = self._decoder.decode(test_payload)
+            _test_enc = OpusEncoder()
+            _test_dec = OpusDecoder()
+            test_payload = _test_enc.encode(np.zeros((FRAME_SAMPLES,), dtype=np.float32))
+            test_frame = _test_dec.decode(test_payload)
             self._opus_ok = bool(getattr(test_frame, "shape", None) is not None and int(test_frame.shape[0]) == int(FRAME_SAMPLES))
         except Exception as e:
             self._opus_ok = False
@@ -275,7 +272,7 @@ class IntercomServer:
                         continue
                     st = self._clients.get(int(cid))
                     if st is None:
-                        st = ClientState(addr=("", 0), frames=deque(maxlen=10), last_packet_monotonic=now)
+                        st = ClientState(addr=("", 0), last_packet_monotonic=now)
                         self._clients[int(cid)] = st
                     st.client_uuid = u
                     if isinstance(c, dict):
@@ -814,7 +811,7 @@ class IntercomServer:
                     with self._lock:
                         st = self._clients.get(int(client_id))
                         if st is None:
-                            st = ClientState(addr=(str(addr[0]), 0), frames=deque(maxlen=10), last_packet_monotonic=now)
+                            st = ClientState(addr=(str(addr[0]), 0), last_packet_monotonic=now)
                             self._clients[int(client_id)] = st
                         st.name = name
                         st.mode = mode
@@ -897,13 +894,15 @@ class IntercomServer:
 
         # Re-open the stream to apply device changes.
         if self._running and not self._stop.is_set():
+            with out.lock:
+                old_stream = out.stream
+                out.stream = None
             try:
-                if out.stream is not None:
-                    out.stream.stop()
-                    out.stream.close()
+                if old_stream is not None:
+                    old_stream.stop()
+                    old_stream.close()
             except Exception:
                 pass
-            out.stream = None
             self._open_output_stream(out)
 
         self._autosave_preset()
@@ -1096,8 +1095,10 @@ class IntercomServer:
         if status:
             logger.debug("audio status: {}", status)
 
-        with self._lock:
+        try:
             out = self._outputs.get(int(output_id))
+        except Exception:
+            out = None
 
         if out is None:
             outdata[:] = 0.0
@@ -1115,7 +1116,6 @@ class IntercomServer:
                     out.buf = out.buf[take:]
                 else:
                     y = np.zeros((0,), dtype=np.float32)
-                    out.underflows += 1
 
                 if take < n:
                     out.underflows += 1
@@ -1173,7 +1173,9 @@ class IntercomServer:
                 out.vu_dbfs = -60.0
 
         y = np.clip(y.astype(np.float32, copy=False), -1.0, 1.0)
-        if outdata.ndim == 1 or outdata.shape[1] == 1:
+        if outdata.ndim == 1:
+            outdata[:] = y
+        elif outdata.shape[1] == 1:
             outdata[:] = y.reshape(int(frames), 1)
         else:
             outdata[:] = np.repeat(y.reshape(int(frames), 1), repeats=outdata.shape[1], axis=1)
@@ -1196,7 +1198,10 @@ class IntercomServer:
                 continue
             except OSError:
                 self._rx_socket_errors += 1
-                return
+                if self._stop.is_set():
+                    return
+                time.sleep(0.1)
+                continue
 
             self._rx_datagrams += 1
             try:
@@ -1219,7 +1224,7 @@ class IntercomServer:
             with self._lock:
                 st = self._clients.get(pkt.client_id)
                 if st is None:
-                    st = ClientState(addr=addr, frames=deque(maxlen=10), last_packet_monotonic=now)
+                    st = ClientState(addr=addr, last_packet_monotonic=now)
                     self._clients[pkt.client_id] = st
                     logger.info("new client {} from {}", pkt.client_id, addr)
                 else:
