@@ -29,6 +29,10 @@ class ClientState:
     addr: Tuple[str, int]
     frames: Deque[np.ndarray]
     last_packet_monotonic: float
+    jb: JitterBuffer = field(
+        default_factory=lambda: JitterBuffer(frame_samples=int(FRAME_SAMPLES), start_frames=5, max_frames=60),
+        repr=False,
+    )
     muted: bool = False
     gain_db: float = 0.0
     vu_dbfs: float = -60.0
