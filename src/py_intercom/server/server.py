@@ -28,17 +28,12 @@ from ..common.packets import unpack_audio_packet, pack_audio_packet
 class ClientState:
     addr: Tuple[str, int]
     frames: Deque[np.ndarray]
-    jb: JitterBuffer = field(
-        default_factory=lambda: JitterBuffer(frame_samples=int(FRAME_SAMPLES), start_frames=5, max_frames=60),
-        repr=False,
-    )
     last_packet_monotonic: float
     muted: bool = False
     gain_db: float = 0.0
     vu_dbfs: float = -60.0
     last_timestamp_ms: int = 0
     last_sequence_number: int = 0
-
     name: str = ""
     mode: str = ""
     client_uuid: str = ""
