@@ -38,6 +38,6 @@ echo Installation des dependances...
 if exist "%ROOT%\requirements.txt" "%PY%" -m pip install -r "%ROOT%\requirements.txt"
 
 :venv_ok
-rem Fenetre CLI visible (debug): on ouvre un nouveau cmd qui reste ouvert (/k)
-start "py-intercom client debug" cmd /k "\"%PY%\" \"%ROOT%\run_client.py\" --gui --debug"
+"%PY%" "%ROOT%\run_server.py" --gui --debug
+pause
 endlocal

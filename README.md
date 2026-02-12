@@ -18,7 +18,20 @@ python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
 ```
 
-## Lancer le serveur
+## Lancement rapide (scripts .bat)
+
+Les scripts dans `lunch script/` créent automatiquement le virtualenv `.venv` et installent les dépendances si nécessaire.
+
+| Script | Description |
+|--------|-------------|
+| `lunch script\lancer_serveur_gui.bat` | Serveur en mode GUI (sans console) |
+| `lunch script\lancer_client_gui.bat` | Client en mode GUI (sans console) |
+| `lunch script\lancer_serveur_debug.bat` | Serveur en mode GUI + console avec logs debug |
+| `lunch script\lancer_client_debug.bat` | Client en mode GUI + console avec logs debug |
+
+## Lancement manuel
+
+### Serveur
 
 ```powershell
 .\.venv\Scripts\python run_server.py --gui
@@ -30,7 +43,7 @@ Activer les logs debug:
 .\.venv\Scripts\python run_server.py --gui --debug
 ```
 
-## Lancer un client
+### Client
 
 ```powershell
 .\.venv\Scripts\python run_client.py --gui
@@ -41,6 +54,36 @@ Activer les logs debug:
 ```powershell
 .\.venv\Scripts\python run_client.py --gui --debug
 ```
+
+## Build des exécutables
+
+Le script `exe scripts\build_exe.ps1` compile le client et le serveur en `.exe` via PyInstaller (mode "onefile").
+
+Prérequis: avoir déjà un virtualenv `.venv` et les dépendances installées (voir section Installation).
+
+```powershell
+& '.\exe scripts\build_exe.ps1'
+```
+
+Avec nettoyage des dossiers `build/` et `dist/` avant compilation:
+
+```powershell
+& '.\exe scripts\build_exe.ps1' -Clean
+```
+
+Les exécutables sont générés dans `dist/`.
+
+- `dist\client.exe`
+- `dist\server.exe`
+
+Note: en mode "onefile", les DLL (dont `opus.dll`) sont extraites au lancement dans un dossier temporaire (`%TEMP%\_MEI...`).
+
+Au double-clic, les exécutables démarrent l'interface (équivalent `--gui`).
+
+En cas de crash au démarrage (mode windowed), un fichier est écrit ici:
+
+- `~\py-intercom\client_crash.txt`
+- `~\py-intercom\server_crash.txt`
 
 ## Ports
 

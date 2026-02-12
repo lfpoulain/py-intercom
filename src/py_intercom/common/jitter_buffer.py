@@ -26,7 +26,7 @@ class JitterBuffer:
         self,
         *,
         frame_samples: int,
-        start_frames: int = 5,
+        start_frames: int = 3,
         max_frames: int = 50,
         conceal_attenuation: float = 0.98,
     ) -> None:
@@ -141,7 +141,7 @@ class OpusPacketJitterBuffer:
     def __init__(
         self,
         *,
-        start_frames: int = 5,
+        start_frames: int = 3,
         max_frames: int = 50,
     ) -> None:
         self.start_frames = int(max(1, start_frames))

@@ -36,6 +36,8 @@ class ClientConfig:
     sidetone_enabled: bool = False
     sidetone_gain_db: float = -12.0
 
+    wasapi_exclusive: bool = False
+
     ptt_general_key: Optional[str] = None
     ptt_bus_keys: Optional[dict] = None
     mute_buses: Optional[dict] = None
@@ -72,7 +74,7 @@ class IntercomClient:
         self._enc = OpusEncoder()
         self._dec = OpusDecoder()
 
-        self._jb = OpusPacketJitterBuffer(start_frames=5, max_frames=60)
+        self._jb = OpusPacketJitterBuffer(start_frames=3, max_frames=60)
 
         self._opus_ok: bool = True
         self._opus_err: str = ""
@@ -581,9 +583,9 @@ class IntercomClient:
         errors = []
         for sr in samplerates:
             for ch in candidate_channels:
-                blocksize_20ms = int(round(float(FRAME_SAMPLES) * float(sr) / float(SAMPLE_RATE)))
-                blocksize_20ms = max(0, blocksize_20ms)
-                for blocksize in (blocksize_20ms, 0):
+                blocksize_frame = int(round(float(FRAME_SAMPLES) * float(sr) / float(SAMPLE_RATE)))
+                blocksize_frame = max(0, blocksize_frame)
+                for blocksize in (blocksize_frame, 0):
                     for latency in ("low", None):
                         try:
                             logger.debug(
@@ -594,6 +596,12 @@ class IntercomClient:
                                 latency,
                                 sr,
                             )
+                            extra = None
+                            if self.config.wasapi_exclusive:
+                                try:
+                                    extra = sd.WasapiSettings(exclusive=True)
+                                except Exception:
+                                    pass
                             st = sd.InputStream(
                                 samplerate=sr,
                                 channels=ch,
@@ -602,6 +610,7 @@ class IntercomClient:
                                 device=self.config.input_device,
                                 latency=latency,
                                 callback=self._in_callback,
+                                extra_settings=extra,
                             )
                             with self._state_lock:
                                 self._in_channels = ch
@@ -658,6 +667,12 @@ class IntercomClient:
                             latency,
                             sr,
                         )
+                        extra = None
+                        if self.config.wasapi_exclusive:
+                            try:
+                                extra = sd.WasapiSettings(exclusive=True)
+                            except Exception:
+                                pass
                         st = sd.OutputStream(
                             samplerate=sr,
                             channels=ch,
@@ -666,6 +681,7 @@ class IntercomClient:
                             device=self.config.output_device,
                             latency=latency,
                             callback=self._out_callback,
+                            extra_settings=extra,
                         )
                         with self._state_lock:
                             self._out_channels = ch

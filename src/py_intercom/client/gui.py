@@ -360,6 +360,8 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._input_device.currentIndexChanged.connect(self._on_input_device_changed)
         self._output_device.currentIndexChanged.connect(self._on_output_device_changed)
         self._show_all_devices = QtWidgets.QCheckBox("Show all devices")
+        self._wasapi_exclusive = QtWidgets.QCheckBox("WASAPI Exclusive")
+        self._wasapi_exclusive.setToolTip("Use WASAPI exclusive mode for lower latency (requires reconnect)")
         self._refresh_devices_btn = QtWidgets.QPushButton("Refresh devices")
         self._refresh_devices_btn.setProperty("class", "warning")
         self._device_status = QtWidgets.QLabel("")
@@ -425,10 +427,11 @@ class ClientWindow(QtWidgets.QMainWindow):
         dev_lay.addWidget(QtWidgets.QLabel("Headphones"), 1, 0)
         dev_lay.addWidget(self._output_device, 1, 1, 1, 3)
         dev_lay.addWidget(self._show_all_devices, 2, 0)
-        dev_lay.addWidget(self._refresh_devices_btn, 2, 1)
-        dev_lay.addWidget(self._connect_btn, 2, 2)
-        dev_lay.addWidget(self._disconnect_btn, 2, 3)
-        dev_lay.addWidget(self._device_status, 3, 0, 1, 4)
+        dev_lay.addWidget(self._wasapi_exclusive, 2, 1)
+        dev_lay.addWidget(self._refresh_devices_btn, 2, 2)
+        dev_lay.addWidget(self._connect_btn, 3, 0, 1, 2)
+        dev_lay.addWidget(self._disconnect_btn, 3, 2, 1, 2)
+        dev_lay.addWidget(self._device_status, 4, 0, 1, 4)
 
         # -- Audio controls group --
         ctrl_box = QtWidgets.QGroupBox("Audio Controls")
@@ -1054,6 +1057,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             muted=self._mute.isChecked(),
             sidetone_enabled=self._sidetone.isChecked(),
             sidetone_gain_db=float(self._sidetone_gain.value()),
+            wasapi_exclusive=self._wasapi_exclusive.isChecked(),
             ptt_general_key=str(self._ptt_general_key.keySequence().toString()),
             ptt_bus_keys=dict(self._preset_get("ptt_bus_keys", {}) or {}),
             mute_buses=dict(self._preset_get("mute_buses", {}) or {}),
@@ -1064,6 +1068,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._client is not None
             and self._client.config.input_device == cfg.input_device
             and self._client.config.output_device == cfg.output_device
+            and self._client.config.wasapi_exclusive == cfg.wasapi_exclusive
         )
 
         try:

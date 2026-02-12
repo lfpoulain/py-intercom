@@ -32,7 +32,7 @@ class ClientState:
     decoder: OpusDecoder = field(default_factory=OpusDecoder, repr=False)
     encoder: OpusEncoder = field(default_factory=OpusEncoder, repr=False)
     jb: OpusPacketJitterBuffer = field(
-        default_factory=lambda: OpusPacketJitterBuffer(start_frames=5, max_frames=60),
+        default_factory=lambda: OpusPacketJitterBuffer(start_frames=3, max_frames=60),
         repr=False,
     )
     muted: bool = False
@@ -983,7 +983,7 @@ class IntercomServer:
         while not self._stop.is_set():
             now = time.monotonic()
             if now < next_t:
-                time.sleep(min(0.01, next_t - now))
+                time.sleep(min(0.005, next_t - now))
                 continue
 
             produced = 0

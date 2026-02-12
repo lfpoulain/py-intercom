@@ -1,5 +1,5 @@
 (() => {
-  const FRAME_SAMPLES = 960;
+  const FRAME_SAMPLES = 480;
   const TARGET_SR = 48000;
 
   const el = {
