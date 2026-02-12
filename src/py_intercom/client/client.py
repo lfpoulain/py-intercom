@@ -13,6 +13,7 @@ from loguru import logger
 
 from ..common.audio import apply_gain_db, rms_dbfs
 from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, FRAME_SAMPLES, SAMPLE_RATE
+from ..common.jitter_buffer import JitterBuffer
 from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import pack_audio_packet, unpack_audio_packet
 
@@ -40,6 +41,16 @@ class ClientConfig:
 
 
 class IntercomClient:
+    @staticmethod
+    def _limit_peak(x: np.ndarray, limit: float = 0.99) -> np.ndarray:
+        try:
+            peak = float(np.max(np.abs(x)))
+        except Exception:
+            return x
+        if peak > 1.0 and peak > 0.0:
+            x = x * (float(limit) / peak)
+        return x
+
     def __init__(self, client_id: int, config: ClientConfig):
         self.client_id = client_id & 0xFFFFFFFF
         self.config = config
@@ -48,12 +59,19 @@ class IntercomClient:
             self.config.control_port = int(self.config.server_port) + int(CONTROL_PORT_OFFSET)
 
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+        except Exception:
+            pass
         self._sock.bind(("0.0.0.0", 0))
         self._server_addr = (self.config.server_ip, int(self.config.server_port))
         self._sock.settimeout(0.5)
 
         self._enc = OpusEncoder()
         self._dec = OpusDecoder()
+
+        self._jb = JitterBuffer(frame_samples=int(FRAME_SAMPLES), start_frames=5, max_frames=60)
 
         self._opus_ok: bool = True
         self._opus_err: str = ""
@@ -311,6 +329,11 @@ class IntercomClient:
             self._out_phase = 0.0
             self._sidetone_buf = np.zeros((0,), dtype=np.float32)
             self._sidetone_phase = 0.0
+
+        try:
+            self._jb.reset()
+        except Exception:
+            pass
 
         # Reset network state and diagnostic counters
         self._stop.clear()
@@ -730,6 +753,8 @@ class IntercomClient:
                 return
 
             y = src[idx0] * (1.0 - frac) + src[idx1] * frac
+            y = self._limit_peak(y)
+            y = np.clip(y.astype(np.float32, copy=False), -1.0, 1.0)
 
             new_phase = float(positions[-1] + ratio)
             drop = int(new_phase)
@@ -790,25 +815,51 @@ class IntercomClient:
 
             self._rx_packets += 1
 
-            # move rx frames into a single playback buffer to allow resampling
-            with self._state_lock:
-                if self._playback_buf.size == 0:
-                    self._playback_buf = frame.astype(np.float32, copy=False)
-                else:
-                    self._playback_buf = np.concatenate((self._playback_buf, frame.astype(np.float32, copy=False)))
+            try:
+                seq = int(getattr(pkt, "sequence_number", 0)) & 0xFFFFFFFF
+            except Exception:
+                seq = 0
 
-                # cap to ~3 seconds to avoid unbounded memory growth
-                max_samples = int(SAMPLE_RATE * 3)
-                if self._playback_buf.size > max_samples:
-                    self._playback_buf = self._playback_buf[-max_samples:]
+            try:
+                self._jb.push(seq, frame)
+            except Exception:
+                continue
+
+            out_frames: list[np.ndarray] = []
+            while True:
+                try:
+                    f = self._jb.pop()
+                except Exception:
+                    f = None
+                if f is None:
+                    break
+                out_frames.append(f)
+
+            if out_frames:
+                merged = np.concatenate([x.astype(np.float32, copy=False) for x in out_frames])
+                with self._state_lock:
+                    if self._playback_buf.size == 0:
+                        self._playback_buf = merged
+                    else:
+                        self._playback_buf = np.concatenate((self._playback_buf, merged))
+
+                    max_samples = int(SAMPLE_RATE * 3)
+                    if self._playback_buf.size > max_samples:
+                        self._playback_buf = self._playback_buf[-max_samples:]
 
             now = time.monotonic()
             if now - self._last_stats_log >= 5.0:
                 self._last_stats_log = now
                 with self._state_lock:
                     playback_samples = int(self._playback_buf.size)
+                try:
+                    jb_stats = self._jb.stats
+                    jb_buf = int(self._jb.buffered_frames)
+                except Exception:
+                    jb_stats = None
+                    jb_buf = 0
                 logger.debug(
-                    "stats: tx_pkts={} rx_pkts={} enc_err={} dec_err={} tx_sock_err={} rx_sock_err={} playback_samples={}",
+                    "stats: tx_pkts={} rx_pkts={} enc_err={} dec_err={} tx_sock_err={} rx_sock_err={} playback_samples={} jb_buf={} jb_missing={} jb_late_dropped={} jb_concealed={}",
                     self._tx_packets,
                     self._rx_packets,
                     self._opus_encode_errors,
@@ -816,6 +867,10 @@ class IntercomClient:
                     self._tx_socket_errors,
                     self._rx_socket_errors,
                     playback_samples,
+                    jb_buf,
+                    0 if jb_stats is None else int(jb_stats.missing),
+                    0 if jb_stats is None else int(jb_stats.late_dropped),
+                    0 if jb_stats is None else int(jb_stats.concealed),
                 )
 
     def _out_callback(self, outdata, frames, time_info, status) -> None:

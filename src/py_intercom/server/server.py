@@ -18,6 +18,7 @@ from loguru import logger
 from ..common.audio import apply_gain_db, rms_dbfs
 from ..common.constants import AUDIO_UDP_PORT, CHANNELS, CONTROL_PORT_OFFSET, FRAME_SAMPLES, SAMPLE_RATE
 from ..common.discovery import DiscoveryBeacon
+from ..common.jitter_buffer import JitterBuffer
 from ..common.jsonio import atomic_write_json, read_json_file
 from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import unpack_audio_packet, pack_audio_packet
@@ -27,6 +28,10 @@ from ..common.packets import unpack_audio_packet, pack_audio_packet
 class ClientState:
     addr: Tuple[str, int]
     frames: Deque[np.ndarray]
+    jb: JitterBuffer = field(
+        default_factory=lambda: JitterBuffer(frame_samples=int(FRAME_SAMPLES), start_frames=5, max_frames=60),
+        repr=False,
+    )
     last_packet_monotonic: float
     muted: bool = False
     gain_db: float = 0.0
@@ -70,6 +75,16 @@ class OutputState:
 
 class IntercomServer:
     @staticmethod
+    def _limit_peak(x: np.ndarray, limit: float = 0.99) -> np.ndarray:
+        try:
+            peak = float(np.max(np.abs(x)))
+        except Exception:
+            return x
+        if peak > 1.0 and peak > 0.0:
+            x = x * (float(limit) / peak)
+        return x
+
+    @staticmethod
     def _client_id_from_uuid(client_uuid: str) -> int:
         try:
             return int(zlib.crc32(str(client_uuid).encode("utf-8")) & 0xFFFFFFFF)
@@ -91,6 +106,11 @@ class IntercomServer:
         self.output_device = output_device
 
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+        except Exception:
+            pass
         self._sock.bind((self.bind_ip, self.port))
         self._sock.settimeout(0.5)
 
@@ -381,6 +401,12 @@ class IntercomServer:
         with self._lock:
             out: Dict[int, dict] = {}
             for client_id, st in self._clients.items():
+                try:
+                    jb_buf = int(st.jb.buffered_frames)
+                    jb_stats = st.jb.stats
+                except Exception:
+                    jb_buf = 0
+                    jb_stats = None
                 out[client_id] = {
                     "client_id": client_id,
                     "name": st.name,
@@ -393,6 +419,10 @@ class IntercomServer:
                     "vu_dbfs": st.vu_dbfs,
                     "last_timestamp_ms": st.last_timestamp_ms,
                     "last_sequence_number": st.last_sequence_number,
+                    "jb_buf": int(jb_buf),
+                    "jb_missing": 0 if jb_stats is None else int(jb_stats.missing),
+                    "jb_late_dropped": 0 if jb_stats is None else int(jb_stats.late_dropped),
+                    "jb_concealed": 0 if jb_stats is None else int(jb_stats.concealed),
                     "control_connected": bool(st.control_connected),
                     "control_age_s": max(0.0, now - st.last_control_monotonic) if st.control_connected else None,
                     "ptt_general": bool(st.ptt_general),
@@ -970,9 +1000,12 @@ class IntercomServer:
                     for client_id, st in list(self._clients.items()):
                         if st.muted:
                             continue
-                        if not st.frames:
+                        try:
+                            frame = st.jb.pop()
+                        except Exception:
+                            frame = None
+                        if frame is None:
                             continue
-                        frame = st.frames.popleft()
                         frame = apply_gain_db(frame, st.gain_db)
                         per_client[int(client_id)] = frame
                         try:
@@ -1024,6 +1057,7 @@ class IntercomServer:
                         raw_bus_mix += per_client[cid]
 
                     raw_bus_mix = apply_gain_db(raw_bus_mix, bus_gain_db)
+                    raw_bus_mix = self._limit_peak(raw_bus_mix)
                     bus_mixes[int(bus_id)] = raw_bus_mix
                     if int(bus_id) == 0:
                         contrib: Dict[int, np.ndarray] = {}
@@ -1186,7 +1220,10 @@ class IntercomServer:
                 st.last_timestamp_ms = pkt.timestamp_ms
                 st.last_sequence_number = pkt.sequence_number
                 st.vu_dbfs = rms_dbfs(frame)
-                st.frames.append(frame)
+                try:
+                    st.jb.push(int(pkt.sequence_number) & 0xFFFFFFFF, frame)
+                except Exception:
+                    pass
 
             now2 = time.monotonic()
             if now2 - self._last_stats_log >= 5.0:
@@ -1238,6 +1275,7 @@ class IntercomServer:
                         mix_minus = raw_mix
                     else:
                         mix_minus = raw_mix - c
+                    mix_minus = self._limit_peak(mix_minus)
                     mix_minus = np.clip(mix_minus, -1.0, 1.0)
 
                     payload = self._encoder.encode(mix_minus)
