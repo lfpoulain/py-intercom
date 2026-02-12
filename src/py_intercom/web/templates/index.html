@@ -8,57 +8,123 @@
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
   </head>
   <body>
-    <div class="wrap">
-      <header class="header">
-        <div class="title">py-intercom</div>
-        <div class="subtitle">Client Web (Plateau)</div>
-      </header>
-
-      <section class="panel">
-        <div class="row">
-          <label>Serveur IP</label>
-          <input id="serverIp" placeholder="192.168.1.10" />
+    <div class="app">
+      <!-- Header bar -->
+      <header class="topbar">
+        <div class="topbar-left">
+          <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+          <span class="topbar-title">py-intercom</span>
+          <span class="topbar-badge">web</span>
         </div>
-        <div class="row">
-          <label>Port</label>
-          <input id="serverPort" type="number" value="5000" />
-        </div>
-        <div class="row">
-          <label>Nom</label>
-          <input id="name" placeholder="Plateau" />
-        </div>
-        <div class="row">
-          <label>Mode</label>
-          <select id="mode">
-            <option value="ptt" selected>PTT</option>
-            <option value="always_on">Always-on</option>
-          </select>
-        </div>
-        <div class="actions">
-          <button id="btnConnect">Connecter</button>
-          <button id="btnDisconnect" class="secondary" disabled>Déconnecter</button>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="ptt">
-          <button id="btnPtt" class="pttBtn" disabled>PTT (maintenir)</button>
-          <div class="hint">Raccourci: maintenir <kbd>Espace</kbd></div>
-        </div>
-        <div class="status">
-          <div id="statusLine" class="statusLine">Déconnecté</div>
-          <div class="meters">
-            <div class="meter">
-              <div class="meterLabel">RX</div>
-              <div class="meterBar"><div id="rxBar" class="meterFill"></div></div>
-            </div>
+        <div class="topbar-right">
+          <div id="connDot" class="conn-indicator off">
+            <span class="conn-dot"></span>
+            <span id="connLabel" class="conn-text">Déconnecté</span>
           </div>
         </div>
-      </section>
+      </header>
 
-      <footer class="footer">
-        <div id="log" class="log"></div>
-      </footer>
+      <main class="main">
+        <!-- Connection card -->
+        <section class="card" id="cardConfig">
+          <div class="card-header">
+            <svg class="card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
+            <span>Connexion</span>
+          </div>
+          <div class="card-body">
+            <div class="field-group">
+              <label class="field-label">Serveur</label>
+              <div class="server-row">
+                <select id="discoverySelect" class="discovery-select" title="Serveurs détectés">
+                  <option value="">-- Détection auto --</option>
+                </select>
+                <button id="btnRefreshDiscovery" class="icon-btn" title="Rafraîchir">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                </button>
+              </div>
+              <div class="ip-port-row">
+                <input id="serverIp" class="input" placeholder="192.168.1.10" />
+                <span class="ip-sep">:</span>
+                <input id="serverPort" class="input input-port" type="number" value="5000" />
+              </div>
+            </div>
+            <div class="field-row">
+              <div class="field-group field-half">
+                <label class="field-label">Nom</label>
+                <input id="name" class="input" placeholder="Plateau" />
+              </div>
+              <div class="field-group field-half">
+                <label class="field-label">Mode</label>
+                <select id="mode" class="input">
+                  <option value="ptt" selected>Push-to-Talk</option>
+                  <option value="always_on">Always-on</option>
+                </select>
+              </div>
+            </div>
+            <div class="connect-actions">
+              <button id="btnConnect" class="btn btn-primary btn-lg">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+                Connecter
+              </button>
+              <button id="btnDisconnect" class="btn btn-ghost" disabled>Déconnecter</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Controls card -->
+        <section class="card" id="cardControls">
+          <div class="card-header">
+            <svg class="card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+            <span>Audio</span>
+            <span id="statusLine" class="status-badge">Déconnecté</span>
+          </div>
+          <div class="card-body">
+            <!-- PTT + Mute -->
+            <div class="controls-row">
+              <button id="btnPtt" class="btn btn-ptt" disabled>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
+                <span class="ptt-label">PTT</span>
+              </button>
+              <button id="btnMute" class="btn btn-mute" disabled>
+                <svg id="muteIconOff" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+                <svg id="muteIconOn" class="hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" x2="22" y1="2" y2="22"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+                <span id="muteLabel">Mute</span>
+              </button>
+            </div>
+            <div class="shortcuts-hint">
+              <kbd>Espace</kbd> PTT &nbsp;&middot;&nbsp; <kbd>M</kbd> Mute
+            </div>
+
+            <!-- VU Meters -->
+            <div class="meters">
+              <div class="meter-row">
+                <span class="meter-label">TX</span>
+                <div class="meter-track"><div id="txBar" class="meter-fill tx"></div></div>
+              </div>
+              <div class="meter-row">
+                <span class="meter-label">RX</span>
+                <div class="meter-track"><div id="rxBar" class="meter-fill rx"></div></div>
+              </div>
+            </div>
+
+            <!-- Volume -->
+            <div class="volume-row">
+              <svg class="vol-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+              <input id="volumeSlider" type="range" min="0" max="150" value="100" class="slider" />
+              <span id="volumeValue" class="vol-value">100%</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Log -->
+        <section class="card card-log">
+          <div class="card-header card-header-sm">
+            <svg class="card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+            <span>Journal</span>
+          </div>
+          <div id="log" class="log-body"></div>
+        </section>
+      </main>
     </div>
 
     <script src="/static/client.js"></script>

@@ -144,12 +144,29 @@ Module : `common/discovery.py` (`DiscoveryBeacon`, `DiscoveryListener`, `Discove
 
 - Codec : **Opus** (`opuslib`)
 - Format interne : `numpy.float32` dans `[-1.0, 1.0]`
-- Taille de frame : `FRAME_SAMPLES` (typiquement 960 échantillons = 20ms à 48kHz)
+- Taille de frame : `FRAME_SAMPLES` = **480 échantillons = 10ms** à 48kHz
+- Bitrate Opus : 64 kbps, complexité 5
 
 Note importante :
 
-- Le système est conçu autour d’un `SAMPLE_RATE` commun (48 kHz).
-- Les streams de sortie serveur gèrent le cas où le device de sortie n’est pas à 48kHz via un resampling simple.
+- Le système est conçu autour d'un `SAMPLE_RATE` commun (48 kHz).
+- Les streams de sortie serveur gèrent le cas où le device de sortie n'est pas à 48kHz via un resampling simple.
+
+### Jitter buffer (Opus payload)
+
+- Classe : `OpusPacketJitterBuffer` (`common/jitter_buffer.py`)
+- Bufferise les **payloads Opus bruts** (pas les PCM décodés) pour permettre le PLC Opus natif.
+- `start_frames` = 3 (30ms de buffering initial avant de commencer la lecture).
+- `max_frames` = 60.
+- Thread-safe (lock interne) : le thread RX push, le callback audio pop.
+- **Fast-forward** : quand `expected_seq` est loin derrière le buffer (gap > `start_frames`), saute directement au frame le plus proche au lieu de crawler +1 par pop.
+- **PLC** : pour les petits gaps (1-3 frames manquants), retourne `b""` que le décodeur Opus interprète comme Packet Loss Concealment.
+- Le décodage Opus se fait dans le callback audio (pas dans le thread RX), ce qui garantit un rythme de décodage fixe.
+
+### Encodeur par client (serveur)
+
+- Chaque `ClientState` possède son propre `OpusEncoder` pour le mix-minus.
+- Évite la corruption d'état Opus quand plusieurs mix-minus sont encodés en parallèle (un encodeur partagé causait des artefacts métalliques).
 
 ## 6) Presets (JSON)
 
@@ -187,7 +204,7 @@ Les presets sont **effectivement implémentés** en JSON, avec écriture atomiqu
 - Logging : **loguru**
 - Hotkeys globaux : **pynput**
 
-Note : le `requirements.txt` contient aussi des dépendances liées à une piste “web” (Flask / SocketIO), mais **le client web n’est pas implémenté** dans la V1.
+Note : le `requirements.txt` contient aussi des dépendances liées à une piste “web” (Flask / SocketIO), utilisés par le **client web**.
 
 ### Organisation du code
 
@@ -207,18 +224,27 @@ Note : le `requirements.txt` contient aussi des dépendances liées à une piste
   - `IntercomClient` : capture micro, envoi UDP, réception UDP, lecture casque, contrôle TCP
   - `gui.py` : UI client
 
+- `py_intercom/web/`
+  - `bridge.py` : `IntercomBridge` — client headless (UDP audio + TCP control) qui fait le pont entre le serveur intercom et le backend Flask
+  - `app.py` : application Flask + Socket.IO — gère les sessions web, relaie audio et contrôle entre le navigateur et le bridge
+  - `main.py` : point d'entrée du serveur web (`run_web.py`)
+  - `templates/index.html` : page unique du client web
+  - `static/client.js` : logique frontend (WebAudio capture/playback, Socket.IO, UI)
+  - `static/style.css` : styles du client web
+
 ### Modèle d’exécution (threads)
 
 - Serveur :
-  - thread RX UDP (décodage + ingestion)
-  - thread mix + broadcast (mix global + mix-minus par client)
+  - thread RX UDP (ingestion payloads Opus dans JB par client)
+  - thread mix (tick 10ms : pop JB → décode → mix-minus → queue)
+  - thread broadcast (lit queue → encode per-client → UDP sendto)
   - thread accept TCP control + handlers
   - N streams sounddevice de sortie (1 par output) avec callbacks
 
 - Client :
-  - callback input (capture -> encode -> UDP)
-  - thread RX UDP (décodage -> buffer lecture)
-  - callback output (lecture buffer -> casque)
+  - callback input (capture → resample → encode Opus → UDP)
+  - thread RX UDP (push payload Opus brut dans `OpusPacketJitterBuffer`)
+  - callback output (pop JB → décode Opus / PLC → mix avec sidetone → casque)
   - thread TCP control (keepalive + config)
 
 ## 8) Workflow recommandé (opérationnel)
@@ -233,13 +259,25 @@ Note : le `requirements.txt` contient aussi des dépendances liées à une piste
 
 Conseil : garder un device de sortie “VMix” séparé (VB-Cable) en output serveur si besoin d’intégration VMix.
 
-## 9) Limitations connues (V1)
+## 9) Latence end-to-end estimée (LAN)
+
+| Composant | Valeur |
+|---|---|
+| Frame Opus | 10 ms |
+| Jitter buffer (3 × 10ms) | 30 ms |
+| Driver WASAPI shared | ~10-20 ms |
+| Réseau LAN | ~1-2 ms |
+| Codec Opus (encode+decode) | < 3 ms |
+| **Total estimé** | **~50-60 ms** |
+
+## 10) Limitations connues (V1)
 
 - Les bus sont **fixes** (pas de création/renommage dynamique via UI).
 - Le resampling serveur (si output != 48kHz) est volontairement simple (objectif : robustesse avant qualité audiophile).
 - Pas de chiffrement/authentification : usage LAN.
+- WASAPI exclusive mode non supporté (retiré — causait echo/glitch, à revisiter).
 
-## 10) Dépannage rapide
+## 11) Dépannage rapide
 
 - Si un client n’entend rien :
   - vérifier la route (case bus) côté serveur
@@ -258,17 +296,65 @@ Conseil : garder un device de sortie “VMix” séparé (VB-Cable) en output se
   - le client réutilise le même socket UDP (même port éphémère) pour éviter un blocage par le pare-feu Windows
   - si le problème persiste, vérifier les règles de pare-feu pour le port UDP utilisé
 
-## 11) Roadmap (non implémenté)
+## 12) Client web (plateau)
 
-Tout ce qui suit n’est **pas** implémenté dans la V1.
+Un client léger en **WebAudio + WebSocket** pour les personnes sur plateau qui n'ont pas le client Python.
 
-- Client web “plateau”
-- Backend web (Flask / SocketIO) + WebAudio
-- Jitter buffer adaptatif / réordonnancement
-- AEC (annulation d’écho)
+### Architecture
+
+```bash
+Navigateur  ←Socket.IO→  Flask/SocketIO (bridge)  ←UDP/TCP→  IntercomServer
+```
+
+- **`IntercomBridge`** (`web/bridge.py`) : client headless qui gère UDP audio (Opus encode/decode) et TCP control vers le serveur intercom.
+- **`app.py`** : application Flask + Socket.IO qui relaie audio PCM (int16 LE) et messages de contrôle entre le navigateur et le bridge.
+- **Frontend** (`client.js`) : capture micro via WebAudio `ScriptProcessor`, playback via `ScriptProcessor` + `GainNode`, communication via Socket.IO.
+
+### Pipeline audio
+
+- **TX** : micro → `ScriptProcessor` (capture à `sampleRate` du contexte) → resample linéaire vers 48kHz (avec tracking de phase) → découpe en frames de 480 samples → conversion float32 → int16 LE → Socket.IO `audio_in` → bridge encode Opus → UDP vers serveur.
+- **RX** : serveur envoie mix-minus UDP → bridge `OpusPacketJitterBuffer` → playout thread (tick 10ms) → décode Opus → float32 → int16 LE → Socket.IO `audio_out` → frontend int16→float32 → resample vers contexte SR → `playQueue` → `ScriptProcessor` → `GainNode` → haut-parleur.
+
+### Fonctionnalités
+
+- **PTT** : bouton + raccourci `Espace`
+- **Mute** : bouton + raccourci `M`
+- **Mode** : PTT ou Always-on (modifiable en cours de connexion)
+- **Volume** : slider 0–150% via `GainNode`
+- **VU mètres** : TX et RX (peak decay)
+- **Indicateur de connexion** : dot vert/gris
+- **Persistance** : UUID client + settings (IP, port, nom, mode, volume) en `localStorage`
+- **Jitter buffer** : `OpusPacketJitterBuffer` côté bridge (identique au client Python)
+
+### Lancement
+
+```powershell
+.\.venv\Scripts\python run_web.py --port 8000
+```
+
+Options : `--host`, `--port`, `--debug`.
+
+Le client web est accessible à `http://<ip>:8000/`.
+
+### Latence supplémentaire (vs client Python)
+
+| Composant | Valeur estimée |
+|---|---|
+| WebAudio ScriptProcessor buffer | ~42ms (2048 samples @ 48kHz) |
+| Socket.IO WebSocket round-trip | ~1-5ms (LAN) |
+| Bridge jitter buffer | 30ms (3 × 10ms) |
+| **Surcoût total estimé** | **~75-80ms** |
+
+## 13) Roadmap (non implémenté)
+
+Tout ce qui suit n'est **pas** implémenté.
+
+- AudioWorklet (remplacement de ScriptProcessor pour le client web)
+- Jitter buffer adaptatif (ajustement dynamique de `start_frames`)
+- WASAPI exclusive mode (latence driver réduite)
+- AEC (annulation d'écho)
 - Presets multiples (save-as / liste / load)
 - Bus dynamiques (création / renommage via UI)
-- Enregistrement multi-bus (WAV/FLAC)
 - EQ/comp/gate
 - Contrôle externe (REST/OSC/MIDI)
 - Multicast

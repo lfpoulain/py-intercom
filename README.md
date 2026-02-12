@@ -85,10 +85,21 @@ En cas de crash au démarrage (mode windowed), un fichier est écrit ici:
 - `~\py-intercom\client_crash.txt`
 - `~\py-intercom\server_crash.txt`
 
+### Client Web (Plateau)
+
+Pour les personnes sur plateau sans le client Python :
+
+```powershell
+.\.venv\Scripts\python run_web.py --port 8000
+```
+
+Ouvrir `http://<ip>:8000/` dans un navigateur. Options : `--host`, `--port`, `--debug`.
+
 ## Ports
 
 - Audio (UDP): `5000` (par défaut)
 - Contrôle (TCP): `5001` (par défaut)
+- Client Web (HTTP): `8000` (par défaut)
 
 ## Presets
 

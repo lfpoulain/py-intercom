@@ -13,6 +13,7 @@ from loguru import logger
 
 from ..common.audio import int16_bytes_to_float32
 from ..common.constants import CONTROL_PORT_OFFSET, FRAME_SAMPLES, SAMPLE_RATE
+from ..common.jitter_buffer import OpusPacketJitterBuffer
 from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import pack_audio_packet, unpack_audio_packet
 
@@ -48,20 +49,28 @@ class IntercomBridge:
 
         self._enc = OpusEncoder()
         self._dec = OpusDecoder()
+        self._jb = OpusPacketJitterBuffer(start_frames=3, max_frames=60)
 
         self._on_audio_frame = on_audio_frame
         self._on_control_msg = on_control_msg
         self._on_kick = on_kick
 
         self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            self._udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+            self._udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+        except Exception:
+            pass
         self._udp_sock.bind(("0.0.0.0", 0))
         self._udp_sock.settimeout(0.5)
         self._server_addr = (str(self.config.server_ip), int(self.config.server_port))
 
         self._seq = 0
         self._stop = threading.Event()
+        self._kick_pending = False
 
         self._rx_thread: Optional[threading.Thread] = None
+        self._playout_thread: Optional[threading.Thread] = None
 
         self._ctrl_sock: Optional[socket.socket] = None
         self._ctrl_thread: Optional[threading.Thread] = None
@@ -92,9 +101,13 @@ class IntercomBridge:
             return
 
         self._stop.clear()
+        self._kick_pending = False
 
         self._rx_thread = threading.Thread(target=self._rx_loop, name=f"web-bridge-udp-rx-{self.client_id}", daemon=True)
         self._rx_thread.start()
+
+        self._playout_thread = threading.Thread(target=self._playout_loop, name=f"web-bridge-playout-{self.client_id}", daemon=True)
+        self._playout_thread.start()
 
         self._ctrl_thread = threading.Thread(target=self._control_loop, name=f"web-bridge-ctrl-{self.client_id}", daemon=True)
         self._ctrl_thread.start()
@@ -198,13 +211,22 @@ class IntercomBridge:
     def _control_handle_msg(self, msg: dict[str, Any]) -> None:
         mtype = str(msg.get("type") or "").lower()
         if mtype == "kick":
+            self._kick_pending = True
             if self._on_kick is not None:
                 try:
                     self._on_kick(str(msg.get("message") or ""))
                 except Exception:
                     pass
-            self.stop()
             return
+
+        if mtype in ("welcome", "update"):
+            cfg = msg.get("config") if isinstance(msg.get("config"), dict) else None
+            if cfg is None and mtype == "update":
+                cfg = msg
+            if isinstance(cfg, dict):
+                if "muted" in cfg:
+                    with self._state_lock:
+                        self._muted = bool(cfg.get("muted"))
 
         if self._on_control_msg is not None:
             try:
@@ -238,7 +260,7 @@ class IntercomBridge:
                 buf = b""
                 last_ping = 0.0
 
-                while not self._stop.is_set():
+                while not self._stop.is_set() and not self._kick_pending:
                     now = time.monotonic()
                     if now - last_ping >= 2.0:
                         try:
@@ -280,7 +302,7 @@ class IntercomBridge:
                     pass
                 self._ctrl_sock = None
 
-            if self._stop.is_set():
+            if self._stop.is_set() or self._kick_pending:
                 break
 
             time.sleep(backoff_s)
@@ -296,7 +318,39 @@ class IntercomBridge:
 
             try:
                 pkt = unpack_audio_packet(data)
-                frame = self._dec.decode(pkt.payload)
+                seq = int(getattr(pkt, "sequence_number", 0)) & 0xFFFFFFFF
+                payload = bytes(getattr(pkt, "payload", b""))
+            except Exception:
+                continue
+
+            try:
+                self._jb.push(seq, payload)
+            except Exception:
+                continue
+
+    def _playout_loop(self) -> None:
+        tick_s = float(FRAME_SAMPLES) / float(SAMPLE_RATE)
+        next_t = time.monotonic()
+        while not self._stop.is_set():
+            now = time.monotonic()
+            if now < next_t:
+                time.sleep(min(0.002, next_t - now))
+                continue
+
+            next_t += tick_s
+            if next_t < now - 0.1:
+                next_t = now
+
+            try:
+                payload = self._jb.pop()
+            except Exception:
+                payload = None
+
+            if payload is None:
+                continue
+
+            try:
+                frame = self._dec.decode(payload)
             except Exception:
                 continue
 

@@ -36,8 +36,6 @@ class ClientConfig:
     sidetone_enabled: bool = False
     sidetone_gain_db: float = -12.0
 
-    wasapi_exclusive: bool = False
-
     ptt_general_key: Optional[str] = None
     ptt_bus_keys: Optional[dict] = None
     mute_buses: Optional[dict] = None
@@ -580,35 +578,21 @@ class IntercomClient:
 
         samplerates = [SAMPLE_RATE]
 
-        extra = None
-        if self.config.wasapi_exclusive:
-            try:
-                extra = sd.WasapiSettings(exclusive=True)
-            except Exception:
-                pass
-
         errors = []
         for sr in samplerates:
-            if extra is not None:
-                blocksize_candidates = [0]
-                latency_candidates = [None]
-            else:
+            for ch in candidate_channels:
                 blocksize_frame = int(round(float(FRAME_SAMPLES) * float(sr) / float(SAMPLE_RATE)))
                 blocksize_frame = max(0, blocksize_frame)
-                blocksize_candidates = [blocksize_frame, 0]
-                latency_candidates = ["low", None]
-            for ch in candidate_channels:
-                for blocksize in blocksize_candidates:
-                    for latency in latency_candidates:
+                for blocksize in (blocksize_frame, 0):
+                    for latency in ("low", None):
                         try:
                             logger.debug(
-                                "opening InputStream: dev={} ch={} blocksize={} latency={} sr={} exclusive={}",
+                                "opening InputStream: dev={} ch={} blocksize={} latency={} sr={}",
                                 str(self.config.input_device),
                                 ch,
                                 str(blocksize),
                                 latency,
                                 sr,
-                                extra is not None,
                             )
                             st = sd.InputStream(
                                 samplerate=sr,
@@ -618,7 +602,6 @@ class IntercomClient:
                                 device=self.config.input_device,
                                 latency=latency,
                                 callback=self._in_callback,
-                                extra_settings=extra,
                             )
                             with self._state_lock:
                                 self._in_channels = ch
@@ -627,7 +610,7 @@ class IntercomClient:
                                 self._capture_buf = np.zeros((0,), dtype=np.float32)
                             return st
                         except Exception as e:
-                            errors.append(f"sr={sr} ch={ch} blocksize={blocksize} latency={latency} exclusive={extra is not None}: {e}")
+                            errors.append(f"sr={sr} ch={ch} blocksize={blocksize} latency={latency}: {e}")
                             logger.warning("InputStream open failed: {}", errors[-1])
 
         raise RuntimeError("failed to open input stream. attempts:\n" + "\n".join(errors))
@@ -662,59 +645,43 @@ class IntercomClient:
 
         samplerates = [SAMPLE_RATE]
 
-        extra = None
-        if self.config.wasapi_exclusive:
-            try:
-                extra = sd.WasapiSettings(exclusive=True)
-            except Exception:
-                pass
-
         errors = []
         for sr in samplerates:
-            if extra is not None:
-                blocksize_candidates = [0]
-                latency_candidates = [None]
-            else:
-                blocksize_candidates = [int(FRAME_SAMPLES)]
-                latency_candidates = ["low", None]
             for ch in candidate_channels:
-                for blocksize in blocksize_candidates:
-                    for latency in latency_candidates:
-                        try:
-                            logger.debug(
-                                "opening OutputStream: dev={} ch={} blocksize={} latency={} sr={} exclusive={}",
-                                str(self.config.output_device),
-                                ch,
-                                str(blocksize),
-                                latency,
-                                sr,
-                                extra is not None,
-                            )
-                            st = sd.OutputStream(
-                                samplerate=sr,
-                                channels=ch,
-                                dtype="float32",
-                                blocksize=blocksize,
-                                device=self.config.output_device,
-                                latency=latency,
-                                callback=self._out_callback,
-                                extra_settings=extra,
-                            )
-                            with self._state_lock:
-                                self._out_channels = ch
-                                self._out_samplerate = sr
-                                self._out_phase = 0.0
-                                self._playback_buf = np.zeros((0,), dtype=np.float32)
-                                self._sidetone_phase = 0.0
-                                self._sidetone_buf = np.zeros((0,), dtype=np.float32)
-                                try:
-                                    self._sidetone_frames.clear()
-                                except Exception:
-                                    pass
-                            return st
-                        except Exception as e:
-                            errors.append(f"sr={sr} ch={ch} blocksize={blocksize} latency={latency} exclusive={extra is not None}: {e}")
-                            logger.warning("OutputStream open failed: {}", errors[-1])
+                for latency in ("low", None):
+                    try:
+                        logger.debug(
+                            "opening OutputStream: dev={} ch={} blocksize={} latency={} sr={}",
+                            str(self.config.output_device),
+                            ch,
+                            str(FRAME_SAMPLES),
+                            latency,
+                            sr,
+                        )
+                        st = sd.OutputStream(
+                            samplerate=sr,
+                            channels=ch,
+                            dtype="float32",
+                            blocksize=int(FRAME_SAMPLES),
+                            device=self.config.output_device,
+                            latency=latency,
+                            callback=self._out_callback,
+                        )
+                        with self._state_lock:
+                            self._out_channels = ch
+                            self._out_samplerate = sr
+                            self._out_phase = 0.0
+                            self._playback_buf = np.zeros((0,), dtype=np.float32)
+                            self._sidetone_phase = 0.0
+                            self._sidetone_buf = np.zeros((0,), dtype=np.float32)
+                            try:
+                                self._sidetone_frames.clear()
+                            except Exception:
+                                pass
+                        return st
+                    except Exception as e:
+                        errors.append(f"sr={sr} ch={ch} blocksize={int(FRAME_SAMPLES)} latency={latency}: {e}")
+                        logger.warning("OutputStream open failed: {}", errors[-1])
 
         raise RuntimeError("failed to open output stream. attempts:\n" + "\n".join(errors))
 

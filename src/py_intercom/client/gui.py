@@ -224,9 +224,16 @@ class ClientWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Py-Intercom Client")
+        self.setMinimumSize(480, 560)
 
         self._client: Optional[IntercomClient] = None
         self._connected: bool = False
+
+        # Status bar
+        self._status_bar = QtWidgets.QStatusBar(self)
+        self.setStatusBar(self._status_bar)
+        self._status_label = QtWidgets.QLabel("Disconnected")
+        self._status_bar.addWidget(self._status_label, 1)
 
         self._preset: dict = {}
         self._preset = self._load_preset()
@@ -360,8 +367,6 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._input_device.currentIndexChanged.connect(self._on_input_device_changed)
         self._output_device.currentIndexChanged.connect(self._on_output_device_changed)
         self._show_all_devices = QtWidgets.QCheckBox("Show all devices")
-        self._wasapi_exclusive = QtWidgets.QCheckBox("WASAPI Exclusive")
-        self._wasapi_exclusive.setToolTip("Use WASAPI exclusive mode for lower latency (requires reconnect)")
         self._refresh_devices_btn = QtWidgets.QPushButton("Refresh devices")
         self._refresh_devices_btn.setProperty("class", "warning")
         self._device_status = QtWidgets.QLabel("")
@@ -383,18 +388,27 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._sidetone_gain.setMaximum(0)
         self._sidetone_gain.setValue(-12)
         self._sidetone_gain.setEnabled(False)
+        self._sidetone_gain_lbl = QtWidgets.QLabel("-12 dB")
+        self._sidetone_gain_lbl.setFixedWidth(50)
+        self._sidetone_gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
 
         self._mic_gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self._mic_gain.setMinimum(-60)
         self._mic_gain.setMaximum(12)
         self._mic_gain.setValue(0)
         self._mic_gain.setEnabled(False)
+        self._mic_gain_lbl = QtWidgets.QLabel("0 dB")
+        self._mic_gain_lbl.setFixedWidth(50)
+        self._mic_gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
 
         self._hp_gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self._hp_gain.setMinimum(-60)
         self._hp_gain.setMaximum(12)
         self._hp_gain.setValue(0)
         self._hp_gain.setEnabled(False)
+        self._hp_gain_lbl = QtWidgets.QLabel("0 dB")
+        self._hp_gain_lbl.setFixedWidth(50)
+        self._hp_gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
 
         self._in_vu = VuMeter()
         self._out_vu = VuMeter()
@@ -413,9 +427,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         conn_lay.addWidget(self._client_id_label, 2, 0)
         conn_lay.addWidget(self._client_id, 2, 1, 1, 3)
         conn_lay.addWidget(QtWidgets.QLabel("Name"), 3, 0)
-        conn_lay.addWidget(self._name, 3, 1)
-        conn_lay.addWidget(QtWidgets.QLabel("Mode"), 3, 2)
-        conn_lay.addWidget(self._mode, 3, 3)
+        conn_lay.addWidget(self._name, 3, 1, 1, 3)
 
         # -- Audio devices group --
         dev_box = QtWidgets.QGroupBox("Audio Devices")
@@ -427,11 +439,10 @@ class ClientWindow(QtWidgets.QMainWindow):
         dev_lay.addWidget(QtWidgets.QLabel("Headphones"), 1, 0)
         dev_lay.addWidget(self._output_device, 1, 1, 1, 3)
         dev_lay.addWidget(self._show_all_devices, 2, 0)
-        dev_lay.addWidget(self._wasapi_exclusive, 2, 1)
-        dev_lay.addWidget(self._refresh_devices_btn, 2, 2)
+        dev_lay.addWidget(self._refresh_devices_btn, 2, 1)
+        dev_lay.addWidget(self._device_status, 2, 2, 1, 2)
         dev_lay.addWidget(self._connect_btn, 3, 0, 1, 2)
         dev_lay.addWidget(self._disconnect_btn, 3, 2, 1, 2)
-        dev_lay.addWidget(self._device_status, 4, 0, 1, 4)
 
         # -- Audio controls group --
         ctrl_box = QtWidgets.QGroupBox("Audio Controls")
@@ -440,32 +451,37 @@ class ClientWindow(QtWidgets.QMainWindow):
         ctrl_lay.setVerticalSpacing(2)
         ctrl_lay.addWidget(self._mute, 0, 0)
         ctrl_lay.addWidget(self._sidetone, 0, 1, 1, 3)
-        ctrl_lay.addWidget(QtWidgets.QLabel("Mic gain (dB)"), 1, 0)
-        ctrl_lay.addWidget(self._mic_gain, 1, 1, 1, 3)
-        ctrl_lay.addWidget(QtWidgets.QLabel("Headphones gain (dB)"), 2, 0)
-        ctrl_lay.addWidget(self._hp_gain, 2, 1, 1, 3)
-        ctrl_lay.addWidget(QtWidgets.QLabel("Sidetone gain (dB)"), 3, 0)
-        ctrl_lay.addWidget(self._sidetone_gain, 3, 1, 1, 3)
+        ctrl_lay.addWidget(QtWidgets.QLabel("Mic gain"), 1, 0)
+        ctrl_lay.addWidget(self._mic_gain, 1, 1, 1, 2)
+        ctrl_lay.addWidget(self._mic_gain_lbl, 1, 3)
+        ctrl_lay.addWidget(QtWidgets.QLabel("Headphones gain"), 2, 0)
+        ctrl_lay.addWidget(self._hp_gain, 2, 1, 1, 2)
+        ctrl_lay.addWidget(self._hp_gain_lbl, 2, 3)
+        ctrl_lay.addWidget(QtWidgets.QLabel("Sidetone gain"), 3, 0)
+        ctrl_lay.addWidget(self._sidetone_gain, 3, 1, 1, 2)
+        ctrl_lay.addWidget(self._sidetone_gain_lbl, 3, 3)
 
         # -- PTT / Routing group --
         ptt_box = QtWidgets.QGroupBox("PTT / Routing")
         ptt_lay = QtWidgets.QGridLayout(ptt_box)
         ptt_lay.setContentsMargins(6, 4, 6, 4)
         ptt_lay.setVerticalSpacing(2)
-        ptt_lay.addWidget(QtWidgets.QLabel("PTT general"), 0, 0)
-        ptt_lay.addWidget(_wrap_shortcut(self._ptt_general_key, self._ptt_general_clear), 0, 1)
-        ptt_lay.addWidget(QtWidgets.QLabel("PTT Regie"), 0, 2)
-        ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[0], self._ptt_bus_clear[0]), 0, 3)
-        ptt_lay.addWidget(QtWidgets.QLabel("PTT Plateau"), 1, 0)
-        ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[1], self._ptt_bus_clear[1]), 1, 1)
-        ptt_lay.addWidget(QtWidgets.QLabel("PTT VMix"), 1, 2)
-        ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[2], self._ptt_bus_clear[2]), 1, 3)
-        ptt_lay.addWidget(self._route_bus_widgets[0], 2, 0)
-        ptt_lay.addWidget(self._route_bus_widgets[1], 2, 1)
-        ptt_lay.addWidget(self._route_bus_widgets[2], 2, 2)
-        ptt_lay.addWidget(self._mute_bus_widgets[0], 3, 0)
-        ptt_lay.addWidget(self._mute_bus_widgets[1], 3, 1)
-        ptt_lay.addWidget(self._mute_bus_widgets[2], 3, 2)
+        ptt_lay.addWidget(QtWidgets.QLabel("Mode"), 0, 0)
+        ptt_lay.addWidget(self._mode, 0, 1)
+        ptt_lay.addWidget(QtWidgets.QLabel("PTT general"), 0, 2)
+        ptt_lay.addWidget(_wrap_shortcut(self._ptt_general_key, self._ptt_general_clear), 0, 3)
+        ptt_lay.addWidget(QtWidgets.QLabel("PTT Regie"), 1, 0)
+        ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[0], self._ptt_bus_clear[0]), 1, 1)
+        ptt_lay.addWidget(QtWidgets.QLabel("PTT Plateau"), 1, 2)
+        ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[1], self._ptt_bus_clear[1]), 1, 3)
+        ptt_lay.addWidget(QtWidgets.QLabel("PTT VMix"), 2, 0)
+        ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[2], self._ptt_bus_clear[2]), 2, 1)
+        ptt_lay.addWidget(self._route_bus_widgets[0], 3, 0)
+        ptt_lay.addWidget(self._route_bus_widgets[1], 3, 1)
+        ptt_lay.addWidget(self._route_bus_widgets[2], 3, 2)
+        ptt_lay.addWidget(self._mute_bus_widgets[0], 4, 0)
+        ptt_lay.addWidget(self._mute_bus_widgets[1], 4, 1)
+        ptt_lay.addWidget(self._mute_bus_widgets[2], 4, 2)
 
         # -- Meters group --
         meters_box = QtWidgets.QGroupBox("Meters")
@@ -1057,7 +1073,6 @@ class ClientWindow(QtWidgets.QMainWindow):
             muted=self._mute.isChecked(),
             sidetone_enabled=self._sidetone.isChecked(),
             sidetone_gain_db=float(self._sidetone_gain.value()),
-            wasapi_exclusive=self._wasapi_exclusive.isChecked(),
             ptt_general_key=str(self._ptt_general_key.keySequence().toString()),
             ptt_bus_keys=dict(self._preset_get("ptt_bus_keys", {}) or {}),
             mute_buses=dict(self._preset_get("mute_buses", {}) or {}),
@@ -1068,7 +1083,6 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._client is not None
             and self._client.config.input_device == cfg.input_device
             and self._client.config.output_device == cfg.output_device
-            and self._client.config.wasapi_exclusive == cfg.wasapi_exclusive
         )
 
         try:
@@ -1106,6 +1120,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             return
 
         self._connected = True
+        self._status_label.setText(f"Connected to {server_ip}:{server_port}")
 
         try:
             if self._global_ptt is not None:
@@ -1167,6 +1182,7 @@ class ClientWindow(QtWidgets.QMainWindow):
                 self._client.disconnect_network()
         finally:
             self._connected = False
+            self._status_label.setText("Disconnected")
             self._connect_btn.setEnabled(True)
             self._disconnect_btn.setEnabled(False)
             self._mute.setEnabled(False)
@@ -1202,11 +1218,13 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._client.set_muted(_is_checked(state))
 
     def _on_mic_gain_changed(self, value: int) -> None:
+        self._mic_gain_lbl.setText(f"{value} dB")
         if self._client is None:
             return
         self._client.set_input_gain_db(float(value))
 
     def _on_hp_gain_changed(self, value: int) -> None:
+        self._hp_gain_lbl.setText(f"{value} dB")
         if self._client is None:
             return
         self._client.set_output_gain_db(float(value))
@@ -1217,6 +1235,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._client.set_sidetone_enabled(_is_checked(state))
 
     def _on_sidetone_gain_changed(self, value: int) -> None:
+        self._sidetone_gain_lbl.setText(f"{value} dB")
         if self._client is None:
             return
         self._client.set_sidetone_gain_db(float(value))

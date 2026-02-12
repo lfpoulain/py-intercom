@@ -11,7 +11,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from .server import IntercomServer
 from ..common.devices import list_devices
 from ..common.jsonio import atomic_write_json, read_json_file
-from ..common.theme import VuMeter, apply_theme, patch_combo, centered_checkbox
+from ..common.theme import VuMeter, StatusIndicator, apply_theme, patch_combo, centered_checkbox
 
 
 class _DeviceWorker(QtCore.QObject):
@@ -48,8 +48,15 @@ class ServerWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Py-Intercom Server")
+        self.setMinimumSize(700, 500)
 
         self._server: Optional[IntercomServer] = None
+
+        # Status bar
+        self._status_bar = QtWidgets.QStatusBar(self)
+        self.setStatusBar(self._status_bar)
+        self._status_label = QtWidgets.QLabel("Stopped")
+        self._status_bar.addWidget(self._status_label, 1)
 
         central = QtWidgets.QWidget(self)
         self.setCentralWidget(central)
@@ -71,8 +78,10 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._discovery_cb.setChecked(True)
         self._discovery_cb.setToolTip("Broadcast LAN beacon so clients can auto-detect this server")
         self._show_all_devices = QtWidgets.QCheckBox("Show all devices")
-        self._refresh_devices_btn = QtWidgets.QPushButton("Refresh devices")
-        self._refresh_devices_btn.setProperty("class", "warning")
+        self._refresh_devices_btn = QtWidgets.QToolButton()
+        self._refresh_devices_btn.setText("\u21bb")
+        self._refresh_devices_btn.setFixedSize(26, 26)
+        self._refresh_devices_btn.setToolTip("Refresh audio devices")
         self._device_status = QtWidgets.QLabel("")
 
         self._start_btn = QtWidgets.QPushButton("Start")
@@ -81,16 +90,19 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._stop_btn.setProperty("class", "danger")
         self._stop_btn.setEnabled(False)
 
+        # Row 0 — Identity
         config_lay.addWidget(QtWidgets.QLabel("Name"), 0, 0)
-        config_lay.addWidget(self._server_name, 0, 1)
-        config_lay.addWidget(QtWidgets.QLabel("Port"), 0, 2)
-        config_lay.addWidget(self._port, 0, 3)
-        config_lay.addWidget(self._discovery_cb, 0, 4)
-        config_lay.addWidget(self._show_all_devices, 0, 5)
-        config_lay.addWidget(self._refresh_devices_btn, 0, 6)
-        config_lay.addWidget(self._start_btn, 0, 7)
-        config_lay.addWidget(self._stop_btn, 0, 8)
-        config_lay.addWidget(self._device_status, 1, 0, 1, 9)
+        config_lay.addWidget(self._server_name, 0, 1, 1, 2)
+        config_lay.addWidget(QtWidgets.QLabel("Port"), 0, 3)
+        config_lay.addWidget(self._port, 0, 4)
+        config_lay.addWidget(self._discovery_cb, 0, 5)
+
+        # Row 1 — Controls
+        btn_lay = QtWidgets.QHBoxLayout()
+        btn_lay.setSpacing(8)
+        btn_lay.addWidget(self._start_btn)
+        btn_lay.addWidget(self._stop_btn)
+        config_lay.addLayout(btn_lay, 1, 0, 1, 6)
 
         # -- Clients group --
         clients_box = QtWidgets.QGroupBox("Clients")
@@ -98,30 +110,35 @@ class ServerWindow(QtWidgets.QMainWindow):
         clients_lay.setContentsMargins(4, 4, 4, 4)
         clients_lay.setSpacing(2)
 
-        # Columns: 0=ClientID(hidden), 1=Name, 2=Mode, 3=Addr, 4=Age(hidden), 5=VU, 6=Muted, 7=Gain(%), 8=Regie, 9=Plateau, 10=VMix
+        # Columns: 0=ClientID(hidden), 1=Name, 2=Mode, 3=Addr, 4=Status, 5=VU, 6=Muted, 7=Gain(%), 8=Regie, 9=Plateau, 10=VMix
         self._clients = QtWidgets.QTableWidget(0, 11)
         self._clients.setHorizontalHeaderLabels(
-            ["Client ID", "Name", "Mode", "Addr", "Age", "VU", "Muted", "Gain (%)", "Regie", "Plateau", "VMix"]
+            ["Client ID", "Name", "Mode", "Addr", "", "VU", "Muted", "Gain (%)", "Regie", "Plateau", "VMix"]
         )
         self._clients.setColumnHidden(0, True)
-        self._clients.setColumnHidden(4, True)
+        self._clients.setColumnHidden(3, True)   # Addr hidden, shown in Info dialog
         hdr = self._clients.horizontalHeader()
         hdr.setDefaultSectionSize(60)
         hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Name
-        self._clients.setColumnWidth(1, 120)
+        self._clients.setColumnWidth(1, 80)
         hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)  # Mode
-        hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)  # Addr
+        hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Status
+        self._clients.setColumnWidth(4, 30)
         hdr.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Fixed)   # VU
         self._clients.setColumnWidth(5, 100)
         hdr.setSectionResizeMode(6, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)   # Muted
         hdr.setSectionResizeMode(7, QtWidgets.QHeaderView.ResizeMode.Stretch) # Gain (%)
-        hdr.setSectionResizeMode(8, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)   # Regie
-        hdr.setSectionResizeMode(9, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)  # Plateau
-        hdr.setSectionResizeMode(10, QtWidgets.QHeaderView.ResizeMode.ResizeToContents) # VMix
+        hdr.setSectionResizeMode(8, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Regie
+        self._clients.setColumnWidth(8, 70)
+        hdr.setSectionResizeMode(9, QtWidgets.QHeaderView.ResizeMode.Fixed)  # Plateau
+        self._clients.setColumnWidth(9, 70)
+        hdr.setSectionResizeMode(10, QtWidgets.QHeaderView.ResizeMode.Fixed) # VMix
+        self._clients.setColumnWidth(10, 70)
         self._clients.verticalHeader().setDefaultSectionSize(26)
         self._clients.verticalHeader().setVisible(False)
         self._clients.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self._clients.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self._clients.setAlternatingRowColors(True)
 
         self._client_row_ids: list[int] = []
         self._client_uuid_by_id: Dict[int, str] = {}
@@ -130,6 +147,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._gain_label_widgets: Dict[int, QtWidgets.QLabel] = {}
         self._route_widgets: Dict[tuple[int, int], QtWidgets.QCheckBox] = {}
         self._vu_widgets: Dict[int, VuMeter] = {}
+        self._status_widgets: Dict[int, StatusIndicator] = {}
 
         self._forget_client_btn = QtWidgets.QPushButton("Remove client")
         self._forget_client_btn.setProperty("class", "danger")
@@ -162,7 +180,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._add_output_device.setMinimumContentsLength(40)
         self._add_output_btn = QtWidgets.QPushButton("Add output")
         self._add_output_btn.setProperty("class", "success")
-        self._remove_output_btn = QtWidgets.QPushButton("Remove selected output")
+        self._remove_output_btn = QtWidgets.QPushButton("Remove output")
         self._remove_output_btn.setProperty("class", "danger")
         self._remove_output_btn.setEnabled(False)
 
@@ -183,6 +201,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._outputs.verticalHeader().setVisible(False)
         self._outputs.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self._outputs.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self._outputs.setAlternatingRowColors(True)
         self._outputs.itemSelectionChanged.connect(self._on_output_selection_changed)
 
         outputs_box = QtWidgets.QGroupBox("Outputs")
@@ -191,11 +210,11 @@ class ServerWindow(QtWidgets.QMainWindow):
         outputs_layout.setSpacing(2)
         outputs_top = QtWidgets.QGridLayout()
         outputs_top.addWidget(QtWidgets.QLabel("Device"), 0, 0)
-        outputs_top.addWidget(self._add_output_device, 0, 1)
-        outputs_top.addWidget(QtWidgets.QLabel("Bus"), 0, 2)
-        outputs_top.addWidget(self._bus_selector, 0, 3)
-        outputs_top.addWidget(self._add_output_btn, 0, 4)
-        outputs_top.addWidget(self._remove_output_btn, 0, 5)
+        outputs_top.addWidget(self._add_output_device, 0, 1, 1, 2)
+        outputs_top.addWidget(QtWidgets.QLabel("Bus"), 0, 3)
+        outputs_top.addWidget(self._bus_selector, 0, 4)
+        outputs_top.addWidget(self._add_output_btn, 0, 5)
+        outputs_top.addWidget(self._remove_output_btn, 0, 6)
         outputs_layout.addLayout(outputs_top)
         outputs_layout.addWidget(self._outputs)
 
@@ -207,16 +226,25 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._info_btn.clicked.connect(self._show_geek_info)
 
         bottom = QtWidgets.QHBoxLayout()
-        bottom.addStretch(1)
+        bottom.addWidget(self._show_all_devices)
+        bottom.addWidget(self._refresh_devices_btn)
+        bottom.addWidget(self._device_status, 1)
         bottom.addWidget(self._info_btn)
+
+        # -- Splitter for clients / outputs --
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        splitter.addWidget(clients_box)
+        splitter.addWidget(outputs_box)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setChildrenCollapsible(False)
 
         # -- Main layout --
         layout = QtWidgets.QVBoxLayout(central)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
         layout.addWidget(config_box)
-        layout.addWidget(clients_box, 1)
-        layout.addWidget(outputs_box)
+        layout.addWidget(splitter, 1)
         layout.addLayout(bottom)
 
         self._refresh_devices_btn.clicked.connect(self._start_device_refresh)
@@ -700,6 +728,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._timer.start()
+        self._status_label.setText(f"Running on port {int(self._port.value())}")
 
     def _stop_server(self) -> None:
         if self._server is None:
@@ -714,6 +743,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._clients.setRowCount(0)
             self._outputs.setRowCount(0)
             self._remove_output_btn.setEnabled(False)
+            self._status_label.setText("Stopped")
 
             self._client_row_ids = []
             self._muted_widgets.clear()
@@ -780,6 +810,15 @@ class ServerWindow(QtWidgets.QMainWindow):
             f"Opus OK: {stats.get('opus_ok', '-')}",
             f"Opuslib ver: {stats.get('opuslib_version', '-')}",
         ]
+
+        if snap:
+            lines.append("")
+            lines.append("--- Connected clients ---")
+            for cid, st in sorted(snap.items()):
+                addr = st.get("addr")
+                addr_str = f"{addr[0]}:{addr[1]}" if addr else "-"
+                ctrl = "✓" if st.get("control_connected") else "✗"
+                lines.append(f"  [{cid}] {st.get('name', '?')} — {addr_str} (ctrl: {ctrl})")
 
         if selected is not None and selected in snap:
             st = snap.get(int(selected), {})
@@ -848,6 +887,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._gain_label_widgets.clear()
             self._route_widgets.clear()
             self._vu_widgets.clear()
+            self._status_widgets.clear()
         else:
             for row, client_id in enumerate(client_ids):
                 w = self._clients.cellWidget(row, 6)
@@ -862,6 +902,7 @@ class ServerWindow(QtWidgets.QMainWindow):
                 self._gain_label_widgets.clear()
                 self._route_widgets.clear()
                 self._vu_widgets.clear()
+                self._status_widgets.clear()
 
         def route_checked(bus_id: int, client_id: int) -> bool:
             b = buses.get(int(bus_id))
@@ -893,6 +934,16 @@ class ServerWindow(QtWidgets.QMainWindow):
             addr = st.get("addr")
             _set_item(3, f"{addr[0]}:{addr[1]}" if addr else "")
 
+            # col 4 — Status indicator
+            disconnected = not bool(st.get("control_connected", False))
+            if rebuild:
+                si = StatusIndicator()
+                self._clients.setCellWidget(row, 4, centered_checkbox(si))  # reuse centering helper
+                self._status_widgets[int(client_id)] = si
+            si = self._status_widgets.get(int(client_id))
+            if si is not None:
+                si.set_online(not disconnected)
+
             # col 5 — VU meter
             if rebuild:
                 vu = VuMeter()
@@ -905,15 +956,13 @@ class ServerWindow(QtWidgets.QMainWindow):
                 except Exception:
                     pass
 
-            disconnected = not bool(st.get("control_connected", False))
-            bg = QtGui.QColor(80, 30, 30) if disconnected else QtGui.QColor(0, 0, 0, 0)
-            fg = QtGui.QColor(255, 180, 180) if disconnected else QtGui.QColor(220, 220, 220)
+            # Row styling: dimmed for offline, normal for online
+            fg = QtGui.QColor(100, 100, 100) if disconnected else QtGui.QColor(220, 220, 220)
             for col in range(self._clients.columnCount()):
                 it = self._clients.item(row, col)
                 if it is None:
                     it = QtWidgets.QTableWidgetItem("")
                     self._clients.setItem(row, col, it)
-                it.setBackground(QtGui.QBrush(bg))
                 it.setForeground(QtGui.QBrush(fg))
 
             # col 6 — Muted checkbox (centered)
@@ -933,7 +982,6 @@ class ServerWindow(QtWidgets.QMainWindow):
                 except RuntimeError:
                     self._client_row_ids = []
                     return
-                muted.setStyleSheet("background-color: rgba(120, 40, 40, 150);" if disconnected else "")
 
             # col 7 — Gain as slider + percentage label
             gain_db = float(st.get("gain_db", 0.0))
@@ -991,7 +1039,6 @@ class ServerWindow(QtWidgets.QMainWindow):
                     except RuntimeError:
                         self._client_row_ids = []
                         return
-                    cb.setStyleSheet("background-color: rgba(120, 40, 40, 150);" if disconnected else "")
 
     def _on_route_changed(self, client_id: int, bus_id: int, state: int) -> None:
         if self._server is None:

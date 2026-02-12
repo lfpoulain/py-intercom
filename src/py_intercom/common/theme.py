@@ -124,6 +124,53 @@ def apply_theme(app: QtWidgets.QApplication) -> None:
             background-color: palette(window);
             padding: 0 6px;
         }}
+
+        /* --- Slider --- */
+        QSlider::groove:horizontal {{
+            height: 6px;
+            background: #3a3a3a;
+            border-radius: 3px;
+        }}
+        QSlider::handle:horizontal {{
+            background: {primary};
+            border: 1px solid {primary_light};
+            width: 14px;
+            height: 14px;
+            margin: -5px 0;
+            border-radius: 7px;
+        }}
+        QSlider::handle:horizontal:hover {{
+            background: {primary_light};
+        }}
+        QSlider::sub-page:horizontal {{
+            background: {primary};
+            border-radius: 3px;
+        }}
+
+        /* --- Table --- */
+        QTableWidget {{
+            gridline-color: #3a3a3a;
+            alternate-background-color: rgba(255, 255, 255, 6);
+        }}
+        QHeaderView::section {{
+            background-color: #2a2a2a;
+            color: {primary_light};
+            border: none;
+            border-bottom: 2px solid {primary};
+            padding: 4px 6px;
+            font-weight: bold;
+        }}
+
+        /* --- Status bar --- */
+        QStatusBar {{
+            background: #1e1e1e;
+            color: #aaaaaa;
+            border-top: 1px solid #3a3a3a;
+            font-size: 12px;
+        }}
+        QStatusBar QLabel {{
+            padding: 0 6px;
+        }}
     """
     existing = app.styleSheet() or ""
     app.setStyleSheet(existing + patch)
@@ -165,6 +212,52 @@ def centered_checkbox(cb: QtWidgets.QCheckBox) -> QtWidgets.QWidget:
     lay.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
     lay.addWidget(cb)
     return w
+
+
+# ---------------------------------------------------------------------------
+# Status indicator (colored dot: green=online, red=offline)
+# ---------------------------------------------------------------------------
+
+_STATUS_ONLINE = QtGui.QColor(76, 175, 80)    # Material green 500
+_STATUS_OFFLINE = QtGui.QColor(198, 40, 40)   # Material red 800
+
+
+class StatusIndicator(QtWidgets.QWidget):
+    """Small colored circle indicating online/offline state."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._online: bool = True
+        self.setFixedSize(20, 20)
+
+    def set_online(self, online: bool) -> None:
+        if self._online != online:
+            self._online = online
+            self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        color = _STATUS_ONLINE if self._online else _STATUS_OFFLINE
+
+        # Subtle glow
+        glow = QtGui.QColor(color)
+        glow.setAlpha(50)
+        cx, cy = self.width() / 2, self.height() / 2
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(QtGui.QBrush(glow))
+        painter.drawEllipse(QtCore.QPointF(cx, cy), 8, 8)
+
+        # Solid dot
+        painter.setBrush(QtGui.QBrush(color))
+        painter.drawEllipse(QtCore.QPointF(cx, cy), 5, 5)
+
+        # Highlight
+        highlight = QtGui.QColor(255, 255, 255, 60)
+        painter.setBrush(QtGui.QBrush(highlight))
+        painter.drawEllipse(QtCore.QPointF(cx - 1.5, cy - 1.5), 2, 2)
+
+        painter.end()
 
 
 # ---------------------------------------------------------------------------
