@@ -1,11 +1,12 @@
 from __future__ import annotations
+from collections import deque
 
 import json
 import socket
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Deque, Optional
 
 import numpy as np
 import sounddevice as sd
@@ -13,7 +14,7 @@ from loguru import logger
 
 from ..common.audio import apply_gain_db, rms_dbfs
 from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, FRAME_SAMPLES, SAMPLE_RATE
-from ..common.jitter_buffer import JitterBuffer
+from ..common.jitter_buffer import OpusPacketJitterBuffer
 from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import pack_audio_packet, unpack_audio_packet
 
@@ -71,7 +72,7 @@ class IntercomClient:
         self._enc = OpusEncoder()
         self._dec = OpusDecoder()
 
-        self._jb = JitterBuffer(frame_samples=int(FRAME_SAMPLES), start_frames=5, max_frames=60)
+        self._jb = OpusPacketJitterBuffer(start_frames=5, max_frames=60)
 
         self._opus_ok: bool = True
         self._opus_err: str = ""
@@ -115,6 +116,7 @@ class IntercomClient:
 
         self._sidetone_phase = 0.0
         self._sidetone_buf = np.zeros((0,), dtype=np.float32)
+        self._sidetone_frames: Deque[np.ndarray] = deque(maxlen=200)
 
         self._tx_packets = 0
         self._tx_udp_sent = 0
@@ -123,6 +125,7 @@ class IntercomClient:
         self._opus_decode_errors = 0
         self._tx_socket_errors = 0
         self._rx_socket_errors = 0
+        self._playout_underflows = 0
         self._last_stats_log = time.monotonic()
 
         self._in_stream: Optional[sd.InputStream] = None
@@ -155,11 +158,11 @@ class IntercomClient:
             except Exception:
                 capture_samples = 0
             try:
-                playback_samples = int(self._playback_buf.size)
+                playback_samples = int(self._jb.buffered_frames) * int(FRAME_SAMPLES)
             except Exception:
                 playback_samples = 0
             try:
-                sidetone_samples = int(self._sidetone_buf.size)
+                sidetone_samples = int(len(self._sidetone_frames)) * int(FRAME_SAMPLES)
             except Exception:
                 sidetone_samples = 0
 
@@ -192,6 +195,7 @@ class IntercomClient:
                 "opus_decode_errors": int(self._opus_decode_errors),
                 "tx_socket_errors": int(self._tx_socket_errors),
                 "rx_socket_errors": int(self._rx_socket_errors),
+                "playout_underflows": int(self._playout_underflows),
                 "opus_ok": bool(self._opus_ok),
                 "opus_err": str(self._opus_err),
                 "opuslib_version": str(self._opuslib_version),
@@ -329,6 +333,10 @@ class IntercomClient:
             self._out_phase = 0.0
             self._sidetone_buf = np.zeros((0,), dtype=np.float32)
             self._sidetone_phase = 0.0
+            try:
+                self._sidetone_frames.clear()
+            except Exception:
+                pass
 
         try:
             self._jb.reset()
@@ -569,13 +577,6 @@ class IntercomClient:
                 candidate_channels.append(ch)
 
         samplerates = [SAMPLE_RATE]
-        if dev_info is not None:
-            try:
-                dsr = int(float(dev_info.get("default_samplerate", SAMPLE_RATE)))
-            except Exception:
-                dsr = SAMPLE_RATE
-            if dsr not in samplerates:
-                samplerates.append(dsr)
 
         errors = []
         for sr in samplerates:
@@ -643,48 +644,44 @@ class IntercomClient:
                 candidate_channels.append(ch)
 
         samplerates = [SAMPLE_RATE]
-        if dev_info is not None:
-            try:
-                dsr = int(float(dev_info.get("default_samplerate", SAMPLE_RATE)))
-            except Exception:
-                dsr = SAMPLE_RATE
-            if dsr not in samplerates:
-                samplerates.append(dsr)
 
         errors = []
         for sr in samplerates:
             for ch in candidate_channels:
-                for blocksize in (FRAME_SAMPLES if sr == SAMPLE_RATE else 0, 0):
-                    for latency in ("low", None):
-                        try:
-                            logger.debug(
-                                "opening OutputStream: dev={} ch={} blocksize={} latency={} sr={}",
-                                str(self.config.output_device),
-                                ch,
-                                str(blocksize),
-                                latency,
-                                sr,
-                            )
-                            st = sd.OutputStream(
-                                samplerate=sr,
-                                channels=ch,
-                                dtype="float32",
-                                blocksize=blocksize,
-                                device=self.config.output_device,
-                                latency=latency,
-                                callback=self._out_callback,
-                            )
-                            with self._state_lock:
-                                self._out_channels = ch
-                                self._out_samplerate = sr
-                                self._out_phase = 0.0
-                                self._playback_buf = np.zeros((0,), dtype=np.float32)
-                                self._sidetone_phase = 0.0
-                                self._sidetone_buf = np.zeros((0,), dtype=np.float32)
-                            return st
-                        except Exception as e:
-                            errors.append(f"sr={sr} ch={ch} blocksize={blocksize} latency={latency}: {e}")
-                            logger.warning("OutputStream open failed: {}", errors[-1])
+                for latency in ("low", None):
+                    try:
+                        logger.debug(
+                            "opening OutputStream: dev={} ch={} blocksize={} latency={} sr={}",
+                            str(self.config.output_device),
+                            ch,
+                            str(FRAME_SAMPLES),
+                            latency,
+                            sr,
+                        )
+                        st = sd.OutputStream(
+                            samplerate=sr,
+                            channels=ch,
+                            dtype="float32",
+                            blocksize=int(FRAME_SAMPLES),
+                            device=self.config.output_device,
+                            latency=latency,
+                            callback=self._out_callback,
+                        )
+                        with self._state_lock:
+                            self._out_channels = ch
+                            self._out_samplerate = sr
+                            self._out_phase = 0.0
+                            self._playback_buf = np.zeros((0,), dtype=np.float32)
+                            self._sidetone_phase = 0.0
+                            self._sidetone_buf = np.zeros((0,), dtype=np.float32)
+                            try:
+                                self._sidetone_frames.clear()
+                            except Exception:
+                                pass
+                        return st
+                    except Exception as e:
+                        errors.append(f"sr={sr} ch={ch} blocksize={int(FRAME_SAMPLES)} latency={latency}: {e}")
+                        logger.warning("OutputStream open failed: {}", errors[-1])
 
         raise RuntimeError("failed to open output stream. attempts:\n" + "\n".join(errors))
 
@@ -767,14 +764,10 @@ class IntercomClient:
                 self._in_vu_dbfs = rms_dbfs(y)
 
                 if self._sidetone_enabled:
-                    if self._sidetone_buf.size == 0:
-                        self._sidetone_buf = y.astype(np.float32, copy=False)
-                    else:
-                        self._sidetone_buf = np.concatenate((self._sidetone_buf, y.astype(np.float32, copy=False)))
-
-                    max_samples = int(SAMPLE_RATE * 1)
-                    if self._sidetone_buf.size > max_samples:
-                        self._sidetone_buf = self._sidetone_buf[-max_samples:]
+                    try:
+                        self._sidetone_frames.append(y.astype(np.float32, copy=True))
+                    except Exception:
+                        pass
 
             try:
                 payload = self._enc.encode(y.astype(np.float32, copy=False))
@@ -808,7 +801,8 @@ class IntercomClient:
 
             try:
                 pkt = unpack_audio_packet(data)
-                frame = self._dec.decode(pkt.payload)
+                seq = int(getattr(pkt, "sequence_number", 0)) & 0xFFFFFFFF
+                payload = bytes(getattr(pkt, "payload", b""))
             except Exception:
                 self._opus_decode_errors += 1
                 continue
@@ -816,42 +810,17 @@ class IntercomClient:
             self._rx_packets += 1
 
             try:
-                seq = int(getattr(pkt, "sequence_number", 0)) & 0xFFFFFFFF
-            except Exception:
-                seq = 0
-
-            try:
-                self._jb.push(seq, frame)
+                self._jb.push(seq, payload)
             except Exception:
                 continue
-
-            out_frames: list[np.ndarray] = []
-            while True:
-                try:
-                    f = self._jb.pop()
-                except Exception:
-                    f = None
-                if f is None:
-                    break
-                out_frames.append(f)
-
-            if out_frames:
-                merged = np.concatenate([x.astype(np.float32, copy=False) for x in out_frames])
-                with self._state_lock:
-                    if self._playback_buf.size == 0:
-                        self._playback_buf = merged
-                    else:
-                        self._playback_buf = np.concatenate((self._playback_buf, merged))
-
-                    max_samples = int(SAMPLE_RATE * 3)
-                    if self._playback_buf.size > max_samples:
-                        self._playback_buf = self._playback_buf[-max_samples:]
 
             now = time.monotonic()
             if now - self._last_stats_log >= 5.0:
                 self._last_stats_log = now
-                with self._state_lock:
-                    playback_samples = int(self._playback_buf.size)
+                try:
+                    playback_samples = int(self._jb.buffered_frames) * int(FRAME_SAMPLES)
+                except Exception:
+                    playback_samples = 0
                 try:
                     jb_stats = self._jb.stats
                     jb_buf = int(self._jb.buffered_frames)
@@ -859,7 +828,7 @@ class IntercomClient:
                     jb_stats = None
                     jb_buf = 0
                 logger.debug(
-                    "stats: tx_pkts={} rx_pkts={} enc_err={} dec_err={} tx_sock_err={} rx_sock_err={} playback_samples={} jb_buf={} jb_missing={} jb_late_dropped={} jb_concealed={}",
+                    "stats: tx_pkts={} rx_pkts={} enc_err={} dec_err={} tx_sock_err={} rx_sock_err={} playback_samples={} jb_buf={} jb_missing={} jb_late_dropped={} jb_concealed={} playout_underflows={}",
                     self._tx_packets,
                     self._rx_packets,
                     self._opus_encode_errors,
@@ -871,66 +840,57 @@ class IntercomClient:
                     0 if jb_stats is None else int(jb_stats.missing),
                     0 if jb_stats is None else int(jb_stats.late_dropped),
                     0 if jb_stats is None else int(jb_stats.concealed),
+                    int(self._playout_underflows),
                 )
 
     def _out_callback(self, outdata, frames, time_info, status) -> None:
         if status:
             logger.debug("audio out status: {}", status)
 
+        if self._stop.is_set():
+            outdata[:] = 0
+            return
+
         with self._state_lock:
             out_sr = int(self._out_samplerate)
-            phase = float(self._out_phase)
-            src = self._playback_buf
-
             out_gain_db = float(self._output_gain_db)
             sidetone_enabled = bool(self._sidetone_enabled)
             sidetone_gain_db = float(self._sidetone_gain_db)
-            s_phase = float(self._sidetone_phase)
-            s_src = self._sidetone_buf
+
+        if out_sr != int(SAMPLE_RATE):
+            outdata[:] = 0
+            return
 
         y_net = np.zeros((int(frames),), dtype=np.float32)
-        have_net = False
+        off = 0
+        while off < int(frames):
+            need = int(min(int(FRAME_SAMPLES), int(frames) - off))
+            try:
+                p = self._jb.pop()
+            except Exception:
+                p = None
 
-        if src.size >= 2:
-            ratio = float(SAMPLE_RATE) / float(out_sr)
-            need = int(np.ceil((frames - 1) * ratio + phase + 2))
-            if src.size >= need:
-                positions = phase + np.arange(frames, dtype=np.float32) * ratio
-                idx0 = np.floor(positions).astype(np.int64)
-                frac = (positions - idx0.astype(np.float32)).astype(np.float32)
-                idx1 = idx0 + 1
-                y_net = src[idx0] * (1.0 - frac) + src[idx1] * frac
-                have_net = True
+            if p is None:
+                self._playout_underflows += 1
+                chunk = np.zeros((int(FRAME_SAMPLES),), dtype=np.float32)
+            else:
+                try:
+                    chunk = self._dec.decode(p)
+                except Exception:
+                    self._opus_decode_errors += 1
+                    chunk = np.zeros((int(FRAME_SAMPLES),), dtype=np.float32)
 
-                new_phase = float(positions[-1] + ratio)
-                drop = int(new_phase)
-                new_phase = new_phase - drop
-
-                with self._state_lock:
-                    self._out_phase = new_phase
-                    if drop > 0:
-                        self._playback_buf = self._playback_buf[drop:]
+            y_net[off : off + need] = chunk[:need]
+            off += need
 
         y_side = np.zeros((int(frames),), dtype=np.float32)
-        if sidetone_enabled and s_src.size >= 2:
-            ratio_s = float(SAMPLE_RATE) / float(out_sr)
-            need_s = int(np.ceil((frames - 1) * ratio_s + s_phase + 2))
-            if s_src.size >= need_s:
-                positions_s = s_phase + np.arange(frames, dtype=np.float32) * ratio_s
-                idx0_s = np.floor(positions_s).astype(np.int64)
-                frac_s = (positions_s - idx0_s.astype(np.float32)).astype(np.float32)
-                idx1_s = idx0_s + 1
-                y_side = s_src[idx0_s] * (1.0 - frac_s) + s_src[idx1_s] * frac_s
-                y_side = apply_gain_db(y_side.astype(np.float32, copy=False), sidetone_gain_db)
-
-                new_s_phase = float(positions_s[-1] + ratio_s)
-                drop_s = int(new_s_phase)
-                new_s_phase = new_s_phase - drop_s
-
-                with self._state_lock:
-                    self._sidetone_phase = new_s_phase
-                    if drop_s > 0:
-                        self._sidetone_buf = self._sidetone_buf[drop_s:]
+        if sidetone_enabled:
+            try:
+                f_side = self._sidetone_frames.popleft() if len(self._sidetone_frames) > 0 else None
+            except Exception:
+                f_side = None
+            if f_side is not None and int(getattr(f_side, "shape", [0])[0]) >= int(frames):
+                y_side = apply_gain_db(f_side[: int(frames)].astype(np.float32, copy=False), sidetone_gain_db)
 
         y = y_net + y_side
         y = apply_gain_db(y.astype(np.float32, copy=False), out_gain_db)

@@ -43,15 +43,31 @@ class OpusDecoder:
         self.config = config or OpusConfig()
         try:
             import opuslib
+            import opuslib.api.decoder as opus_decoder_api
         except Exception as e:
             raise RuntimeError("opuslib is required") from e
         try:
             self._decoder = opuslib.Decoder(self.config.sample_rate, self.config.channels)
+            self._opus_decoder_api = opus_decoder_api
         except Exception as e:
             raise RuntimeError("failed to initialize Opus decoder (libopus missing?)") from e
 
     def decode(self, payload: bytes) -> np.ndarray:
-        pcm = self._decoder.decode(payload, self.config.frame_samples, decode_fec=False)
+        if not payload:
+            dec_state = getattr(self._decoder, "decoder_state", None)
+            if dec_state is not None:
+                pcm = self._opus_decoder_api.decode(
+                    dec_state,
+                    None,
+                    0,
+                    self.config.frame_samples,
+                    decode_fec=False,
+                    channels=self.config.channels,
+                )
+            else:
+                pcm = self._decoder.decode(b"", self.config.frame_samples, decode_fec=False)
+        else:
+            pcm = self._decoder.decode(payload, self.config.frame_samples, decode_fec=False)
         frame = int16_bytes_to_float32(pcm)
         if frame.shape[0] != self.config.frame_samples:
             frame = frame[: self.config.frame_samples]

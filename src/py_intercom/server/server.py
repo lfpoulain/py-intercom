@@ -18,7 +18,7 @@ from loguru import logger
 from ..common.audio import apply_gain_db, rms_dbfs
 from ..common.constants import AUDIO_UDP_PORT, CHANNELS, CONTROL_PORT_OFFSET, FRAME_SAMPLES, SAMPLE_RATE
 from ..common.discovery import DiscoveryBeacon
-from ..common.jitter_buffer import JitterBuffer
+from ..common.jitter_buffer import OpusPacketJitterBuffer
 from ..common.jsonio import atomic_write_json, read_json_file
 from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import unpack_audio_packet, pack_audio_packet
@@ -29,8 +29,10 @@ class ClientState:
     addr: Tuple[str, int]
     frames: Deque[np.ndarray]
     last_packet_monotonic: float
-    jb: JitterBuffer = field(
-        default_factory=lambda: JitterBuffer(frame_samples=int(FRAME_SAMPLES), start_frames=5, max_frames=60),
+    decoder: OpusDecoder = field(default_factory=OpusDecoder, repr=False)
+    encoder: OpusEncoder = field(default_factory=OpusEncoder, repr=False)
+    jb: OpusPacketJitterBuffer = field(
+        default_factory=lambda: OpusPacketJitterBuffer(start_frames=5, max_frames=60),
         repr=False,
     )
     muted: bool = False
@@ -1000,11 +1002,17 @@ class IntercomServer:
                         if st.muted:
                             continue
                         try:
-                            frame = st.jb.pop()
+                            payload = st.jb.pop()
                         except Exception:
-                            frame = None
-                        if frame is None:
+                            payload = None
+                        if payload is None:
                             continue
+                        try:
+                            frame = st.decoder.decode(payload)
+                        except Exception:
+                            self._rx_decode_errors += 1
+                            continue
+                        st.vu_dbfs = rms_dbfs(frame)
                         frame = apply_gain_db(frame, st.gain_db)
                         per_client[int(client_id)] = frame
                         try:
@@ -1198,7 +1206,8 @@ class IntercomServer:
 
             try:
                 pkt = unpack_audio_packet(data)
-                frame = self._decoder.decode(pkt.payload)
+                seq = int(getattr(pkt, "sequence_number", 0)) & 0xFFFFFFFF
+                payload = bytes(getattr(pkt, "payload", b""))
             except Exception as e:
                 self._rx_decode_errors += 1
                 logger.warning("bad packet from {}: {}", addr, e)
@@ -1218,9 +1227,8 @@ class IntercomServer:
                     st.last_packet_monotonic = now
                 st.last_timestamp_ms = pkt.timestamp_ms
                 st.last_sequence_number = pkt.sequence_number
-                st.vu_dbfs = rms_dbfs(frame)
                 try:
-                    st.jb.push(int(pkt.sequence_number) & 0xFFFFFFFF, frame)
+                    st.jb.push(seq, payload)
                 except Exception:
                     pass
 
@@ -1260,9 +1268,9 @@ class IntercomServer:
             self._seq_out = (self._seq_out + 1) & 0xFFFFFFFF
 
             with self._lock:
-                dests = [(client_id, st.addr) for client_id, st in self._clients.items()]
+                dests = [(client_id, st.addr, st.encoder) for client_id, st in self._clients.items()]
 
-            for client_id, addr in dests:
+            for client_id, addr, enc in dests:
                 try:
                     if int(addr[1]) <= 0:
                         continue
@@ -1277,7 +1285,7 @@ class IntercomServer:
                     mix_minus = self._limit_peak(mix_minus)
                     mix_minus = np.clip(mix_minus, -1.0, 1.0)
 
-                    payload = self._encoder.encode(mix_minus)
+                    payload = enc.encode(mix_minus)
                 except Exception as e:
                     self._tx_encode_errors += 1
                     logger.debug("broadcast encode failed for {}: {}", addr, e)
