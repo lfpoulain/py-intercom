@@ -3,45 +3,45 @@ setlocal
 
 set "ROOT=%~dp0.."
 set "VENV=%ROOT%\.venv"
-
-set "PYW=%VENV%\Scripts\pythonw.exe"
 set "PY=%VENV%\Scripts\python.exe"
+set "PYW=%VENV%\Scripts\pythonw.exe"
 
-if not exist "%PY%" (
-    echo Virtualenv introuvable: "%VENV%"
-    echo Creation du venv...
-    where py >nul 2>nul
-    if not errorlevel 1 (
-        py -3 -m venv "%VENV%"
-    ) else (
-        where python >nul 2>nul
-        if not errorlevel 1 (
-            python -m venv "%VENV%"
-        ) else (
-            echo Python introuvable (py/python). Installe Python 3 et relance.
-            pause
-            exit /b 1
-        )
-    )
+if exist "%PY%" goto :venv_ok
+
+echo Virtualenv introuvable: "%VENV%"
+echo Creation du venv...
+
+where py >nul 2>nul
+if %errorlevel% equ 0 (
+    py -3 -m venv "%VENV%"
+    goto :check_venv
 )
 
+where python >nul 2>nul
+if %errorlevel% equ 0 (
+    python -m venv "%VENV%"
+    goto :check_venv
+)
+
+echo Python introuvable (py/python). Installe Python 3 et relance.
+pause
+exit /b 1
+
+:check_venv
 if not exist "%PY%" (
     echo Echec creation du virtualenv: "%VENV%"
     pause
     exit /b 1
 )
 
-set "REQ=%ROOT%\requirements.txt"
-if exist "%REQ%" (
-    "%PY%" -m pip install --upgrade pip
-    "%PY%" -m pip install -r "%REQ%"
-)
+echo Installation des dependances...
+"%PY%" -m pip install --upgrade pip
+if exist "%ROOT%\requirements.txt" "%PY%" -m pip install -r "%ROOT%\requirements.txt"
 
+:venv_ok
 if exist "%PYW%" (
-    set "EXEC=%PYW%"
+    start "py-intercom server" "%PYW%" "%ROOT%\run_server.py" --gui
 ) else (
-    set "EXEC=%PY%"
+    start "py-intercom server" "%PY%" "%ROOT%\run_server.py" --gui
 )
-
-start "py-intercom server" "%EXEC%" "%ROOT%\run_server.py" --gui
 endlocal
