@@ -246,6 +246,7 @@ class IntercomBridge:
 
     def _control_loop(self) -> None:
         backoff_s = 1.0
+        liveness_timeout_s = 6.0
         while not self._stop.is_set():
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -270,9 +271,13 @@ class IntercomBridge:
 
                 buf = b""
                 last_ping = 0.0
+                last_rx = time.monotonic()
 
                 while not self._stop.is_set() and not self._kick_pending:
                     now = time.monotonic()
+                    if now - float(last_rx) >= float(liveness_timeout_s):
+                        logger.debug("web bridge control liveness timeout (no rx for {:.1f}s)", float(liveness_timeout_s))
+                        break
                     if now - last_ping >= 2.0:
                         try:
                             self._control_send(sock, {"type": "ping", "t": int(time.time() * 1000)})
@@ -301,6 +306,7 @@ class IntercomBridge:
                             continue
                         if isinstance(msg, dict):
                             self._control_handle_msg(msg)
+                            last_rx = time.monotonic()
 
             except Exception as e:
                 logger.debug("web bridge control loop error: {}", e)

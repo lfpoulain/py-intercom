@@ -483,6 +483,7 @@ class IntercomClient:
 
     def _control_loop(self) -> None:
         backoff_s = 1.0
+        liveness_timeout_s = 6.0
 
         while not self._stop.is_set():
             try:
@@ -511,6 +512,9 @@ class IntercomClient:
                 buf = b""
                 while not self._stop.is_set():
                     now = time.monotonic()
+                    if now - float(self._ctrl_last_rx_monotonic) >= float(liveness_timeout_s):
+                        logger.debug("control liveness timeout (no rx for {:.1f}s)", float(liveness_timeout_s))
+                        break
                     if now - float(self._ctrl_last_tx_monotonic) >= 2.0:
                         try:
                             self._control_send(sock, {"type": "ping", "t": int(time.time() * 1000)})

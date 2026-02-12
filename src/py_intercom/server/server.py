@@ -813,6 +813,12 @@ class IntercomServer:
                         if st is None:
                             st = ClientState(addr=(str(addr[0]), 0), last_packet_monotonic=now)
                             self._clients[int(client_id)] = st
+                            for bus in self._buses.values():
+                                try:
+                                    if bool(bus.default_all_sources) and len(bus.source_ids) > 0:
+                                        bus.source_ids.add(int(client_id))
+                                except Exception:
+                                    pass
                         st.name = name
                         st.mode = mode
                         st.client_uuid = client_uuid
@@ -995,37 +1001,68 @@ class IntercomServer:
                         bus_id: (float(bus.gain_db), set(bus.source_ids), bool(bus.default_all_sources))
                         for bus_id, bus in self._buses.items()
                     }
-                    per_client: Dict[int, np.ndarray] = {}
-                    client_meta: Dict[int, tuple[str, bool, Dict[int, bool], Dict[int, bool], bool, float]] = {}
+                    clients_snapshot: list[
+                        tuple[int, ClientState, bool, float, str, bool, Dict[int, bool], Dict[int, bool], bool, float]
+                    ] = []
                     for client_id, st in list(self._clients.items()):
-                        if st.muted:
-                            continue
                         try:
-                            payload = st.jb.pop()
-                        except Exception:
-                            payload = None
-                        if payload is None:
-                            continue
-                        try:
-                            frame = st.decoder.decode(payload)
-                        except Exception:
-                            self._rx_decode_errors += 1
-                            continue
-                        st.vu_dbfs = rms_dbfs(frame)
-                        frame = apply_gain_db(frame, st.gain_db)
-                        per_client[int(client_id)] = frame
-                        try:
-                            client_meta[int(client_id)] = (
-                                str(st.mode or ""),
-                                bool(st.ptt_general),
-                                dict(st.ptt_buses),
-                                dict(st.mute_buses),
-                                bool(st.control_connected),
-                                float(st.last_control_monotonic),
+                            clients_snapshot.append(
+                                (
+                                    int(client_id),
+                                    st,
+                                    bool(st.muted),
+                                    float(st.gain_db),
+                                    str(st.mode or ""),
+                                    bool(st.ptt_general),
+                                    dict(st.ptt_buses),
+                                    dict(st.mute_buses),
+                                    bool(st.control_connected),
+                                    float(st.last_control_monotonic),
+                                )
                             )
                         except Exception:
-                            client_meta[int(client_id)] = (str(st.mode or ""), False, {}, {}, False, 0.0)
+                            clients_snapshot.append((int(client_id), st, False, 0.0, "", False, {}, {}, False, 0.0))
                     outputs = list(self._outputs.values())
+
+                per_client: Dict[int, np.ndarray] = {}
+                client_meta: Dict[int, tuple[str, bool, Dict[int, bool], Dict[int, bool], bool, float]] = {}
+                vu_updates: Dict[int, float] = {}
+
+                for client_id, st, muted, gain_db, mode, ptt_general, ptt_buses, mute_buses, ctrl_ok, last_ctrl in clients_snapshot:
+                    if muted:
+                        continue
+                    try:
+                        payload = st.jb.pop()
+                    except Exception:
+                        payload = None
+                    if payload is None:
+                        continue
+                    try:
+                        frame = st.decoder.decode(payload)
+                    except Exception:
+                        self._rx_decode_errors += 1
+                        continue
+
+                    vu = rms_dbfs(frame)
+                    vu_updates[int(client_id)] = float(vu)
+
+                    frame = apply_gain_db(frame, float(gain_db))
+                    per_client[int(client_id)] = frame
+                    client_meta[int(client_id)] = (
+                        str(mode or ""),
+                        bool(ptt_general),
+                        dict(ptt_buses),
+                        dict(mute_buses),
+                        bool(ctrl_ok),
+                        float(last_ctrl),
+                    )
+
+                if vu_updates:
+                    with self._lock:
+                        for cid, vu in vu_updates.items():
+                            st2 = self._clients.get(int(cid))
+                            if st2 is not None:
+                                st2.vu_dbfs = float(vu)
 
                 bus_mixes: Dict[int, np.ndarray] = {}
                 bus_contrib: Dict[int, Dict[int, np.ndarray]] = {}
@@ -1226,6 +1263,12 @@ class IntercomServer:
                 if st is None:
                     st = ClientState(addr=addr, last_packet_monotonic=now)
                     self._clients[pkt.client_id] = st
+                    for bus in self._buses.values():
+                        try:
+                            if bool(bus.default_all_sources) and len(bus.source_ids) > 0:
+                                bus.source_ids.add(int(pkt.client_id))
+                        except Exception:
+                            pass
                     logger.info("new client {} from {}", pkt.client_id, addr)
                 else:
                     st.addr = addr

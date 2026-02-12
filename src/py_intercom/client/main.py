@@ -1,5 +1,7 @@
 import argparse
 import random
+import uuid
+import zlib
 
 import sounddevice as sd
 from loguru import logger
@@ -13,6 +15,8 @@ def main() -> int:
     parser.add_argument("--server-ip", default=None)
     parser.add_argument("--server-port", type=int, default=5000)
     parser.add_argument("--client-id", type=int, default=None)
+    parser.add_argument("--client-uuid", default=None)
+    parser.add_argument("--name", default="")
     parser.add_argument("--input-device", type=int, default=None)
     parser.add_argument("--output-device", type=int, default=None)
     parser.add_argument("--input-gain-db", type=float, default=0.0)
@@ -52,13 +56,25 @@ def main() -> int:
     if args.server_ip is None:
         parser.error("--server-ip is required unless --list-devices is set")
 
+    client_uuid = str(args.client_uuid or "").strip()
+    if not client_uuid:
+        if args.client_id is not None:
+            client_uuid = f"cid:{int(args.client_id) & 0xFFFFFFFF}"
+        else:
+            client_uuid = str(uuid.uuid4())
+
     client_id = args.client_id
     if client_id is None:
-        client_id = random.getrandbits(32)
+        try:
+            client_id = int(zlib.crc32(client_uuid.encode("utf-8")) & 0xFFFFFFFF)
+        except Exception:
+            client_id = random.getrandbits(32)
 
     cfg = ClientConfig(
         server_ip=args.server_ip,
         server_port=args.server_port,
+        client_uuid=client_uuid,
+        name=str(args.name or ""),
         input_device=args.input_device,
         output_device=args.output_device,
         input_gain_db=args.input_gain_db,
