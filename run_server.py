@@ -8,13 +8,39 @@ else:
     _root = os.path.dirname(__file__)
     sys.path.insert(0, os.path.join(_root, "src"))
 
-_bin = os.path.join(_root, "bin")
-if os.name == "nt" and os.path.isdir(_bin):
+if os.name == "nt":
+    _dll_dirs = []
+    _meipass = getattr(sys, "_MEIPASS", None)
+    if _meipass:
+        _dll_dirs.append(_meipass)
+    _dll_dirs.append(_root)
+    _dll_dirs.append(os.path.join(_root, "bin"))
+    for _d in _dll_dirs:
+        if os.path.isdir(_d):
+            try:
+                os.add_dll_directory(_d)
+            except Exception:
+                pass
+            os.environ["PATH"] = _d + os.pathsep + os.environ.get("PATH", "")
     try:
-        os.add_dll_directory(_bin)
+        import ctypes
+
+        _candidates = []
+        if _meipass:
+            _candidates.append(os.path.join(_meipass, "opus.dll"))
+            _candidates.append(os.path.join(_meipass, "bin", "opus.dll"))
+        _candidates.append(os.path.join(_root, "opus.dll"))
+        _candidates.append(os.path.join(_root, "bin", "opus.dll"))
+
+        for _p in _candidates:
+            if os.path.isfile(_p):
+                try:
+                    ctypes.CDLL(_p)
+                    break
+                except Exception:
+                    pass
     except Exception:
         pass
-    os.environ["PATH"] = _bin + os.pathsep + os.environ.get("PATH", "")
 
 from py_intercom.server.main import main
 

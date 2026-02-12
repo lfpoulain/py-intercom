@@ -10,10 +10,33 @@ $projectRoot = (Resolve-Path (Join-Path $scriptDir '..')).Path
 $venvPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
 
 if (-not (Test-Path $venvPython)) {
-  throw "Virtualenv not found at $venvPython. Create it first: python -m venv .venv ; .\.venv\Scripts\python -m pip install -r requirements.txt"
+  $venvDir = Join-Path $projectRoot '.venv'
+
+  $bootstrapPython = $null
+  if (Get-Command py -ErrorAction SilentlyContinue) {
+    $bootstrapPython = @('py', '-3')
+  } elseif (Get-Command python -ErrorAction SilentlyContinue) {
+    $bootstrapPython = @('python')
+  }
+
+  if (-not $bootstrapPython) {
+    throw "Virtualenv not found at $venvPython and no Python launcher found (py/python). Install Python 3 or add it to PATH."
+  }
+
+  Write-Host "Creating virtualenv at $venvDir..."
+  & $bootstrapPython[0] @($bootstrapPython[1..($bootstrapPython.Count-1)]) -m venv $venvDir
+
+  if (-not (Test-Path $venvPython)) {
+    throw "Virtualenv creation failed: $venvPython not found"
+  }
 }
 
+$requirementsFile = Join-Path $projectRoot 'requirements.txt'
+
 & $venvPython -m pip install --upgrade pip
+if (Test-Path $requirementsFile) {
+  & $venvPython -m pip install -r $requirementsFile
+}
 & $venvPython -m pip install --upgrade pyinstaller
 
 if ($Clean) {
@@ -68,8 +91,8 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host 'Done.'
 Write-Host 'Outputs:'
-$clientExe = Join-Path $projectRoot 'dist\client\client.exe'
-$serverExe = Join-Path $projectRoot 'dist\server\server.exe'
+$clientExe = Join-Path $projectRoot 'dist\client.exe'
+$serverExe = Join-Path $projectRoot 'dist\server.exe'
 if (-not (Test-Path $clientExe)) {
   throw "client.exe not found at $clientExe"
 }

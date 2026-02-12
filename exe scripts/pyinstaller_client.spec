@@ -21,7 +21,7 @@ if not os.path.exists(os.path.join(_project_root, "run_client.py")):
         _project_root = _parent
 
 _binaries = [
-    (os.path.join(_project_root, "bin", "opus.dll"), os.path.join("bin")),
+    (os.path.join(_project_root, "bin", "opus.dll"), "."),
 ]
 
 try:
@@ -63,8 +63,8 @@ exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
+    a.zipfiles,
     a.datas,
-    [],
     name="client",
     debug=False,
     bootloader_ignore_signals=False,
@@ -78,16 +78,4 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    a.zipfiles,
-    a.dependencies,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name="client",
 )
