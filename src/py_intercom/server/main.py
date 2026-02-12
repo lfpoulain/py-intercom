@@ -12,6 +12,9 @@ def main() -> int:
     parser.add_argument("--bind-ip", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--output-device", type=int, default=None)
+    parser.add_argument("--return-enabled", action="store_true")
+    parser.add_argument("--return-input-device", type=int, default=None)
+    parser.add_argument("--return-gain-db", type=float, default=0.0)
     parser.add_argument("--list-devices", action="store_true")
     parser.add_argument("--all-devices", action="store_true")
     parser.add_argument("--gui", action="store_true")
@@ -35,6 +38,13 @@ def main() -> int:
 
     if args.debug:
         logger.info("starting server")
-    srv = IntercomServer(bind_ip=args.bind_ip, port=args.port, output_device=args.output_device)
+    srv = IntercomServer(
+        bind_ip=args.bind_ip,
+        port=args.port,
+        output_device=args.output_device,
+        return_input_device=args.return_input_device,
+        return_enabled=bool(args.return_enabled),
+        return_gain_db=float(args.return_gain_db),
+    )
     srv.run_forever()
     return 0

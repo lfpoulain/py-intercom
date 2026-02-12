@@ -77,6 +77,18 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._discovery_cb = QtWidgets.QCheckBox("Discovery")
         self._discovery_cb.setChecked(True)
         self._discovery_cb.setToolTip("Broadcast LAN beacon so clients can auto-detect this server")
+
+        self._return_enabled = QtWidgets.QCheckBox("Return")
+        self._return_enabled.setChecked(False)
+        self._return_input_device = QtWidgets.QComboBox()
+        patch_combo(self._return_input_device)
+        self._return_gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self._return_gain.setMinimum(-60)
+        self._return_gain.setMaximum(12)
+        self._return_gain.setValue(0)
+        self._return_gain_lbl = QtWidgets.QLabel("0 dB")
+        self._return_gain_lbl.setFixedWidth(50)
+        self._return_gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         self._show_all_devices = QtWidgets.QCheckBox("Show all devices")
         self._refresh_devices_btn = QtWidgets.QToolButton()
         self._refresh_devices_btn.setText("\u21bb")
@@ -97,12 +109,19 @@ class ServerWindow(QtWidgets.QMainWindow):
         config_lay.addWidget(self._port, 0, 4)
         config_lay.addWidget(self._discovery_cb, 0, 5)
 
-        # Row 1 — Controls
+        # Row 1 — Return
+        config_lay.addWidget(self._return_enabled, 1, 0)
+        config_lay.addWidget(self._return_input_device, 1, 1, 1, 2)
+        config_lay.addWidget(QtWidgets.QLabel("Return gain"), 1, 3)
+        config_lay.addWidget(self._return_gain, 1, 4)
+        config_lay.addWidget(self._return_gain_lbl, 1, 5)
+
+        # Row 2 — Controls
         btn_lay = QtWidgets.QHBoxLayout()
         btn_lay.setSpacing(8)
         btn_lay.addWidget(self._start_btn)
         btn_lay.addWidget(self._stop_btn)
-        config_lay.addLayout(btn_lay, 1, 0, 1, 6)
+        config_lay.addLayout(btn_lay, 2, 0, 1, 6)
 
         # -- Clients group --
         clients_box = QtWidgets.QGroupBox("Clients")
@@ -253,6 +272,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._stop_btn.clicked.connect(self._stop_server)
         self._add_output_btn.clicked.connect(self._on_add_output)
         self._remove_output_btn.clicked.connect(self._on_remove_output)
+        self._return_gain.valueChanged.connect(self._on_return_gain_changed)
 
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(200)
@@ -263,6 +283,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._device_timeout: Optional[QtCore.QTimer] = None
         self._last_device_error: str = ""
         self._last_device_count: int = 0
+        self._return_input_devices_cache: list[tuple[str, int]] = []
 
         QtCore.QTimer.singleShot(0, self._start_device_refresh)
         QtCore.QTimer.singleShot(0, self._load_preset_preview)
@@ -637,9 +658,34 @@ class ServerWindow(QtWidgets.QMainWindow):
         finally:
             self._add_output_device.blockSignals(False)
 
+        self._return_input_device.blockSignals(True)
+        try:
+            current_in = self._return_input_device.currentData()
+            self._return_input_device.clear()
+            self._return_input_devices_cache = []
+            self._return_input_device.addItem("(none)", None)
+            for d in devs:
+                if d.max_input_channels <= 0:
+                    continue
+                label = f"{d.index}-{d.name}"
+                self._return_input_device.addItem(label, d.index)
+                self._return_input_devices_cache.append((label, int(d.index)))
+            if current_in is not None:
+                i = self._return_input_device.findData(current_in)
+                if i >= 0:
+                    self._return_input_device.setCurrentIndex(i)
+        finally:
+            self._return_input_device.blockSignals(False)
+
         if self._server is None:
             self._output_row_ids = []
             self._load_preset_preview()
+
+    def _on_return_gain_changed(self, value: int) -> None:
+        try:
+            self._return_gain_lbl.setText(f"{int(value)} dB")
+        except Exception:
+            pass
 
     def _forget_selected_client(self) -> None:
         try:
@@ -709,6 +755,9 @@ class ServerWindow(QtWidgets.QMainWindow):
             output_device=None,
             server_name=self._server_name.text().strip() or "py-intercom",
             discovery_enabled=self._discovery_cb.isChecked(),
+            return_input_device=self._return_input_device.currentData(),
+            return_enabled=self._return_enabled.isChecked(),
+            return_gain_db=float(self._return_gain.value()),
         )
 
         try:
@@ -727,6 +776,9 @@ class ServerWindow(QtWidgets.QMainWindow):
 
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
+        self._return_enabled.setEnabled(False)
+        self._return_input_device.setEnabled(False)
+        self._return_gain.setEnabled(False)
         self._timer.start()
         self._status_label.setText(f"Running on port {int(self._port.value())}")
 
@@ -740,6 +792,9 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._server = None
             self._start_btn.setEnabled(True)
             self._stop_btn.setEnabled(False)
+            self._return_enabled.setEnabled(True)
+            self._return_input_device.setEnabled(True)
+            self._return_gain.setEnabled(True)
             self._clients.setRowCount(0)
             self._outputs.setRowCount(0)
             self._remove_output_btn.setEnabled(False)

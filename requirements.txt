@@ -2,7 +2,6 @@ numpy>=2.1.0
 sounddevice>=0.4.6
 opuslib==3.0.1
 loguru==0.7.0
-PyYAML>=6.0.2
 pynput==1.7.6
 Flask>=3.0.0
 Werkzeug>=3.0.0

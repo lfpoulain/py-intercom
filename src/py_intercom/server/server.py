@@ -48,6 +48,8 @@ class ClientState:
     ptt_buses: Dict[int, bool] = field(default_factory=dict)
     mute_buses: Dict[int, bool] = field(default_factory=dict)
 
+    listen_return_bus: bool = False
+
 
 @dataclass
 class AudioBus:
@@ -99,6 +101,9 @@ class IntercomServer:
         preset_path: Optional[str] = None,
         server_name: str = "py-intercom",
         discovery_enabled: bool = True,
+        return_input_device: Optional[int] = None,
+        return_enabled: bool = False,
+        return_gain_db: float = 0.0,
     ):
         self.bind_ip = bind_ip
         self.port = port
@@ -140,7 +145,6 @@ class IntercomServer:
             1: AudioBus(bus_id=1, name="Plateau", source_ids=set(), default_all_sources=False),
             2: AudioBus(bus_id=2, name="VMix", source_ids=set(), default_all_sources=False),
         }
-        self._next_bus_id = 3
 
         # items are (raw_mix_48k, contributions_by_client_id)
         self._mix_queue: queue.Queue[object] = queue.Queue(maxsize=50)
@@ -177,6 +181,16 @@ class IntercomServer:
 
         self._mix_thread: Optional[threading.Thread] = None
         self._running: bool = False
+
+        self._return_input_device: Optional[int] = int(return_input_device) if return_input_device is not None else None
+        self._return_enabled: bool = bool(return_enabled)
+        self._return_gain_db: float = float(return_gain_db)
+        self._return_stream: Optional[sd.InputStream] = None
+        self._return_lock = threading.Lock()
+        self._return_in_samplerate: int = int(SAMPLE_RATE)
+        self._return_in_phase: float = 0.0
+        self._return_capture_buf: np.ndarray = np.zeros((0,), dtype=np.float32)
+        self._return_frames: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=120)
 
         self._ctrl_sock: Optional[socket.socket] = None
         self._ctrl_thread: Optional[threading.Thread] = None
@@ -602,6 +616,12 @@ class IntercomServer:
         if ok == 0 and last_err is not None:
             raise last_err
 
+        try:
+            if self._return_enabled and self._return_input_device is not None:
+                self._open_return_input_stream(int(self._return_input_device))
+        except Exception as e:
+            logger.warning("return input failed to start: {}", e)
+
     def stop(self) -> None:
         self._stop.set()
         self._running = False
@@ -634,11 +654,128 @@ class IntercomServer:
                         out.stream.close()
                 except Exception:
                     pass
+
+            try:
+                if self._return_stream is not None:
+                    self._return_stream.stop()
+                    self._return_stream.close()
+            except Exception:
+                pass
+            self._return_stream = None
         finally:
             try:
                 self._sock.close()
             except Exception:
                 pass
+
+    def _open_return_input_stream(self, device: int) -> None:
+        dev_info = None
+        try:
+            dev_info = sd.query_devices(int(device))
+        except Exception:
+            dev_info = None
+
+        in_sr = int(SAMPLE_RATE)
+        if dev_info is not None:
+            try:
+                in_sr = int(round(float(dev_info.get("default_samplerate", SAMPLE_RATE))))
+            except Exception:
+                in_sr = int(SAMPLE_RATE)
+        in_sr = int(in_sr) if int(in_sr) > 0 else int(SAMPLE_RATE)
+
+        blocksize_frame = int(round(float(FRAME_SAMPLES) * float(in_sr) / float(SAMPLE_RATE)))
+        blocksize_frame = max(0, int(blocksize_frame))
+
+        with self._return_lock:
+            self._return_in_samplerate = int(in_sr)
+            self._return_in_phase = 0.0
+            self._return_capture_buf = np.zeros((0,), dtype=np.float32)
+            try:
+                while True:
+                    self._return_frames.get_nowait()
+            except Exception:
+                pass
+
+        st = sd.InputStream(
+            samplerate=float(in_sr),
+            channels=1,
+            dtype="float32",
+            blocksize=blocksize_frame,
+            device=int(device),
+            latency="low",
+            callback=self._return_in_callback,
+        )
+        st.start()
+        self._return_stream = st
+
+    def _return_in_callback(self, indata, frames, time_info, status) -> None:
+        if status:
+            logger.debug("return in status: {}", status)
+
+        if self._stop.is_set() or not bool(self._return_enabled):
+            return
+
+        with self._return_lock:
+            in_sr = int(self._return_in_samplerate)
+
+        if indata.ndim == 1:
+            mono = indata.astype(np.float32, copy=False)
+        else:
+            if indata.shape[1] == 1:
+                mono = indata[:, 0].astype(np.float32, copy=False)
+            else:
+                mono = np.mean(indata.astype(np.float32, copy=False), axis=1)
+
+        with self._return_lock:
+            if self._return_capture_buf.size == 0:
+                self._return_capture_buf = mono
+            else:
+                self._return_capture_buf = np.concatenate((self._return_capture_buf, mono))
+
+            max_samples = int(in_sr * 3)
+            if self._return_capture_buf.size > max_samples:
+                self._return_capture_buf = self._return_capture_buf[-max_samples:]
+
+        ratio = float(in_sr) / float(SAMPLE_RATE)
+
+        while True:
+            with self._return_lock:
+                phase = float(self._return_in_phase)
+                src = self._return_capture_buf
+
+            need = int(np.ceil((FRAME_SAMPLES - 1) * ratio + phase + 2))
+            if src.size < need:
+                return
+
+            positions = phase + np.arange(FRAME_SAMPLES, dtype=np.float32) * ratio
+            idx0 = np.floor(positions).astype(np.int64)
+            frac = (positions - idx0.astype(np.float32)).astype(np.float32)
+            idx1 = idx0 + 1
+
+            if int(idx1.max(initial=0)) >= int(src.size):
+                return
+
+            y = src[idx0] * (1.0 - frac) + src[idx1] * frac
+            y = np.clip(y.astype(np.float32, copy=False), -1.0, 1.0)
+
+            new_phase = float(positions[-1] + ratio)
+            drop = int(new_phase)
+            new_phase = new_phase - drop
+
+            with self._return_lock:
+                self._return_in_phase = float(new_phase)
+                if drop > 0 and self._return_capture_buf.size >= drop:
+                    self._return_capture_buf = self._return_capture_buf[drop:]
+
+            try:
+                while True:
+                    self._return_frames.put_nowait(y.astype(np.float32, copy=False))
+                    break
+            except queue.Full:
+                try:
+                    self._return_frames.get_nowait()
+                except Exception:
+                    return
 
     def _control_send(self, sock: socket.socket, msg: dict) -> None:
         data = (json.dumps(msg, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
@@ -765,6 +902,7 @@ class IntercomServer:
                         ptt_general = msg.get("ptt_general")
                         ptt_buses = msg.get("ptt_buses")
                         mute_buses = msg.get("mute_buses")
+                        listen_return_bus = msg.get("listen_return_bus")
                         with self._lock:
                             st = self._clients.get(int(cid))
                             if st is not None:
@@ -780,6 +918,9 @@ class IntercomServer:
                                         st.mute_buses = {int(k): bool(v) for k, v in mute_buses.items()}
                                     except Exception:
                                         st.mute_buses = {}
+
+                                if listen_return_bus is not None:
+                                    st.listen_return_bus = bool(listen_return_bus)
 
                                 st.control_connected = True
                                 st.last_control_monotonic = time.monotonic()
@@ -1316,9 +1457,24 @@ class IntercomServer:
             self._seq_out = (self._seq_out + 1) & 0xFFFFFFFF
 
             with self._lock:
-                dests = [(client_id, st.addr, st.encoder) for client_id, st in self._clients.items()]
+                dests = [(client_id, st.addr, st.encoder, bool(st.listen_return_bus)) for client_id, st in self._clients.items()]
 
-            for client_id, addr, enc in dests:
+            return_frame = None
+            if bool(self._return_enabled):
+                try:
+                    return_frame = self._return_frames.get_nowait()
+                except Exception:
+                    return_frame = None
+
+            if return_frame is None or not isinstance(return_frame, np.ndarray) or int(getattr(return_frame, "shape", [0])[0]) != int(FRAME_SAMPLES):
+                return_frame = np.zeros((FRAME_SAMPLES,), dtype=np.float32)
+            else:
+                try:
+                    return_frame = apply_gain_db(return_frame.astype(np.float32, copy=False), float(self._return_gain_db))
+                except Exception:
+                    return_frame = return_frame.astype(np.float32, copy=False)
+
+            for client_id, addr, enc, listen_return in dests:
                 try:
                     if int(addr[1]) <= 0:
                         continue
@@ -1330,6 +1486,9 @@ class IntercomServer:
                         mix_minus = raw_mix
                     else:
                         mix_minus = raw_mix - c
+
+                    if bool(listen_return):
+                        mix_minus = mix_minus + return_frame
                     mix_minus = self._limit_peak(mix_minus)
                     mix_minus = np.clip(mix_minus, -1.0, 1.0)
 

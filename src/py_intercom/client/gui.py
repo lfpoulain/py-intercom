@@ -11,7 +11,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from pynput import keyboard
 
 from ..common.devices import list_devices
-from ..common.discovery import DiscoveredServer, DiscoveryListener
+from ..common.discovery import DiscoveryListener
 from ..common.jsonio import atomic_write_json, read_json_file
 from ..common.theme import VuMeter, apply_theme, patch_combo
 from .client import ClientConfig, IntercomClient
@@ -380,6 +380,13 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._mute = QtWidgets.QCheckBox("Mute mic")
         self._mute.setEnabled(False)
 
+        self._listen_return_bus = QtWidgets.QCheckBox("Listen return bus")
+        self._listen_return_bus.setEnabled(False)
+        try:
+            self._listen_return_bus.setChecked(bool(self._preset_get("listen_return_bus", False)))
+        except Exception:
+            pass
+
         self._sidetone = QtWidgets.QCheckBox("Sidetone (hear self locally)")
         self._sidetone.setEnabled(False)
 
@@ -451,6 +458,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         ctrl_lay.setVerticalSpacing(2)
         ctrl_lay.addWidget(self._mute, 0, 0)
         ctrl_lay.addWidget(self._sidetone, 0, 1, 1, 3)
+        ctrl_lay.addWidget(self._listen_return_bus, 0, 4)
         ctrl_lay.addWidget(QtWidgets.QLabel("Mic gain"), 1, 0)
         ctrl_lay.addWidget(self._mic_gain, 1, 1, 1, 2)
         ctrl_lay.addWidget(self._mic_gain_lbl, 1, 3)
@@ -519,6 +527,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._disconnect_btn.clicked.connect(self._disconnect)
 
         self._mute.stateChanged.connect(self._on_mute_changed)
+        self._listen_return_bus.stateChanged.connect(self._on_listen_return_bus_changed)
         self._mic_gain.valueChanged.connect(self._on_mic_gain_changed)
         self._hp_gain.valueChanged.connect(self._on_hp_gain_changed)
         self._sidetone.stateChanged.connect(self._on_sidetone_changed)
@@ -1076,6 +1085,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             ptt_general_key=str(self._ptt_general_key.keySequence().toString()),
             ptt_bus_keys=dict(self._preset_get("ptt_bus_keys", {}) or {}),
             mute_buses=dict(self._preset_get("mute_buses", {}) or {}),
+            listen_return_bus=bool(self._listen_return_bus.isChecked()),
         )
 
         # Reuse existing client if audio devices haven't changed (avoids PortAudio reopen issues on Windows)
@@ -1098,11 +1108,13 @@ class ClientWindow(QtWidgets.QMainWindow):
                 self._client.config.ptt_general_key = cfg.ptt_general_key
                 self._client.config.ptt_bus_keys = cfg.ptt_bus_keys
                 self._client.config.mute_buses = cfg.mute_buses
+                self._client.config.listen_return_bus = bool(cfg.listen_return_bus)
                 self._client.set_input_gain_db(cfg.input_gain_db)
                 self._client.set_output_gain_db(cfg.output_gain_db)
                 self._client.set_muted(cfg.muted)
                 self._client.set_sidetone_enabled(cfg.sidetone_enabled)
                 self._client.set_sidetone_gain_db(cfg.sidetone_gain_db)
+                self._client.set_listen_return_bus(bool(cfg.listen_return_bus))
                 self._client.reconnect_network()
             else:
                 # Full stop of old client if devices changed
@@ -1144,6 +1156,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
         self._mute.setEnabled(True)
+        self._listen_return_bus.setEnabled(True)
         self._mic_gain.setEnabled(True)
         self._hp_gain.setEnabled(True)
         self._sidetone.setEnabled(True)
@@ -1186,6 +1199,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._connect_btn.setEnabled(True)
             self._disconnect_btn.setEnabled(False)
             self._mute.setEnabled(False)
+            self._listen_return_bus.setEnabled(False)
             self._mic_gain.setEnabled(False)
             self._hp_gain.setEnabled(False)
             self._sidetone.setEnabled(False)
@@ -1216,6 +1230,19 @@ class ClientWindow(QtWidgets.QMainWindow):
         if self._client is None:
             return
         self._client.set_muted(_is_checked(state))
+
+    def _on_listen_return_bus_changed(self, state: int) -> None:
+        enabled = _is_checked(state)
+        try:
+            self._preset_set("listen_return_bus", bool(enabled))
+        except Exception:
+            pass
+        if self._client is None:
+            return
+        try:
+            self._client.set_listen_return_bus(bool(enabled))
+        except Exception:
+            pass
 
     def _on_mic_gain_changed(self, value: int) -> None:
         self._mic_gain_lbl.setText(f"{value} dB")

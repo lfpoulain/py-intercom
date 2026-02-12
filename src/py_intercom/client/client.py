@@ -40,6 +40,8 @@ class ClientConfig:
     ptt_bus_keys: Optional[dict] = None
     mute_buses: Optional[dict] = None
 
+    listen_return_bus: bool = False
+
 
 class IntercomClient:
     @staticmethod
@@ -114,8 +116,6 @@ class IntercomClient:
         self._out_phase = 0.0
         self._playback_buf = np.zeros((0,), dtype=np.float32)
 
-        self._sidetone_phase = 0.0
-        self._sidetone_buf = np.zeros((0,), dtype=np.float32)
         self._sidetone_frames: Deque[np.ndarray] = deque(maxlen=200)
 
         self._tx_packets = 0
@@ -144,6 +144,7 @@ class IntercomClient:
         self._ptt_general: bool = False
         self._ptt_buses: dict[int, bool] = {}
         self._mute_buses: dict[int, bool] = {}
+        self._listen_return_bus: bool = bool(self.config.listen_return_bus)
         try:
             if isinstance(self.config.mute_buses, dict):
                 for k, v in self.config.mute_buses.items():
@@ -208,6 +209,7 @@ class IntercomClient:
                 "ptt_general": bool(self._ptt_general),
                 "ptt_buses": dict(self._ptt_buses),
                 "mute_buses": dict(self._mute_buses),
+                "listen_return_bus": bool(self._listen_return_bus),
                 "routes": dict(self._ctrl_routes or {}),
                 "name": str(self.config.name or ""),
                 "mode": str(self.config.mode or ""),
@@ -226,6 +228,11 @@ class IntercomClient:
     def set_mute_bus(self, bus_id: int, muted: bool) -> None:
         with self._state_lock:
             self._mute_buses[int(bus_id)] = bool(muted)
+        self._control_send_state()
+
+    def set_listen_return_bus(self, enabled: bool) -> None:
+        with self._state_lock:
+            self._listen_return_bus = bool(enabled)
         self._control_send_state()
 
     def set_muted(self, muted: bool, from_control: bool = False) -> None:
@@ -338,8 +345,6 @@ class IntercomClient:
             self._in_phase = 0.0
             self._playback_buf = np.zeros((0,), dtype=np.float32)
             self._out_phase = 0.0
-            self._sidetone_buf = np.zeros((0,), dtype=np.float32)
-            self._sidetone_phase = 0.0
             try:
                 self._sidetone_frames.clear()
             except Exception:
@@ -417,12 +422,14 @@ class IntercomClient:
             ptt_general = bool(self._ptt_general)
             ptt_buses = dict(self._ptt_buses)
             mute_buses = dict(self._mute_buses)
+            listen_return_bus = bool(self._listen_return_bus)
         msg: dict = {
             "type": "state",
             "client_id": int(self.client_id),
             "ptt_general": bool(ptt_general),
             "ptt_buses": dict(ptt_buses),
             "mute_buses": dict(mute_buses),
+            "listen_return_bus": bool(listen_return_bus),
         }
         if muted is not None:
             msg["muted"] = bool(muted)
@@ -683,10 +690,7 @@ class IntercomClient:
                         with self._state_lock:
                             self._out_channels = ch
                             self._out_samplerate = sr
-                            self._out_phase = 0.0
                             self._playback_buf = np.zeros((0,), dtype=np.float32)
-                            self._sidetone_phase = 0.0
-                            self._sidetone_buf = np.zeros((0,), dtype=np.float32)
                             try:
                                 self._sidetone_frames.clear()
                             except Exception:

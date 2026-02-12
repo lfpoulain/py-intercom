@@ -4,7 +4,7 @@ import atexit
 import secrets
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import numpy as np
 from flask import Flask, render_template, request
@@ -21,7 +21,6 @@ from .bridge import BridgeConfig, IntercomBridge
 class WebClientSession:
     sid: str
     bridge: IntercomBridge
-    lock: threading.Lock
 
 
 def create_app() -> tuple[Flask, SocketIO]:
@@ -154,7 +153,7 @@ def create_app() -> tuple[Flask, SocketIO]:
         bridge = IntercomBridge(client_uuid=client_uuid, config=cfg, on_audio_frame=_on_audio_frame, on_control_msg=_on_control_msg, on_kick=_on_kick)
         bridge.start()
 
-        sess = WebClientSession(sid=sid, bridge=bridge, lock=threading.Lock())
+        sess = WebClientSession(sid=sid, bridge=bridge)
         with sessions_lock:
             sessions[sid] = sess
 

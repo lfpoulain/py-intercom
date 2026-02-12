@@ -1,6 +1,5 @@
 import struct
 from dataclasses import dataclass
-from typing import Tuple
 
 from .constants import MAX_UDP_PAYLOAD_BYTES, PACKET_HEADER_BYTES
 
