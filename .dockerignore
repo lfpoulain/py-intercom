@@ -1,0 +1,22 @@
+.git
+.gitignore
+.gitattributes
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+dist/
+build/
+*.spec
+bin/
+exe scripts/
+lunch script/
+.venv/
+venv/
+*.exe
+*.dll
+README.md
+playbook.md
+Dockerfile
+docker-compose.yml
+.dockerignore

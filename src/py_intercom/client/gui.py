@@ -579,6 +579,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._ptt_general_key.keySequenceChanged.connect(self._on_ptt_general_key_changed)
         for bid, edit in self._ptt_bus_keys.items():
             edit.keySequenceChanged.connect(lambda _seq, bus_id=int(bid): self._on_ptt_bus_key_changed(bus_id))
+        self._mode.currentIndexChanged.connect(self._on_mode_changed)
 
         for bid, cb in self._tx_mode_bus_widgets.items():
             cb.currentIndexChanged.connect(lambda _idx, bus_id=int(bid): self._on_tx_mode_bus_changed(bus_id))
@@ -819,6 +820,37 @@ class ClientWindow(QtWidgets.QMainWindow):
                 self._client.set_output_mute_bus(int(bus_id), bool(muted))
             except Exception:
                 pass
+
+    def _is_mode_allowing_mic_mute(self) -> bool:
+        try:
+            for cb in self._tx_mode_bus_widgets.values():
+                if str(cb.currentData() or "").strip().lower() == "always_on":
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _apply_mute_ui_policy(self, *, sync_client: bool = False) -> None:
+        allow_mic_mute = self._is_mode_allowing_mic_mute()
+        self._mute.setEnabled(bool(self._connected) and bool(allow_mic_mute))
+        if not allow_mic_mute and self._mute.isChecked():
+            self._mute.blockSignals(True)
+            try:
+                self._mute.setChecked(False)
+            finally:
+                self._mute.blockSignals(False)
+            if sync_client and self._client is not None:
+                try:
+                    self._client.set_muted(False)
+                except Exception:
+                    pass
+
+    def _on_mode_changed(self, _index: int) -> None:
+        self._apply_mute_ui_policy(sync_client=True)
+        try:
+            self._preset_set("mode", str(self._mode.currentData() or "always_on"))
+        except Exception:
+            pass
 
     def _on_tx_mode_bus_changed(self, bus_id: int) -> None:
         cb = self._tx_mode_bus_widgets.get(int(bus_id))
@@ -1138,6 +1170,8 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._preset_set("mode", mode)
 
         client_uuid = str(self._preset_get("client_uuid", ""))
+        tx_mode_buses_cfg = self._preset_get("tx_mode_buses", None)
+        tx_mode_buses = dict(tx_mode_buses_cfg) if isinstance(tx_mode_buses_cfg, dict) else None
 
         cfg = ClientConfig(
             server_ip=server_ip,
@@ -1156,7 +1190,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             ptt_general_key=str(self._ptt_general_key.keySequence().toString()),
             ptt_bus_keys=dict(self._preset_get("ptt_bus_keys", {}) or {}),
             mute_buses=dict(self._preset_get("mute_buses", {}) or {}),
-            tx_mode_buses=dict(self._preset_get("tx_mode_buses", {}) or {}),
+            tx_mode_buses=tx_mode_buses,
             output_mute_buses=dict(self._preset_get("output_mute_buses", self._preset_get("mute_buses", {})) or {}),
             listen_return_bus=bool(self._listen_return_bus.isChecked()),
         )
@@ -1190,10 +1224,14 @@ class ClientWindow(QtWidgets.QMainWindow):
                 self._client.set_sidetone_enabled(cfg.sidetone_enabled)
                 self._client.set_sidetone_gain_db(cfg.sidetone_gain_db)
                 self._client.set_listen_return_bus(bool(cfg.listen_return_bus))
-                tx_mode_buses = dict(cfg.tx_mode_buses or {})
-                for bid in (0, 1, 2):
-                    mode = str(tx_mode_buses.get(str(bid), tx_mode_buses.get(int(bid), "off")) or "off")
-                    self._client.set_tx_mode_bus(int(bid), mode)
+                if isinstance(cfg.tx_mode_buses, dict):
+                    tx_mode_buses = dict(cfg.tx_mode_buses or {})
+                    for bid in (0, 1, 2):
+                        mode = str(tx_mode_buses.get(str(bid), tx_mode_buses.get(int(bid), "off")) or "off")
+                        self._client.set_tx_mode_bus(int(bid), mode)
+                else:
+                    for bid in (0, 1, 2):
+                        self._client.set_tx_mode_bus(int(bid), str(cfg.mode or "always_on"))
                 output_mute_buses = dict(cfg.output_mute_buses or {})
                 for bid in (0, 1, 2):
                     muted_bus = bool(output_mute_buses.get(str(bid), output_mute_buses.get(int(bid), False)))
@@ -1238,7 +1276,7 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
-        self._mute.setEnabled(True)
+        self._apply_mute_ui_policy(sync_client=True)
         self._listen_return_bus.setEnabled(True)
         self._mic_gain.setEnabled(True)
         self._hp_gain.setEnabled(True)
@@ -1281,7 +1319,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._status_label.setText("Disconnected")
             self._connect_btn.setEnabled(True)
             self._disconnect_btn.setEnabled(False)
-            self._mute.setEnabled(False)
+            self._apply_mute_ui_policy(sync_client=False)
             self._listen_return_bus.setEnabled(False)
             self._mic_gain.setEnabled(False)
             self._hp_gain.setEnabled(False)

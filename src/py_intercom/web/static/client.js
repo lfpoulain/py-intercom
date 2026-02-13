@@ -27,7 +27,15 @@
     volumeValue: document.getElementById("volumeValue"),
     discoverySelect: document.getElementById("discoverySelect"),
     btnRefreshDiscovery: document.getElementById("btnRefreshDiscovery"),
+    txModeBus0: document.getElementById("txModeBus0"),
+    txModeBus1: document.getElementById("txModeBus1"),
+    txModeBus2: document.getElementById("txModeBus2"),
+    outMuteBus0: document.getElementById("outMuteBus0"),
+    outMuteBus1: document.getElementById("outMuteBus1"),
+    outMuteBus2: document.getElementById("outMuteBus2"),
   };
+
+  const BUS_IDS = [0, 1, 2];
 
   // --- Persistence ---
   const saveSettings = () => {
@@ -38,6 +46,16 @@
         name: el.name.value,
         mode: el.mode.value,
         volume: el.volumeSlider.value,
+        txModeBuses: {
+          "0": el.txModeBus0.value,
+          "1": el.txModeBus1.value,
+          "2": el.txModeBus2.value,
+        },
+        outputMuteBuses: {
+          "0": !!el.outMuteBus0.checked,
+          "1": !!el.outMuteBus1.checked,
+          "2": !!el.outMuteBus2.checked,
+        },
       }));
     } catch (_) {}
   };
@@ -53,6 +71,19 @@
       if (s.volume != null) {
         el.volumeSlider.value = s.volume;
         el.volumeValue.textContent = s.volume + "%";
+      }
+
+      const txModeBuses = (s && typeof s.txModeBuses === "object" && s.txModeBuses) || {};
+      for (const bid of BUS_IDS) {
+        const mode = String(txModeBuses[String(bid)] || txModeBuses[bid] || "").toLowerCase();
+        if (mode === "ptt" || mode === "always_on" || mode === "off") {
+          el[`txModeBus${bid}`].value = mode;
+        }
+      }
+
+      const outputMuteBuses = (s && typeof s.outputMuteBuses === "object" && s.outputMuteBuses) || {};
+      for (const bid of BUS_IDS) {
+        el[`outMuteBus${bid}`].checked = !!(outputMuteBuses[String(bid)] ?? outputMuteBuses[bid] ?? false);
       }
     } catch (_) {}
   };
@@ -98,6 +129,33 @@
   let playQueue = new Float32Array(0);
   let txMeter = 0;
   let rxMeter = 0;
+
+  const hasPttBus = () => BUS_IDS.some((bid) => String(el[`txModeBus${bid}`].value || "").toLowerCase() === "ptt");
+  const hasAlwaysOnBus = () => BUS_IDS.some((bid) => String(el[`txModeBus${bid}`].value || "").toLowerCase() === "always_on");
+
+  const canTransmitAudio = () => {
+    if (hasAlwaysOnBus() && !muteActive) return true;
+    if (hasPttBus() && pttActive) return true;
+    return false;
+  };
+
+  const buildRoutingPayload = () => {
+    const tx_mode_buses = {};
+    const output_mute_buses = {};
+    for (const bid of BUS_IDS) {
+      const mode = String(el[`txModeBus${bid}`].value || "").toLowerCase();
+      if (mode === "ptt" || mode === "always_on") {
+        tx_mode_buses[String(bid)] = mode;
+      }
+      output_mute_buses[String(bid)] = !!el[`outMuteBus${bid}`].checked;
+    }
+    return { tx_mode_buses, output_mute_buses };
+  };
+
+  const emitRouting = () => {
+    if (!socket || !joined) return;
+    socket.emit("routing", buildRoutingPayload());
+  };
 
   // --- Discovery ---
   const fetchDiscovery = async () => {
@@ -224,6 +282,25 @@
       setMuteUi(false);
       pttActive = false;
     }
+    applyControlPolicy({ syncServer: false });
+  };
+
+  const applyControlPolicy = ({ syncServer = false } = {}) => {
+    const allowPtt = hasPttBus();
+    const allowMute = hasAlwaysOnBus();
+    el.btnPtt.disabled = !joined || !allowPtt;
+    el.btnMute.disabled = !joined || !allowMute;
+
+    if (!allowPtt && pttActive) {
+      setPtt(false);
+    }
+
+    if (!allowMute && muteActive) {
+      setMuteUi(false);
+      if (syncServer && socket && joined) {
+        socket.emit("mute", { muted: false });
+      }
+    }
   };
 
   const setMuteUi = (muted) => {
@@ -235,7 +312,7 @@
   };
 
   const setPtt = (active) => {
-    if (el.btnPtt.disabled) return;
+    if (el.btnPtt.disabled && active) return;
     pttActive = !!active;
     el.btnPtt.classList.toggle("active", pttActive);
     if (socket && joined) socket.emit("ptt", { active: pttActive });
@@ -294,8 +371,7 @@
 
     micProc.onaudioprocess = (e) => {
       if (!socket || !joined) return;
-      if (el.mode.value === "ptt" && !pttActive) { txMeter = 0; return; }
-      if (muteActive) { txMeter = 0; return; }
+      if (!canTransmitAudio()) { txMeter = 0; return; }
 
       const ch0 = e.inputBuffer.getChannelData(0);
       txMeter = Math.max(txMeter, peakOf(ch0));
@@ -373,13 +449,14 @@
         name: el.name.value.trim() || "Plateau",
         client_uuid: getClientUuid(),
         mode: el.mode.value,
+        ...buildRoutingPayload(),
       });
     });
 
     socket.on("disconnect", () => {
       setStatus("Déconnecté");
-      setUiConnected(false);
       joined = false;
+      setUiConnected(false);
       logLine("socket.io disconnect");
     });
 
@@ -389,6 +466,8 @@
         joined = true;
         setStatus(`${msg.server_ip}:${msg.server_port}`);
         logLine(`joined (id=${msg.client_id})`);
+        applyControlPolicy({ syncServer: true });
+        emitRouting();
       } else if (msg.type === "kick") {
         logLine(`kick: ${msg.message || ""}`);
         disconnect();
@@ -468,8 +547,21 @@
 
   el.mode.addEventListener("change", () => {
     if (socket && joined) socket.emit("mode", { mode: el.mode.value });
+    applyControlPolicy({ syncServer: true });
     saveSettings();
   });
+
+  for (const bid of BUS_IDS) {
+    el[`txModeBus${bid}`].addEventListener("change", () => {
+      applyControlPolicy({ syncServer: true });
+      saveSettings();
+      emitRouting();
+    });
+    el[`outMuteBus${bid}`].addEventListener("change", () => {
+      saveSettings();
+      emitRouting();
+    });
+  }
 
   el.volumeSlider.addEventListener("input", () => {
     const pct = parseInt(el.volumeSlider.value, 10);
@@ -502,6 +594,7 @@
   // --- Init ---
   loadSettings();
   setUiConnected(false);
+  applyControlPolicy({ syncServer: false });
   setStatus("Déconnecté");
   startDiscoveryPolling();
 })();

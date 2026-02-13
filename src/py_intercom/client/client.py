@@ -148,10 +148,12 @@ class IntercomClient:
         self._ptt_buses: dict[int, bool] = {}
         self._mute_buses: dict[int, bool] = {}
         self._tx_mode_buses: dict[int, str] = {}
+        self._tx_modes_configured: bool = False
         self._output_mute_buses: dict[int, bool] = {}
         self._listen_return_bus: bool = bool(self.config.listen_return_bus)
 
-        has_explicit_tx_modes = False
+        has_explicit_tx_modes = isinstance(self.config.tx_mode_buses, dict)
+        self._tx_modes_configured = bool(has_explicit_tx_modes)
         try:
             if isinstance(self.config.tx_mode_buses, dict):
                 for k, v in self.config.tx_mode_buses.items():
@@ -159,7 +161,6 @@ class IntercomClient:
                     if mode not in ("ptt", "always_on"):
                         continue
                     self._tx_mode_buses[int(k)] = mode
-                    has_explicit_tx_modes = True
         except Exception:
             pass
 
@@ -270,12 +271,14 @@ class IntercomClient:
         mode_norm = str(mode or "").strip().lower()
         if mode_norm in ("", "off", "none", "disabled"):
             with self._state_lock:
+                self._tx_modes_configured = True
                 self._tx_mode_buses.pop(int(bus_id), None)
             self._control_send_state()
             return
         if mode_norm not in ("ptt", "always_on"):
             return
         with self._state_lock:
+            self._tx_modes_configured = True
             self._tx_mode_buses[int(bus_id)] = mode_norm
         self._control_send_state()
 
@@ -499,8 +502,9 @@ class IntercomClient:
             ptt_general = bool(self._ptt_general)
             ptt_buses = dict(self._ptt_buses)
             tx_mode_buses = dict(self._tx_mode_buses)
+            tx_modes_configured = bool(self._tx_modes_configured)
 
-        if tx_mode_buses:
+        if tx_modes_configured:
             has_routing = False
             for bus_id, tx_mode in tx_mode_buses.items():
                 tx_mode_norm = str(tx_mode or "").strip().lower()

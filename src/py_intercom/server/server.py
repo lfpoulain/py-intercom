@@ -1336,24 +1336,31 @@ class IntercomServer:
                         return True
                     return str(tx_mode_buses.get(int(bus_id), "")).strip().lower() in ("ptt", "always_on")
 
-                has_client_side_routing = False
-                for meta in client_meta.values():
-                    if bool(meta[6]):
-                        has_client_side_routing = True
-                        break
-
                 for bus_id, (bus_gain_db, bus_sources, bus_default_all) in buses.items():
                     raw_bus_mix = np.zeros((FRAME_SAMPLES,), dtype=np.float32)
-                    selected_ids: list[int]
-                    if has_client_side_routing:
-                        selected_ids = [cid for cid in per_client.keys() if _client_has_route_for_bus(int(cid), int(bus_id))]
+                    server_selected_ids: set[int]
+                    if len(bus_sources) == 0 and bus_default_all:
+                        server_selected_ids = {int(cid) for cid in per_client.keys()}
+                    elif len(bus_sources) == 0 and not bus_default_all:
+                        server_selected_ids = set()
                     else:
-                        if len(bus_sources) == 0 and bus_default_all:
-                            selected_ids = list(per_client.keys())
-                        elif len(bus_sources) == 0 and not bus_default_all:
-                            selected_ids = []
+                        server_selected_ids = {int(cid) for cid in per_client.keys() if int(cid) in bus_sources}
+
+                    selected_ids: list[int] = []
+                    for cid in per_client.keys():
+                        meta = client_meta.get(int(cid))
+                        if meta is None:
+                            if int(cid) in server_selected_ids:
+                                selected_ids.append(int(cid))
+                            continue
+
+                        tx_modes_configured = bool(meta[6])
+                        if tx_modes_configured:
+                            if _client_has_route_for_bus(int(cid), int(bus_id)):
+                                selected_ids.append(int(cid))
                         else:
-                            selected_ids = [cid for cid in per_client.keys() if cid in bus_sources]
+                            if int(cid) in server_selected_ids:
+                                selected_ids.append(int(cid))
 
                     selected_ids = [cid for cid in selected_ids if _client_active_for_bus(int(cid), int(bus_id))]
 
