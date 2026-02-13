@@ -38,12 +38,6 @@ Les scripts dans `lunch script/` créent automatiquement le virtualenv `.venv` e
 .\.venv\Scripts\python run_server.py --gui
 ```
 
-Exemple en mode non-GUI avec bus retour (capture d'un input serveur type VB-Cable):
-
-```powershell
-.\.venv\Scripts\python run_server.py --bind-ip 0.0.0.0 --port 5000 --return-enabled --return-input-device 12 --return-gain-db -6
-```
-
 Activer les logs debug:
 
 ```powershell
@@ -61,22 +55,6 @@ Activer les logs debug:
 ```powershell
 .\.venv\Scripts\python run_client.py --gui --debug
 ```
-
-## Bus retour (serveur -> clients)
-
-Le serveur peut capturer un flux audio depuis un périphérique d'entrée (par exemple `CABLE Output` de VB-Cable côté Windows Recording) et l'injecter dans le mix envoyé aux clients.
-
-- Le bus retour est mixé dans le flux audio **Opus/UDP existant** (pas de second flux UDP séparé).
-- Chaque client choisit s'il écoute ce bus via la case **Listen return bus**.
-
-### UI associée
-
-- **Serveur**: `Return` (enable), sélection du device d'entrée, `Return gain`, et vumètre `Return VU`.
-- **Client**: toggle `Listen return bus` et vumètre `Return bus VU`.
-
-### Comportement PTT après connexion
-
-Le client n'a plus besoin d'appuyer une première fois sur PTT pour commencer à recevoir l'audio: le port UDP client est annoncé dès le `hello` TCP de contrôle.
 
 ## Build des exécutables
 
