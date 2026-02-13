@@ -144,8 +144,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._clients.setColumnHidden(3, True)   # Addr hidden, shown in Info dialog
         hdr = self._clients.horizontalHeader()
         hdr.setDefaultSectionSize(60)
-        hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Name
-        self._clients.setColumnWidth(1, 80)
+        hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)   # Name
         hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)  # Mode (hidden)
         hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Status
         self._clients.setColumnWidth(4, 30)
@@ -160,6 +159,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._clients.setColumnWidth(9, 70)
         hdr.setSectionResizeMode(10, QtWidgets.QHeaderView.ResizeMode.Fixed) # VMix
         self._clients.setColumnWidth(10, 70)
+        hdr.setStretchLastSection(False)
         self._clients.verticalHeader().setDefaultSectionSize(26)
         self._clients.verticalHeader().setVisible(False)
         self._clients.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -955,13 +955,13 @@ class ServerWindow(QtWidgets.QMainWindow):
         def route_checked(bus_id: int, client_id: int) -> bool:
             st = snap.get(int(client_id), {})
             tx_modes = st.get("tx_mode_buses")
-            if isinstance(tx_modes, dict):
-                has_tx_modes = any(str(v).strip().lower() in ("ptt", "always_on") for v in tx_modes.values())
-                if has_tx_modes:
+            if bool(st.get("tx_modes_configured", False)):
+                if isinstance(tx_modes, dict):
                     return str(tx_modes.get(str(int(bus_id)), tx_modes.get(int(bus_id), ""))).strip().lower() in (
                         "ptt",
                         "always_on",
                     )
+                return False
             b = buses.get(int(bus_id))
             if not b:
                 return False

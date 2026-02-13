@@ -437,6 +437,7 @@ class IntercomServer:
                     "ptt_buses": dict(st.ptt_buses),
                     "mute_buses": dict(st.mute_buses),
                     "tx_mode_buses": dict(st.tx_mode_buses),
+                    "tx_modes_configured": bool(st.tx_modes_configured),
                     "output_mute_buses": dict(st.output_mute_buses),
                 }
             return out

@@ -149,7 +149,6 @@ class _GlobalPttHotkeys:
         self._window = window
         self._listener: Optional[keyboard.Listener] = None
         self._pressed: set[str] = set()
-        self._active_general = False
         self._active_buses: dict[int, bool] = {}
 
     def start(self) -> None:
@@ -168,7 +167,6 @@ class _GlobalPttHotkeys:
             pass
         self._listener = None
         self._pressed.clear()
-        self._active_general = False
         self._active_buses = {}
 
     def _combo_active(self, groups: list[set[str]]) -> bool:
@@ -183,15 +181,6 @@ class _GlobalPttHotkeys:
         cli = self._window._client
         if cli is None:
             return
-
-        gen_groups = _parse_qt_shortcut(self._window._ptt_general_key.keySequence().toString())
-        gen_active = self._combo_active(gen_groups)
-        if gen_active != self._active_general:
-            self._active_general = bool(gen_active)
-            try:
-                cli.set_ptt_general(bool(gen_active))
-            except Exception:
-                pass
 
         for bid, edit in self._window._ptt_bus_keys.items():
             groups = _parse_qt_shortcut(edit.keySequence().toString())
@@ -276,27 +265,14 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._client_id.setVisible(False)
 
         self._name = QtWidgets.QLineEdit(str(self._preset_get("name", "")))
-        self._mode = QtWidgets.QComboBox()
-        patch_combo(self._mode)
-        self._mode.addItem("Always-on", "always_on")
-        self._mode.addItem("PTT", "ptt")
-
-        self._ptt_general_key = _ShortcutKeySequenceEdit()
         self._ptt_bus_keys: dict[int, QtWidgets.QKeySequenceEdit] = {
             0: _ShortcutKeySequenceEdit(),
             1: _ShortcutKeySequenceEdit(),
             2: _ShortcutKeySequenceEdit(),
         }
 
-        self._ptt_general_key.setToolTip("Click then press shortcut. Esc cancels. Del clears.")
         for edit in self._ptt_bus_keys.values():
             edit.setToolTip("Click then press shortcut. Esc cancels. Del clears.")
-
-        self._ptt_general_clear = QtWidgets.QToolButton()
-        self._ptt_general_clear.setText("✕")
-        self._ptt_general_clear.setFixedSize(22, 22)
-        self._ptt_general_clear.setToolTip("Clear shortcut")
-        self._ptt_general_clear.clicked.connect(lambda: self._ptt_general_key.setKeySequence(QtGui.QKeySequence("")))
 
         self._ptt_bus_clear: dict[int, QtWidgets.QToolButton] = {}
         for bid, edit in self._ptt_bus_keys.items():
@@ -334,19 +310,6 @@ class ClientWindow(QtWidgets.QMainWindow):
             cb.addItem("Off", "off")
             cb.addItem("Always-on", "always_on")
             cb.addItem("PTT", "ptt")
-
-        self._route_bus_widgets: dict[int, QtWidgets.QCheckBox] = {
-            0: QtWidgets.QCheckBox("Routed to Regie"),
-            1: QtWidgets.QCheckBox("Routed to Plateau"),
-            2: QtWidgets.QCheckBox("Routed to VMix"),
-        }
-        for w in self._route_bus_widgets.values():
-            w.setEnabled(False)
-
-        try:
-            self._ptt_general_key.setKeySequence(QtGui.QKeySequence(str(self._preset_get("ptt_general_key", ""))))
-        except Exception:
-            pass
 
         try:
             bus_keys = self._preset_get("ptt_bus_keys", {})
@@ -389,10 +352,6 @@ class ClientWindow(QtWidgets.QMainWindow):
                         cb.setCurrentIndex(i_mode)
         except Exception:
             pass
-        saved_mode = str(self._preset_get("mode", "always_on"))
-        i = self._mode.findData(saved_mode)
-        if i >= 0:
-            self._mode.setCurrentIndex(i)
 
         self._input_device = QtWidgets.QComboBox()
         patch_combo(self._input_device)
@@ -509,28 +468,21 @@ class ClientWindow(QtWidgets.QMainWindow):
         ptt_lay = QtWidgets.QGridLayout(ptt_box)
         ptt_lay.setContentsMargins(6, 4, 6, 4)
         ptt_lay.setVerticalSpacing(2)
-        ptt_lay.addWidget(QtWidgets.QLabel("Mode"), 0, 0)
-        ptt_lay.addWidget(self._mode, 0, 1)
-        ptt_lay.addWidget(QtWidgets.QLabel("PTT general"), 0, 2)
-        ptt_lay.addWidget(_wrap_shortcut(self._ptt_general_key, self._ptt_general_clear), 0, 3)
-        ptt_lay.addWidget(QtWidgets.QLabel("PTT Regie"), 1, 0)
-        ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[0], self._ptt_bus_clear[0]), 1, 1)
-        ptt_lay.addWidget(QtWidgets.QLabel("PTT Plateau"), 1, 2)
-        ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[1], self._ptt_bus_clear[1]), 1, 3)
-        ptt_lay.addWidget(QtWidgets.QLabel("PTT VMix"), 2, 0)
-        ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[2], self._ptt_bus_clear[2]), 2, 1)
-        ptt_lay.addWidget(QtWidgets.QLabel("TX Regie"), 3, 0)
-        ptt_lay.addWidget(self._tx_mode_bus_widgets[0], 3, 1)
-        ptt_lay.addWidget(QtWidgets.QLabel("TX Plateau"), 3, 2)
-        ptt_lay.addWidget(self._tx_mode_bus_widgets[1], 3, 3)
-        ptt_lay.addWidget(QtWidgets.QLabel("TX VMix"), 4, 0)
-        ptt_lay.addWidget(self._tx_mode_bus_widgets[2], 4, 1)
-        ptt_lay.addWidget(self._route_bus_widgets[0], 5, 0)
-        ptt_lay.addWidget(self._route_bus_widgets[1], 5, 1)
-        ptt_lay.addWidget(self._route_bus_widgets[2], 5, 2)
-        ptt_lay.addWidget(self._mute_bus_widgets[0], 6, 0)
-        ptt_lay.addWidget(self._mute_bus_widgets[1], 6, 1)
-        ptt_lay.addWidget(self._mute_bus_widgets[2], 6, 2)
+        ptt_lay.addWidget(QtWidgets.QLabel("PTT Regie"), 0, 0)
+        ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[0], self._ptt_bus_clear[0]), 0, 1)
+        ptt_lay.addWidget(QtWidgets.QLabel("PTT Plateau"), 0, 2)
+        ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[1], self._ptt_bus_clear[1]), 0, 3)
+        ptt_lay.addWidget(QtWidgets.QLabel("PTT VMix"), 1, 0)
+        ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[2], self._ptt_bus_clear[2]), 1, 1)
+        ptt_lay.addWidget(QtWidgets.QLabel("TX Regie"), 2, 0)
+        ptt_lay.addWidget(self._tx_mode_bus_widgets[0], 2, 1)
+        ptt_lay.addWidget(QtWidgets.QLabel("TX Plateau"), 2, 2)
+        ptt_lay.addWidget(self._tx_mode_bus_widgets[1], 2, 3)
+        ptt_lay.addWidget(QtWidgets.QLabel("TX VMix"), 3, 0)
+        ptt_lay.addWidget(self._tx_mode_bus_widgets[2], 3, 1)
+        ptt_lay.addWidget(self._mute_bus_widgets[0], 4, 0)
+        ptt_lay.addWidget(self._mute_bus_widgets[1], 4, 1)
+        ptt_lay.addWidget(self._mute_bus_widgets[2], 4, 2)
 
         # -- Meters group --
         meters_box = QtWidgets.QGroupBox("Meters")
@@ -576,10 +528,8 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._sidetone.stateChanged.connect(self._on_sidetone_changed)
         self._sidetone_gain.valueChanged.connect(self._on_sidetone_gain_changed)
 
-        self._ptt_general_key.keySequenceChanged.connect(self._on_ptt_general_key_changed)
         for bid, edit in self._ptt_bus_keys.items():
             edit.keySequenceChanged.connect(lambda _seq, bus_id=int(bid): self._on_ptt_bus_key_changed(bus_id))
-        self._mode.currentIndexChanged.connect(self._on_mode_changed)
 
         for bid, cb in self._tx_mode_bus_widgets.items():
             cb.currentIndexChanged.connect(lambda _idx, bus_id=int(bid): self._on_tx_mode_bus_changed(bus_id))
@@ -706,11 +656,11 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._server_port.setValue(5000)
         self._name.setText("")
 
-        i = self._mode.findData("always_on")
-        if i >= 0:
-            self._mode.setCurrentIndex(i)
+        for cb in self._tx_mode_bus_widgets.values():
+            i_mode = cb.findData("always_on")
+            if i_mode >= 0:
+                cb.setCurrentIndex(i_mode)
         try:
-            self._ptt_general_key.setKeySequence(QtGui.QKeySequence(""))
             for edit in self._ptt_bus_keys.values():
                 edit.setKeySequence(QtGui.QKeySequence(""))
         except Exception:
@@ -760,24 +710,6 @@ class ClientWindow(QtWidgets.QMainWindow):
         except Exception:
             return
         self._preset_save()
-
-    def _on_ptt_general_key_changed(self, seq: QtGui.QKeySequence) -> None:
-        if str(seq.toString()) in {"Ctrl", "Alt", "Shift", "Meta"}:
-            try:
-                self._ptt_general_key.setKeySequence(QtGui.QKeySequence(""))
-            except Exception:
-                pass
-            return
-        try:
-            self._preset_set("ptt_general_key", str(seq.toString()))
-        except Exception:
-            return
-
-        try:
-            self._ptt_general_key.clearFocus()
-            self.centralWidget().setFocus()
-        except Exception:
-            pass
 
     def _on_ptt_bus_key_changed(self, bus_id: int) -> None:
         try:
@@ -830,6 +762,15 @@ class ClientWindow(QtWidgets.QMainWindow):
             pass
         return False
 
+    def _effective_global_mode(self) -> str:
+        try:
+            for cb in self._tx_mode_bus_widgets.values():
+                if str(cb.currentData() or "").strip().lower() == "always_on":
+                    return "always_on"
+        except Exception:
+            pass
+        return "ptt"
+
     def _apply_mute_ui_policy(self, *, sync_client: bool = False) -> None:
         allow_mic_mute = self._is_mode_allowing_mic_mute()
         self._mute.setEnabled(bool(self._connected) and bool(allow_mic_mute))
@@ -845,13 +786,6 @@ class ClientWindow(QtWidgets.QMainWindow):
                 except Exception:
                     pass
 
-    def _on_mode_changed(self, _index: int) -> None:
-        self._apply_mute_ui_policy(sync_client=True)
-        try:
-            self._preset_set("mode", str(self._mode.currentData() or "always_on"))
-        except Exception:
-            pass
-
     def _on_tx_mode_bus_changed(self, bus_id: int) -> None:
         cb = self._tx_mode_bus_widgets.get(int(bus_id))
         if cb is None:
@@ -866,6 +800,12 @@ class ClientWindow(QtWidgets.QMainWindow):
             else:
                 cur.pop(str(int(bus_id)), None)
             self._preset_set("tx_mode_buses", cur)
+        except Exception:
+            pass
+
+        self._apply_mute_ui_policy(sync_client=True)
+        try:
+            self._preset_set("mode", self._effective_global_mode())
         except Exception:
             pass
 
@@ -919,7 +859,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         client_uuid = str(self._preset_get("client_uuid", ""))
         client_id = self._client_id.text().strip()
         name = self._name.text().strip()
-        mode = str(self._mode.currentData() or "always_on")
+        mode = self._effective_global_mode()
 
         st = self._client.get_stats_snapshot() if self._client is not None else {}
 
@@ -1162,7 +1102,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._preset_set("output_device", int(output_device))
 
         name = self._name.text().strip()
-        mode = str(self._mode.currentData() or "always_on")
+        mode = self._effective_global_mode()
 
         self._preset_set("server_ip", server_ip)
         self._preset_set("server_port", int(self._server_port.value()))
@@ -1187,7 +1127,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             muted=self._mute.isChecked(),
             sidetone_enabled=self._sidetone.isChecked(),
             sidetone_gain_db=float(self._sidetone_gain.value()),
-            ptt_general_key=str(self._ptt_general_key.keySequence().toString()),
+            ptt_general_key="",
             ptt_bus_keys=dict(self._preset_get("ptt_bus_keys", {}) or {}),
             mute_buses=dict(self._preset_get("mute_buses", {}) or {}),
             tx_mode_buses=tx_mode_buses,
@@ -1265,10 +1205,8 @@ class ClientWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "PTT", f"Global hotkeys failed to start: {e}")
 
         try:
-            self._ptt_general_key.setEnabled(False)
             for edit in self._ptt_bus_keys.values():
                 edit.setEnabled(False)
-            self._ptt_general_clear.setEnabled(False)
             for b in self._ptt_bus_clear.values():
                 b.setEnabled(False)
         except Exception:
@@ -1298,7 +1236,6 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._timer.stop()
             try:
                 if self._client is not None:
-                    self._client.set_ptt_general(False)
                     for bid in self._ptt_bus_keys.keys():
                         self._client.set_ptt_bus(int(bid), False)
             except Exception:
@@ -1330,10 +1267,8 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._return_vu.set_level(-60.0)
 
             try:
-                self._ptt_general_key.setEnabled(True)
                 for edit in self._ptt_bus_keys.values():
                     edit.setEnabled(True)
-                self._ptt_general_clear.setEnabled(True)
                 for b in self._ptt_bus_clear.values():
                     b.setEnabled(True)
             except Exception:
@@ -1341,12 +1276,6 @@ class ClientWindow(QtWidgets.QMainWindow):
 
             for cb in self._mute_bus_widgets.values():
                 cb.setEnabled(False)
-
-            for cb in self._route_bus_widgets.values():
-                try:
-                    cb.setChecked(False)
-                except Exception:
-                    pass
 
     def _on_mute_changed(self, state: int) -> None:
         if self._client is None:
@@ -1424,15 +1353,6 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._in_vu.set_level(float(st.get("in_vu_dbfs", -60.0)))
         self._out_vu.set_level(float(st.get("out_vu_dbfs", -60.0)))
         self._return_vu.set_level(float(st.get("return_vu_dbfs", -60.0)))
-
-        routes = st.get("routes")
-        if isinstance(routes, dict):
-            for bid, cb in self._route_bus_widgets.items():
-                try:
-                    cb.setChecked(bool(routes.get(str(int(bid)), False)))
-                except Exception:
-                    pass
-
 
 def run_gui(
     server_ip: str = "",
