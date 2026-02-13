@@ -11,7 +11,13 @@ def setup_logging(debug: bool) -> None:
     except Exception:
         pass
 
+    sink = sys.stderr if getattr(sys, "stderr", None) is not None else None
+    if sink is None:
+        sink = sys.stdout if getattr(sys, "stdout", None) is not None else None
+    if sink is None:
+        return
+
     if debug:
-        logger.add(sys.stderr, level="DEBUG")
+        logger.add(sink, level="DEBUG")
     else:
-        logger.add(sys.stderr, level="WARNING")
+        logger.add(sink, level="WARNING")

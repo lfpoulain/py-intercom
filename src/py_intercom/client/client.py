@@ -104,6 +104,7 @@ class IntercomClient:
         self._sidetone_gain_db = float(self.config.sidetone_gain_db)
         self._in_vu_dbfs = -60.0
         self._out_vu_dbfs = -60.0
+        self._return_vu_dbfs = -60.0
 
         self._in_channels = 1
         self._out_channels = 1
@@ -182,6 +183,7 @@ class IntercomClient:
                 "sidetone_gain_db": self._sidetone_gain_db,
                 "in_vu_dbfs": self._in_vu_dbfs,
                 "out_vu_dbfs": self._out_vu_dbfs,
+                "return_vu_dbfs": self._return_vu_dbfs,
                 "in_channels": self._in_channels,
                 "out_channels": self._out_channels,
                 "in_samplerate": self._in_samplerate,
@@ -485,7 +487,19 @@ class IntercomClient:
                         self._ctrl_routes = dict(cfg.get("routes") or {})
                     except Exception:
                         pass
+                if "return_vu_dbfs" in cfg:
+                    try:
+                        with self._state_lock:
+                            self._return_vu_dbfs = float(cfg.get("return_vu_dbfs"))
+                    except Exception:
+                        pass
         elif mtype == "pong":
+            if "return_vu_dbfs" in msg:
+                try:
+                    with self._state_lock:
+                        self._return_vu_dbfs = float(msg.get("return_vu_dbfs"))
+                except Exception:
+                    pass
             return
 
     def _control_loop(self) -> None:
@@ -511,6 +525,7 @@ class IntercomClient:
                     "client_uuid": str(self.config.client_uuid or ""),
                     "name": str(self.config.name or ""),
                     "mode": str(self.config.mode or "always_on"),
+                    "udp_port": int(self._sock.getsockname()[1]),
                 }
                 self._control_send(sock, hello)
 

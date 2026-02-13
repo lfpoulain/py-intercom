@@ -191,6 +191,7 @@ class IntercomServer:
         self._return_in_phase: float = 0.0
         self._return_capture_buf: np.ndarray = np.zeros((0,), dtype=np.float32)
         self._return_frames: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=120)
+        self._return_vu_dbfs: float = -60.0
 
         self._ctrl_sock: Optional[socket.socket] = None
         self._ctrl_thread: Optional[threading.Thread] = None
@@ -462,6 +463,9 @@ class IntercomServer:
             "outputs": int(outputs),
             "mix_q": int(mix_q),
             "underflows": int(underflows_total),
+            "return_enabled": bool(self._return_enabled),
+            "return_vu_dbfs": float(self._return_vu_dbfs),
+            "return_q": int(self._return_frames.qsize()) if self._return_enabled else 0,
             "rx_datagrams": int(self._rx_datagrams),
             "rx_bytes": int(self._rx_bytes),
             "rx_socket_errors": int(self._rx_socket_errors),
@@ -690,6 +694,7 @@ class IntercomServer:
             self._return_in_samplerate = int(in_sr)
             self._return_in_phase = 0.0
             self._return_capture_buf = np.zeros((0,), dtype=np.float32)
+            self._return_vu_dbfs = -60.0
             try:
                 while True:
                     self._return_frames.get_nowait()
@@ -766,6 +771,10 @@ class IntercomServer:
                 self._return_in_phase = float(new_phase)
                 if drop > 0 and self._return_capture_buf.size >= drop:
                     self._return_capture_buf = self._return_capture_buf[drop:]
+                try:
+                    self._return_vu_dbfs = float(rms_dbfs(y))
+                except Exception:
+                    self._return_vu_dbfs = -60.0
 
             try:
                 while True:
@@ -790,6 +799,7 @@ class IntercomServer:
                 "client_id": int(client_id),
                 "muted": bool(st.muted),
                 "gain_db": float(st.gain_db),
+                "return_vu_dbfs": float(self._return_vu_dbfs),
                 "routes": {
                     str(bus_id): (
                         True
@@ -879,7 +889,16 @@ class IntercomServer:
                                     st.control_connected = True
                                     st.last_control_monotonic = now
                         try:
-                            self._control_send(conn, {"type": "pong", "t": msg.get("t")})
+                            with self._lock:
+                                return_vu_dbfs = float(self._return_vu_dbfs)
+                            self._control_send(
+                                conn,
+                                {
+                                    "type": "pong",
+                                    "t": msg.get("t"),
+                                    "return_vu_dbfs": float(return_vu_dbfs),
+                                },
+                            )
                         except Exception as e:
                             logger.debug("pong send failed: {}", e)
                         continue
@@ -938,6 +957,13 @@ class IntercomServer:
                     name = str(msg.get("name") or "")
                     mode = str(msg.get("mode") or "")
                     client_uuid = str(msg.get("client_uuid") or "")
+                    udp_port = None
+                    try:
+                        raw_udp_port = int(msg.get("udp_port"))
+                        if 1 <= raw_udp_port <= 65535:
+                            udp_port = int(raw_udp_port)
+                    except Exception:
+                        udp_port = None
 
                     with self._ctrl_lock:
                         prev = self._ctrl_sessions.get(int(client_id))
@@ -963,6 +989,8 @@ class IntercomServer:
                         st.name = name
                         st.mode = mode
                         st.client_uuid = client_uuid
+                        if udp_port is not None:
+                            st.addr = (str(addr[0]), int(udp_port))
                         st.control_connected = True
                         st.last_control_monotonic = now
 

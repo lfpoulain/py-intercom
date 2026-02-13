@@ -89,6 +89,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._return_gain_lbl = QtWidgets.QLabel("0 dB")
         self._return_gain_lbl.setFixedWidth(50)
         self._return_gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self._return_vu = VuMeter()
         self._show_all_devices = QtWidgets.QCheckBox("Show all devices")
         self._refresh_devices_btn = QtWidgets.QToolButton()
         self._refresh_devices_btn.setText("\u21bb")
@@ -116,12 +117,16 @@ class ServerWindow(QtWidgets.QMainWindow):
         config_lay.addWidget(self._return_gain, 1, 4)
         config_lay.addWidget(self._return_gain_lbl, 1, 5)
 
-        # Row 2 — Controls
+        # Row 2 — Return meter
+        config_lay.addWidget(QtWidgets.QLabel("Return VU"), 2, 0)
+        config_lay.addWidget(self._return_vu, 2, 1, 1, 5)
+
+        # Row 3 — Controls
         btn_lay = QtWidgets.QHBoxLayout()
         btn_lay.setSpacing(8)
         btn_lay.addWidget(self._start_btn)
         btn_lay.addWidget(self._stop_btn)
-        config_lay.addLayout(btn_lay, 2, 0, 1, 6)
+        config_lay.addLayout(btn_lay, 3, 0, 1, 6)
 
         # -- Clients group --
         clients_box = QtWidgets.QGroupBox("Clients")
@@ -799,6 +804,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._outputs.setRowCount(0)
             self._remove_output_btn.setEnabled(False)
             self._status_label.setText("Stopped")
+            self._return_vu.set_level(-60.0)
 
             self._client_row_ids = []
             self._muted_widgets.clear()
@@ -820,8 +826,13 @@ class ServerWindow(QtWidgets.QMainWindow):
         snap = self._server.get_clients_snapshot()
         buses = self._server.get_buses_snapshot()
         outs = self._server.get_outputs_snapshot()
+        stats = self._server.get_stats_snapshot()
         self._set_clients_table(snap, buses)
         self._refresh_outputs_table(outs, buses)
+        try:
+            self._return_vu.set_level(float(stats.get("return_vu_dbfs", -60.0)))
+        except Exception:
+            self._return_vu.set_level(-60.0)
 
         try:
             items = self._clients.selectedItems()

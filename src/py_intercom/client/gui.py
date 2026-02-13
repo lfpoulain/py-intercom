@@ -419,6 +419,7 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         self._in_vu = VuMeter()
         self._out_vu = VuMeter()
+        self._return_vu = VuMeter()
 
         # -- Connection group --
         conn_box = QtWidgets.QGroupBox("Connection")
@@ -500,6 +501,8 @@ class ClientWindow(QtWidgets.QMainWindow):
         meters_lay.addWidget(self._in_vu, 0, 1)
         meters_lay.addWidget(QtWidgets.QLabel("Output VU"), 1, 0)
         meters_lay.addWidget(self._out_vu, 1, 1)
+        meters_lay.addWidget(QtWidgets.QLabel("Return bus VU"), 2, 0)
+        meters_lay.addWidget(self._return_vu, 2, 1)
 
         self._info_btn = QtWidgets.QToolButton()
         self._info_btn.setText("ℹ")
@@ -1206,6 +1209,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._sidetone_gain.setEnabled(False)
             self._in_vu.set_level(-60.0)
             self._out_vu.set_level(-60.0)
+            self._return_vu.set_level(-60.0)
 
             try:
                 self._ptt_general_key.setEnabled(True)
@@ -1301,6 +1305,7 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         self._in_vu.set_level(float(st.get("in_vu_dbfs", -60.0)))
         self._out_vu.set_level(float(st.get("out_vu_dbfs", -60.0)))
+        self._return_vu.set_level(float(st.get("return_vu_dbfs", -60.0)))
 
         routes = st.get("routes")
         if isinstance(routes, dict):
