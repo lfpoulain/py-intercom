@@ -319,10 +319,21 @@ class ClientWindow(QtWidgets.QMainWindow):
             return w
 
         self._mute_bus_widgets: dict[int, QtWidgets.QCheckBox] = {
-            0: QtWidgets.QCheckBox("Mute mic on Regie"),
-            1: QtWidgets.QCheckBox("Mute mic on Plateau"),
-            2: QtWidgets.QCheckBox("Mute mic on VMix"),
+            0: QtWidgets.QCheckBox("Mute output on Regie"),
+            1: QtWidgets.QCheckBox("Mute output on Plateau"),
+            2: QtWidgets.QCheckBox("Mute output on VMix"),
         }
+
+        self._tx_mode_bus_widgets: dict[int, QtWidgets.QComboBox] = {
+            0: QtWidgets.QComboBox(),
+            1: QtWidgets.QComboBox(),
+            2: QtWidgets.QComboBox(),
+        }
+        for cb in self._tx_mode_bus_widgets.values():
+            patch_combo(cb)
+            cb.addItem("Off", "off")
+            cb.addItem("Always-on", "always_on")
+            cb.addItem("PTT", "ptt")
 
         self._route_bus_widgets: dict[int, QtWidgets.QCheckBox] = {
             0: QtWidgets.QCheckBox("Routed to Regie"),
@@ -349,10 +360,33 @@ class ClientWindow(QtWidgets.QMainWindow):
             pass
 
         try:
-            mute_buses = self._preset_get("mute_buses", {})
-            if isinstance(mute_buses, dict):
+            output_mute_buses = self._preset_get("output_mute_buses", None)
+            if not isinstance(output_mute_buses, dict):
+                output_mute_buses = self._preset_get("mute_buses", {})
+            if isinstance(output_mute_buses, dict):
                 for bid, cb in self._mute_bus_widgets.items():
-                    cb.setChecked(bool(mute_buses.get(str(bid), False)))
+                    cb.setChecked(bool(output_mute_buses.get(str(bid), False)))
+        except Exception:
+            pass
+
+        try:
+            tx_modes = self._preset_get("tx_mode_buses", None)
+            if isinstance(tx_modes, dict):
+                for bid, cb in self._tx_mode_bus_widgets.items():
+                    mode = str(tx_modes.get(str(bid), "off") or "off").strip().lower()
+                    if mode not in ("off", "ptt", "always_on"):
+                        mode = "off"
+                    i_mode = cb.findData(mode)
+                    if i_mode >= 0:
+                        cb.setCurrentIndex(i_mode)
+            else:
+                fallback_mode = str(self._preset_get("mode", "always_on") or "always_on").strip().lower()
+                if fallback_mode not in ("ptt", "always_on"):
+                    fallback_mode = "always_on"
+                for cb in self._tx_mode_bus_widgets.values():
+                    i_mode = cb.findData(fallback_mode)
+                    if i_mode >= 0:
+                        cb.setCurrentIndex(i_mode)
         except Exception:
             pass
         saved_mode = str(self._preset_get("mode", "always_on"))
@@ -485,12 +519,18 @@ class ClientWindow(QtWidgets.QMainWindow):
         ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[1], self._ptt_bus_clear[1]), 1, 3)
         ptt_lay.addWidget(QtWidgets.QLabel("PTT VMix"), 2, 0)
         ptt_lay.addWidget(_wrap_shortcut(self._ptt_bus_keys[2], self._ptt_bus_clear[2]), 2, 1)
-        ptt_lay.addWidget(self._route_bus_widgets[0], 3, 0)
-        ptt_lay.addWidget(self._route_bus_widgets[1], 3, 1)
-        ptt_lay.addWidget(self._route_bus_widgets[2], 3, 2)
-        ptt_lay.addWidget(self._mute_bus_widgets[0], 4, 0)
-        ptt_lay.addWidget(self._mute_bus_widgets[1], 4, 1)
-        ptt_lay.addWidget(self._mute_bus_widgets[2], 4, 2)
+        ptt_lay.addWidget(QtWidgets.QLabel("TX Regie"), 3, 0)
+        ptt_lay.addWidget(self._tx_mode_bus_widgets[0], 3, 1)
+        ptt_lay.addWidget(QtWidgets.QLabel("TX Plateau"), 3, 2)
+        ptt_lay.addWidget(self._tx_mode_bus_widgets[1], 3, 3)
+        ptt_lay.addWidget(QtWidgets.QLabel("TX VMix"), 4, 0)
+        ptt_lay.addWidget(self._tx_mode_bus_widgets[2], 4, 1)
+        ptt_lay.addWidget(self._route_bus_widgets[0], 5, 0)
+        ptt_lay.addWidget(self._route_bus_widgets[1], 5, 1)
+        ptt_lay.addWidget(self._route_bus_widgets[2], 5, 2)
+        ptt_lay.addWidget(self._mute_bus_widgets[0], 6, 0)
+        ptt_lay.addWidget(self._mute_bus_widgets[1], 6, 1)
+        ptt_lay.addWidget(self._mute_bus_widgets[2], 6, 2)
 
         # -- Meters group --
         meters_box = QtWidgets.QGroupBox("Meters")
@@ -539,6 +579,9 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._ptt_general_key.keySequenceChanged.connect(self._on_ptt_general_key_changed)
         for bid, edit in self._ptt_bus_keys.items():
             edit.keySequenceChanged.connect(lambda _seq, bus_id=int(bid): self._on_ptt_bus_key_changed(bus_id))
+
+        for bid, cb in self._tx_mode_bus_widgets.items():
+            cb.currentIndexChanged.connect(lambda _idx, bus_id=int(bid): self._on_tx_mode_bus_changed(bus_id))
 
         for bid, cb in self._mute_bus_widgets.items():
             cb.stateChanged.connect(lambda state, bus_id=int(bid): self._on_mute_bus_changed(bus_id, state))
@@ -761,17 +804,42 @@ class ClientWindow(QtWidgets.QMainWindow):
     def _on_mute_bus_changed(self, bus_id: int, state: int) -> None:
         muted = _is_checked(state)
         try:
-            cur = self._preset_get("mute_buses", {})
+            cur = self._preset_get("output_mute_buses", {})
             if not isinstance(cur, dict):
                 cur = {}
             cur[str(int(bus_id))] = bool(muted)
+            self._preset_set("output_mute_buses", cur)
+            # Backward-compatibility for older presets/clients
             self._preset_set("mute_buses", cur)
         except Exception:
             pass
 
         if self._client is not None:
             try:
-                self._client.set_mute_bus(int(bus_id), bool(muted))
+                self._client.set_output_mute_bus(int(bus_id), bool(muted))
+            except Exception:
+                pass
+
+    def _on_tx_mode_bus_changed(self, bus_id: int) -> None:
+        cb = self._tx_mode_bus_widgets.get(int(bus_id))
+        if cb is None:
+            return
+        mode = str(cb.currentData() or "off").strip().lower()
+        try:
+            cur = self._preset_get("tx_mode_buses", {})
+            if not isinstance(cur, dict):
+                cur = {}
+            if mode in ("ptt", "always_on"):
+                cur[str(int(bus_id))] = mode
+            else:
+                cur.pop(str(int(bus_id)), None)
+            self._preset_set("tx_mode_buses", cur)
+        except Exception:
+            pass
+
+        if self._client is not None:
+            try:
+                self._client.set_tx_mode_bus(int(bus_id), mode)
             except Exception:
                 pass
 
@@ -1088,6 +1156,8 @@ class ClientWindow(QtWidgets.QMainWindow):
             ptt_general_key=str(self._ptt_general_key.keySequence().toString()),
             ptt_bus_keys=dict(self._preset_get("ptt_bus_keys", {}) or {}),
             mute_buses=dict(self._preset_get("mute_buses", {}) or {}),
+            tx_mode_buses=dict(self._preset_get("tx_mode_buses", {}) or {}),
+            output_mute_buses=dict(self._preset_get("output_mute_buses", self._preset_get("mute_buses", {})) or {}),
             listen_return_bus=bool(self._listen_return_bus.isChecked()),
         )
 
@@ -1111,6 +1181,8 @@ class ClientWindow(QtWidgets.QMainWindow):
                 self._client.config.ptt_general_key = cfg.ptt_general_key
                 self._client.config.ptt_bus_keys = cfg.ptt_bus_keys
                 self._client.config.mute_buses = cfg.mute_buses
+                self._client.config.tx_mode_buses = cfg.tx_mode_buses
+                self._client.config.output_mute_buses = cfg.output_mute_buses
                 self._client.config.listen_return_bus = bool(cfg.listen_return_bus)
                 self._client.set_input_gain_db(cfg.input_gain_db)
                 self._client.set_output_gain_db(cfg.output_gain_db)
@@ -1118,6 +1190,14 @@ class ClientWindow(QtWidgets.QMainWindow):
                 self._client.set_sidetone_enabled(cfg.sidetone_enabled)
                 self._client.set_sidetone_gain_db(cfg.sidetone_gain_db)
                 self._client.set_listen_return_bus(bool(cfg.listen_return_bus))
+                tx_mode_buses = dict(cfg.tx_mode_buses or {})
+                for bid in (0, 1, 2):
+                    mode = str(tx_mode_buses.get(str(bid), tx_mode_buses.get(int(bid), "off")) or "off")
+                    self._client.set_tx_mode_bus(int(bid), mode)
+                output_mute_buses = dict(cfg.output_mute_buses or {})
+                for bid in (0, 1, 2):
+                    muted_bus = bool(output_mute_buses.get(str(bid), output_mute_buses.get(int(bid), False)))
+                    self._client.set_output_mute_bus(int(bid), bool(muted_bus))
                 self._client.reconnect_network()
             else:
                 # Full stop of old client if devices changed

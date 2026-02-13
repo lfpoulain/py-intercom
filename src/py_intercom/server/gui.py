@@ -134,24 +134,26 @@ class ServerWindow(QtWidgets.QMainWindow):
         clients_lay.setContentsMargins(4, 4, 4, 4)
         clients_lay.setSpacing(2)
 
-        # Columns: 0=ClientID(hidden), 1=Name, 2=Mode, 3=Addr, 4=Status, 5=VU, 6=Muted, 7=Gain(%), 8=Regie, 9=Plateau, 10=VMix
+        # Columns: 0=ClientID(hidden), 1=Name, 2=Mode(hidden), 3=Addr(hidden), 4=Status, 5=VU, 6=Muted, 7=Mic gain(fixed), 8=Regie, 9=Plateau, 10=VMix
         self._clients = QtWidgets.QTableWidget(0, 11)
         self._clients.setHorizontalHeaderLabels(
-            ["Client ID", "Name", "Mode", "Addr", "", "VU", "Muted", "Gain (%)", "Regie", "Plateau", "VMix"]
+            ["Client ID", "Name", "Mode", "Addr", "", "VU", "Muted", "Mic", "Regie", "Plateau", "VMix"]
         )
         self._clients.setColumnHidden(0, True)
+        self._clients.setColumnHidden(2, True)
         self._clients.setColumnHidden(3, True)   # Addr hidden, shown in Info dialog
         hdr = self._clients.horizontalHeader()
         hdr.setDefaultSectionSize(60)
         hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Name
         self._clients.setColumnWidth(1, 80)
-        hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)  # Mode
+        hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)  # Mode (hidden)
         hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Status
         self._clients.setColumnWidth(4, 30)
         hdr.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Fixed)   # VU
         self._clients.setColumnWidth(5, 100)
         hdr.setSectionResizeMode(6, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)   # Muted
-        hdr.setSectionResizeMode(7, QtWidgets.QHeaderView.ResizeMode.Stretch) # Gain (%)
+        hdr.setSectionResizeMode(7, QtWidgets.QHeaderView.ResizeMode.Fixed) # Mic gain (fixed)
+        self._clients.setColumnWidth(7, 55)
         hdr.setSectionResizeMode(8, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Regie
         self._clients.setColumnWidth(8, 70)
         hdr.setSectionResizeMode(9, QtWidgets.QHeaderView.ResizeMode.Fixed)  # Plateau
@@ -167,8 +169,6 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._client_row_ids: list[int] = []
         self._client_uuid_by_id: Dict[int, str] = {}
         self._muted_widgets: Dict[int, QtWidgets.QCheckBox] = {}
-        self._gain_widgets: Dict[int, QtWidgets.QSlider] = {}
-        self._gain_label_widgets: Dict[int, QtWidgets.QLabel] = {}
         self._route_widgets: Dict[tuple[int, int], QtWidgets.QCheckBox] = {}
         self._vu_widgets: Dict[int, VuMeter] = {}
         self._status_widgets: Dict[int, StatusIndicator] = {}
@@ -744,8 +744,6 @@ class ServerWindow(QtWidgets.QMainWindow):
         # reset cached widgets (they may refer to deleted Qt objects after a previous stop/start)
         self._client_row_ids = []
         self._muted_widgets.clear()
-        self._gain_widgets.clear()
-        self._gain_label_widgets.clear()
         self._route_widgets.clear()
         self._vu_widgets.clear()
 
@@ -808,8 +806,6 @@ class ServerWindow(QtWidgets.QMainWindow):
 
             self._client_row_ids = []
             self._muted_widgets.clear()
-            self._gain_widgets.clear()
-            self._gain_label_widgets.clear()
             self._route_widgets.clear()
             self._vu_widgets.clear()
 
@@ -929,19 +925,9 @@ class ServerWindow(QtWidgets.QMainWindow):
         if box.clickedButton() is reset_btn:
             self._reset_total_config()
 
-    @staticmethod
-    def _db_to_pct(db: float) -> int:
-        """Convert dB gain (-60..+12) to percentage (0..100)."""
-        return max(0, min(100, int(round((float(db) + 60.0) / 72.0 * 100.0))))
-
-    @staticmethod
-    def _pct_to_db(pct: int) -> float:
-        """Convert percentage (0..100) to dB gain (-60..+12)."""
-        return float(pct) / 100.0 * 72.0 - 60.0
-
     def _set_clients_table(self, snap: Dict[int, dict], buses: Dict[int, dict]) -> None:
-        # Columns: 0=ClientID(hidden), 1=Name, 2=Mode, 3=Addr, 4=Age(hidden),
-        #          5=VU, 6=Muted, 7=Gain(%), 8=Regie, 9=Plateau, 10=VMix
+        # Columns: 0=ClientID(hidden), 1=Name, 2=Mode(hidden), 3=Addr(hidden),
+        #          4=Status, 5=VU, 6=Muted, 7=Mic(fixed 100%), 8=Regie, 9=Plateau, 10=VMix
         client_ids = [client_id for client_id, _st in sorted(snap.items(), key=lambda kv: kv[0])]
 
         rebuild = client_ids != self._client_row_ids
@@ -949,14 +935,12 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._clients.setRowCount(len(client_ids))
             self._client_row_ids = list(client_ids)
             self._muted_widgets.clear()
-            self._gain_widgets.clear()
-            self._gain_label_widgets.clear()
             self._route_widgets.clear()
             self._vu_widgets.clear()
             self._status_widgets.clear()
         else:
             for row, client_id in enumerate(client_ids):
-                w = self._clients.cellWidget(row, 6)
+                w = self._clients.cellWidget(row, 5)
                 if w is None or int(client_id) not in self._muted_widgets:
                     rebuild = True
                     break
@@ -964,13 +948,20 @@ class ServerWindow(QtWidgets.QMainWindow):
                 self._clients.setRowCount(len(client_ids))
                 self._client_row_ids = list(client_ids)
                 self._muted_widgets.clear()
-                self._gain_widgets.clear()
-                self._gain_label_widgets.clear()
                 self._route_widgets.clear()
                 self._vu_widgets.clear()
                 self._status_widgets.clear()
 
         def route_checked(bus_id: int, client_id: int) -> bool:
+            st = snap.get(int(client_id), {})
+            tx_modes = st.get("tx_mode_buses")
+            if isinstance(tx_modes, dict):
+                has_tx_modes = any(str(v).strip().lower() in ("ptt", "always_on") for v in tx_modes.values())
+                if has_tx_modes:
+                    return str(tx_modes.get(str(int(bus_id)), tx_modes.get(int(bus_id), ""))).strip().lower() in (
+                        "ptt",
+                        "always_on",
+                    )
             b = buses.get(int(bus_id))
             if not b:
                 return False
@@ -1049,49 +1040,15 @@ class ServerWindow(QtWidgets.QMainWindow):
                     self._client_row_ids = []
                     return
 
-            # col 7 — Gain as slider + percentage label
-            gain_db = float(st.get("gain_db", 0.0))
-            gain_pct = self._db_to_pct(gain_db)
-            if rebuild:
-                container = QtWidgets.QWidget()
-                h = QtWidgets.QHBoxLayout(container)
-                h.setContentsMargins(2, 0, 2, 0)
-                h.setSpacing(4)
-                gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-                gain.setMinimum(0)
-                gain.setMaximum(100)
-                gain.valueChanged.connect(lambda val, cid=client_id: self._on_gain_changed(cid, self._pct_to_db(val)))
-                lbl = QtWidgets.QLabel(f"{gain_pct}%")
-                lbl.setFixedWidth(32)
-                lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-                h.addWidget(gain, 1)
-                h.addWidget(lbl)
-                self._clients.setCellWidget(row, 7, container)
-                self._gain_widgets[int(client_id)] = gain
-                self._gain_label_widgets[int(client_id)] = lbl
-            gain = self._gain_widgets.get(int(client_id))
-            lbl = self._gain_label_widgets.get(int(client_id))
-            if gain is not None and not gain.isSliderDown():
-                try:
-                    gain.blockSignals(True)
-                    try:
-                        gain.setValue(gain_pct)
-                    finally:
-                        gain.blockSignals(False)
-                except RuntimeError:
-                    self._client_row_ids = []
-                    return
-            if lbl is not None:
-                lbl.setText(f"{gain_pct}%")
+            # col 7 — Mic gain is fixed at 100% on server side
+            _set_item(7, "100%")
 
             # cols 8,9,10 — Regie, Plateau, VMix (centered)
             for col, bus_id in enumerate((0, 1, 2), start=8):
                 key = (int(client_id), int(bus_id))
                 if rebuild:
                     cb = QtWidgets.QCheckBox()
-                    cb.stateChanged.connect(
-                        lambda state, cid=client_id, bid=bus_id: self._on_route_changed(cid, bid, state)
-                    )
+                    cb.setEnabled(False)
                     self._clients.setCellWidget(row, col, centered_checkbox(cb))
                     self._route_widgets[key] = cb
                 cb = self._route_widgets.get(key)
@@ -1115,12 +1072,6 @@ class ServerWindow(QtWidgets.QMainWindow):
         if self._server is None:
             return
         self._server.set_client_muted(client_id, _is_checked(state))
-
-    def _on_gain_changed(self, client_id: int, gain_db: float) -> None:
-        if self._server is None:
-            return
-        self._server.set_client_gain_db(client_id, float(gain_db))
-
 
 def run_gui(port: int) -> int:
     app = QtWidgets.QApplication(sys.argv)

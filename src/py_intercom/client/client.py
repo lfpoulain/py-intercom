@@ -151,12 +151,7 @@ class IntercomClient:
         self._output_mute_buses: dict[int, bool] = {}
         self._listen_return_bus: bool = bool(self.config.listen_return_bus)
 
-        base_mode = str(self.config.mode or "always_on").strip().lower()
-        if base_mode not in ("ptt", "always_on"):
-            base_mode = "always_on"
-        for bid in (0, 1, 2):
-            self._tx_mode_buses[int(bid)] = str(base_mode)
-
+        has_explicit_tx_modes = False
         try:
             if isinstance(self.config.tx_mode_buses, dict):
                 for k, v in self.config.tx_mode_buses.items():
@@ -164,8 +159,16 @@ class IntercomClient:
                     if mode not in ("ptt", "always_on"):
                         continue
                     self._tx_mode_buses[int(k)] = mode
+                    has_explicit_tx_modes = True
         except Exception:
             pass
+
+        if not has_explicit_tx_modes:
+            base_mode = str(self.config.mode or "always_on").strip().lower()
+            if base_mode not in ("ptt", "always_on"):
+                base_mode = "always_on"
+            for bid in (0, 1, 2):
+                self._tx_mode_buses[int(bid)] = str(base_mode)
 
         try:
             output_mute_buses = self.config.output_mute_buses
@@ -265,6 +268,11 @@ class IntercomClient:
 
     def set_tx_mode_bus(self, bus_id: int, mode: str) -> None:
         mode_norm = str(mode or "").strip().lower()
+        if mode_norm in ("", "off", "none", "disabled"):
+            with self._state_lock:
+                self._tx_mode_buses.pop(int(bus_id), None)
+            self._control_send_state()
+            return
         if mode_norm not in ("ptt", "always_on"):
             return
         with self._state_lock:
