@@ -39,6 +39,8 @@ class ClientConfig:
     ptt_general_key: Optional[str] = None
     ptt_bus_keys: Optional[dict] = None
     mute_buses: Optional[dict] = None
+    tx_mode_buses: Optional[dict] = None
+    output_mute_buses: Optional[dict] = None
 
     listen_return_bus: bool = False
 
@@ -145,13 +147,36 @@ class IntercomClient:
         self._ptt_general: bool = False
         self._ptt_buses: dict[int, bool] = {}
         self._mute_buses: dict[int, bool] = {}
+        self._tx_mode_buses: dict[int, str] = {}
+        self._output_mute_buses: dict[int, bool] = {}
         self._listen_return_bus: bool = bool(self.config.listen_return_bus)
+
+        base_mode = str(self.config.mode or "always_on").strip().lower()
+        if base_mode not in ("ptt", "always_on"):
+            base_mode = "always_on"
+        for bid in (0, 1, 2):
+            self._tx_mode_buses[int(bid)] = str(base_mode)
+
         try:
-            if isinstance(self.config.mute_buses, dict):
-                for k, v in self.config.mute_buses.items():
-                    self._mute_buses[int(k)] = bool(v)
+            if isinstance(self.config.tx_mode_buses, dict):
+                for k, v in self.config.tx_mode_buses.items():
+                    mode = str(v or "").strip().lower()
+                    if mode not in ("ptt", "always_on"):
+                        continue
+                    self._tx_mode_buses[int(k)] = mode
         except Exception:
-            self._mute_buses = {}
+            pass
+
+        try:
+            output_mute_buses = self.config.output_mute_buses
+            if not isinstance(output_mute_buses, dict):
+                output_mute_buses = self.config.mute_buses
+            if isinstance(output_mute_buses, dict):
+                for k, v in output_mute_buses.items():
+                    self._output_mute_buses[int(k)] = bool(v)
+        except Exception:
+            self._output_mute_buses = {}
+        self._mute_buses = dict(self._output_mute_buses)
 
     def get_stats_snapshot(self) -> dict:
         with self._state_lock:
@@ -211,6 +236,8 @@ class IntercomClient:
                 "ptt_general": bool(self._ptt_general),
                 "ptt_buses": dict(self._ptt_buses),
                 "mute_buses": dict(self._mute_buses),
+                "tx_mode_buses": dict(self._tx_mode_buses),
+                "output_mute_buses": dict(self._output_mute_buses),
                 "listen_return_bus": bool(self._listen_return_bus),
                 "routes": dict(self._ctrl_routes or {}),
                 "name": str(self.config.name or ""),
@@ -228,8 +255,20 @@ class IntercomClient:
         self._control_send_state()
 
     def set_mute_bus(self, bus_id: int, muted: bool) -> None:
+        self.set_output_mute_bus(int(bus_id), bool(muted))
+
+    def set_output_mute_bus(self, bus_id: int, muted: bool) -> None:
         with self._state_lock:
+            self._output_mute_buses[int(bus_id)] = bool(muted)
             self._mute_buses[int(bus_id)] = bool(muted)
+        self._control_send_state()
+
+    def set_tx_mode_bus(self, bus_id: int, mode: str) -> None:
+        mode_norm = str(mode or "").strip().lower()
+        if mode_norm not in ("ptt", "always_on"):
+            return
+        with self._state_lock:
+            self._tx_mode_buses[int(bus_id)] = mode_norm
         self._control_send_state()
 
     def set_listen_return_bus(self, enabled: bool) -> None:
@@ -424,6 +463,8 @@ class IntercomClient:
             ptt_general = bool(self._ptt_general)
             ptt_buses = dict(self._ptt_buses)
             mute_buses = dict(self._mute_buses)
+            tx_mode_buses = dict(self._tx_mode_buses)
+            output_mute_buses = dict(self._output_mute_buses)
             listen_return_bus = bool(self._listen_return_bus)
         msg: dict = {
             "type": "state",
@@ -431,6 +472,8 @@ class IntercomClient:
             "ptt_general": bool(ptt_general),
             "ptt_buses": dict(ptt_buses),
             "mute_buses": dict(mute_buses),
+            "tx_mode_buses": dict(tx_mode_buses),
+            "output_mute_buses": dict(output_mute_buses),
             "listen_return_bus": bool(listen_return_bus),
         }
         if muted is not None:
@@ -443,13 +486,31 @@ class IntercomClient:
 
     def _can_transmit_audio(self) -> bool:
         with self._state_lock:
-            if bool(self._muted):
-                return False
+            muted = bool(self._muted)
             mode = str(self.config.mode or "always_on")
             ptt_general = bool(self._ptt_general)
             ptt_buses = dict(self._ptt_buses)
+            tx_mode_buses = dict(self._tx_mode_buses)
+
+        if tx_mode_buses:
+            has_routing = False
+            for bus_id, tx_mode in tx_mode_buses.items():
+                tx_mode_norm = str(tx_mode or "").strip().lower()
+                if tx_mode_norm not in ("ptt", "always_on"):
+                    continue
+                has_routing = True
+                if tx_mode_norm == "always_on":
+                    if not muted:
+                        return True
+                    continue
+                if ptt_general or bool(ptt_buses.get(int(bus_id), False)):
+                    return True
+            if has_routing:
+                return False
 
         if mode != "ptt":
+            if muted:
+                return False
             return True
 
         if ptt_general:

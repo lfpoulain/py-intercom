@@ -459,6 +459,7 @@
   el.btnPtt.addEventListener("mouseleave", () => { if (pttActive) setPtt(false); });
   el.btnPtt.addEventListener("touchstart", (e) => { e.preventDefault(); setPtt(true); });
   el.btnPtt.addEventListener("touchend", () => setPtt(false));
+  el.btnPtt.addEventListener("touchcancel", () => setPtt(false));
 
   el.btnMute.addEventListener("click", toggleMute);
 
@@ -488,6 +489,14 @@
   document.addEventListener("keyup", (e) => {
     if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
     if (e.code === "Space") { e.preventDefault(); setPtt(false); }
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && pttActive) setPtt(false);
+  });
+
+  window.addEventListener("blur", () => {
+    if (pttActive) setPtt(false);
   });
 
   // --- Init ---

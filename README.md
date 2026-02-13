@@ -5,6 +5,7 @@ Intercom audio temps réel sur LAN (architecture client/serveur).
 - Audio: UDP (Opus)
 - Contrôle: TCP (JSON par ligne)
 - UI: PySide6
+- Return bus: capture audio locale côté serveur (ex: VB-Cable) mixée dans le flux des clients abonnés
 
 ## Prérequis
 

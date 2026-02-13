@@ -51,7 +51,6 @@ if __name__ == "__main__":
                 "--port",
                 "8443",
                 "--ssl-adhoc",
-                "--debug",
             ]
         )
     raise SystemExit(main())

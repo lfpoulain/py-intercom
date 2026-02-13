@@ -9,8 +9,8 @@ Ce playbook décrit **l’état réel** de l’application telle qu’elle est i
 
 `py-intercom` est un intercom audio temps réel **LAN** en architecture **client/serveur**.
 
-- Le **serveur** reçoit les flux audio des clients, applique la config (routing/mute/gain), et renvoie à chaque client un mix “mix-minus” (le client reçoit le mix global moins sa propre contribution).
-- Chaque **client** capture le micro, encode en Opus, envoie au serveur, puis lit le mix reçu dans son casque (option sidetone local).
+- Le **serveur** reçoit les flux audio des clients, applique la config (routing/mute/gain), et renvoie à chaque client un mix "mix-minus" (le client reçoit le mix global moins sa propre contribution). Le serveur peut aussi capturer un **return bus** (entrée audio locale, ex: VB-Cable) et le mixer dans le flux envoyé aux clients abonnés.
+- Chaque **client** capture le micro, encode en Opus, envoie au serveur, puis lit le mix reçu dans son casque (option sidetone local). Le client peut s'abonner au return bus pour recevoir l'audio retour.
 
 L’app est utilisable via :
 
@@ -26,6 +26,7 @@ Ce que couvre la V1 :
 - Routage par bus (bus fixes), mute et gain par client, configuration d'outputs côté serveur.
 - **PTT** (Push-To-Talk) : général + par bus, avec raccourcis clavier globaux OS.
 - **Mute mic par bus** : le client peut couper son micro sur un bus spécifique.
+- **Return bus** : le serveur capture une entrée audio locale (ex: sortie programme VMix via VB-Cable) et la mixe dans le flux des clients abonnés.
 - Presets JSON pour persister la config serveur et la config client.
 - Canal de contrôle TCP (keepalive + push config + kick).
 
@@ -37,8 +38,9 @@ Ce que la V1 ne couvre pas : voir **Roadmap**.
 2. Le client applique le **gain d’entrée** et encode en **Opus**.
 3. Le client envoie des paquets **UDP** au serveur (port audio).
 4. Le serveur reçoit, décode Opus, et met à jour l’état du client (VU, dernière activité).
-5. Le serveur mixe périodiquement et fabrique un mix “global” + calcule le **mix-minus** pour chaque client (mix global moins sa contribution).
-6. Le serveur envoie le mix-minus en **UDP** à chaque client.
+5. Le serveur mixe périodiquement et fabrique un mix "global" + calcule le **mix-minus** pour chaque client (mix global moins sa contribution).
+5b. Si le **return bus** est activé, le serveur capture l'entrée audio locale, la resample à 48kHz, et la mixe dans le flux des clients ayant `listen_return_bus = true`.
+6. Le serveur envoie le mix-minus (+ return bus si abonné) en **UDP** à chaque client.
 7. Le client décode Opus, bufferise et joue dans le casque (callback output). Optionnellement, le client ajoute un **sidetone** local.
 8. En parallèle, le canal **TCP control** permet de synchroniser mute/gain/routes et d’afficher des états (connecté / âge).
 
@@ -63,6 +65,26 @@ Attributs gérés côté client :
 - PTT par bus (active le micro sur un bus spécifique)
 - mute mic par bus (coupe le micro sur un bus spécifique, persisté dans le preset)
 - raccourcis clavier globaux OS via `pynput` (capturés même si l'app n'a pas le focus)
+- `listen_return_bus` : abonnement au return bus (persisté dans le preset client)
+
+### Return bus
+
+Le serveur peut capturer une **entrée audio locale** (ex: sortie programme VMix routée via VB-Cable) et la mixer dans le flux envoyé aux clients abonnés.
+
+Côté serveur :
+
+- Activation via checkbox "Return" dans l'UI (ou `--return-enabled` en CLI)
+- Sélection du device d'entrée (combo dans l'UI, ou `--return-input-device` en CLI)
+- Gain ajustable (`--return-gain-db` en CLI, slider dans l'UI)
+- VU mètre "Return VU" dans le panneau serveur
+- L'audio capturé est resampleé à 48kHz et découpé en frames de 480 samples
+- Les frames sont mixées dans le mix-minus uniquement pour les clients ayant `listen_return_bus = true`
+
+Côté client :
+
+- Checkbox "Listen return bus" dans l'UI (persistée dans le preset)
+- VU mètre "Return bus VU" dans le panneau Meters (alimenté par le serveur via le canal de contrôle TCP)
+- Le flag `listen_return_bus` est envoyé au serveur dans les messages `state`
 
 ### Bus
 
@@ -108,12 +130,14 @@ Le serveur renvoie à chaque client un flux UDP (mix-minus), via `sendto()` vers
 
 Types actuellement utilisés :
 
-- `hello` (client -> serveur) : `client_id`, `client_uuid`, `name`, `mode`
+- `hello` (client -> serveur) : `client_id`, `client_uuid`, `name`, `mode`, `udp_port`
 - `welcome` (serveur -> client)
-- `update` (serveur -> client) : push config (mute + routes)
-- `state` (client -> serveur) : `ptt_general`, `ptt_buses`, `mute_buses`, optionnellement `muted`
-- `ping`/`pong` (keepalive)
+- `update` (serveur -> client) : push config (mute + routes + `return_vu_dbfs`)
+- `state` (client -> serveur) : `ptt_general`, `ptt_buses`, `mute_buses`, `listen_return_bus`, optionnellement `muted`
+- `ping`/`pong` (keepalive, le `pong` inclut `return_vu_dbfs`)
 - `kick` (serveur -> client)
+
+Note : le champ `udp_port` dans `hello` permet au serveur de connaître le port UDP du client dès la connexion TCP, sans attendre le premier paquet UDP. Cela résout le problème où un client en mode PTT devait appuyer une première fois sur PTT avant de recevoir l'audio.
 
 ### Auto-discovery (UDP broadcast)
 
@@ -179,6 +203,7 @@ Les presets sont **effectivement implémentés** en JSON, avec écriture atomiqu
   - `outputs`: liste de `{device, bus_id}`
   - `buses`: mapping `bus_id -> {default_all_sources, source_uuids}`
   - `clients`: mapping `client_uuid -> {muted, gain_db, name}`
+  - `return_enabled`, `return_input_device`, `return_gain_db` (config return bus)
 
 ### Preset client
 
@@ -191,6 +216,7 @@ Les presets sont **effectivement implémentés** en JSON, avec écriture atomiqu
   - `ptt_general_key` : raccourci clavier PTT général
   - `ptt_bus_keys` : mapping `bus_id -> raccourci` pour PTT par bus
   - `mute_buses` : mapping `bus_id -> bool` pour mute mic par bus
+  - `listen_return_bus` : abonnement au return bus
 
 ## 7) Stack technique (dev)
 
@@ -237,9 +263,10 @@ Note : le `requirements.txt` contient aussi des dépendances liées à une piste
 - Serveur :
   - thread RX UDP (ingestion payloads Opus dans JB par client)
   - thread mix (tick 10ms : pop JB → décode → mix-minus → queue)
-  - thread broadcast (lit queue → encode per-client → UDP sendto)
+  - thread broadcast (lit queue → encode per-client → UDP sendto, mixe return bus si abonné)
   - thread accept TCP control + handlers
   - N streams sounddevice de sortie (1 par output) avec callbacks
+  - (optionnel) stream sounddevice d'entrée pour le return bus (callback → resample → queue frames)
 
 - Client :
   - callback input (capture → resample → encode Opus → UDP)
@@ -271,14 +298,27 @@ Conseil : garder un device de sortie "VMix" séparé (VB-Cable) en output serveu
 | Codec Opus (encode+decode) | < 3 ms |
 | **Total estimé** | **~50-60 ms** |
 
-## 10) Limitations connues (V1)
+## 10) VU mètres
+
+### Côté serveur
+
+- **VU par client** : affiché dans la table clients (colonne VU), calculé à partir du RMS des frames décodées.
+- **Return VU** : affiché dans le panneau Server, calculé à partir du RMS des frames capturées par le return bus.
+
+### Côté client
+
+- **Input VU** : niveau micro capturé.
+- **Output VU** : niveau du mix reçu joué dans le casque.
+- **Return bus VU** : niveau du return bus, transmis par le serveur via les messages `pong` et `update` du canal de contrôle TCP.
+
+## 11) Limitations connues (V1)
 
 - Les bus sont **fixes** (pas de création/renommage dynamique via UI).
 - Le resampling serveur (si output != 48kHz) est volontairement simple (objectif : robustesse avant qualité audiophile).
 - Pas de chiffrement/authentification : usage LAN.
 - WASAPI exclusive mode non supporté (retiré — causait echo/glitch, à revisiter).
 
-## 11) Dépannage rapide
+## 12) Dépannage rapide
 
 - Si un client n’entend rien :
   - vérifier la route (case bus) côté serveur
@@ -297,7 +337,12 @@ Conseil : garder un device de sortie "VMix" séparé (VB-Cable) en output serveu
   - le client réutilise le même socket UDP (même port éphémère) pour éviter un blocage par le pare-feu Windows
   - si le problème persiste, vérifier les règles de pare-feu pour le port UDP utilisé
 
-## 12) Client web (plateau)
+- Si le return bus ne fonctionne pas :
+  - vérifier que "Return" est coché côté serveur et qu'un device d'entrée est sélectionné
+  - vérifier que "Listen return bus" est coché côté client
+  - vérifier le VU "Return VU" côté serveur (doit bouger si l'audio arrive sur le device)
+
+## 13) Client web (plateau)
 
 Un client léger en **WebAudio + WebSocket** pour les personnes sur plateau qui n'ont pas le client Python. Fonctionne sur PC, tablette Android et iPad.
 
@@ -337,6 +382,7 @@ Par défaut, `run_web.py` (sans arguments) lance en **HTTPS adhoc** sur le port 
 - **PTT** : bouton + raccourci `Espace` (touch-friendly sur mobile)
 - **Mute** : bouton avec icônes toggle (mic/mic-off) + raccourci `M`
 - **Mode** : PTT ou Always-on (modifiable en cours de connexion)
+- **Bus** : le client web est contraint au bus **Regie** (bus `0`) ; les bus Plateau/VMix sont forcés en mute côté bridge
 - **Volume** : slider 0–150% via `GainNode`
 - **VU mètres** : TX (vert) et RX (bleu) avec peak decay
 - **Indicateur de connexion** : dot vert/gris + label texte
@@ -376,13 +422,12 @@ Le client web est accessible à `https://<ip>:8443/` (HTTPS).
 | Bridge jitter buffer | 30ms (3 × 10ms) |
 | **Surcoût total estimé** | **~75-80ms** |
 
-## 13) Roadmap (non implémenté)
+## 14) Roadmap (non implémenté)
 
 Tout ce qui suit n'est **pas** implémenté.
 
 - AudioWorklet (remplacement de ScriptProcessor pour le client web)
 - Jitter buffer adaptatif (ajustement dynamique de `start_frames`)
-- WASAPI exclusive mode (latence driver réduite)
 - AEC (annulation d'écho)
 - Presets multiples (save-as / liste / load)
 - Bus dynamiques (création / renommage via UI)

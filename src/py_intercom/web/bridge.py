@@ -18,6 +18,9 @@ from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import pack_audio_packet, unpack_audio_packet
 
 
+REGIE_BUS_ID = 0
+
+
 @dataclass
 class BridgeConfig:
     server_ip: str
@@ -80,8 +83,9 @@ class IntercomBridge:
         self._state_lock = threading.Lock()
         self._muted = False
         self._ptt_general = False
-        self._ptt_buses: dict[int, bool] = {}
-        self._mute_buses: dict[int, bool] = {}
+        self._ptt_buses: dict[int, bool] = {int(REGIE_BUS_ID): False}
+        # Web client is constrained to Regie only.
+        self._mute_buses: dict[int, bool] = {1: True, 2: True}
 
     def _can_transmit_audio(self) -> bool:
         with self._state_lock:
@@ -265,6 +269,7 @@ class IntercomBridge:
                     "client_uuid": str(self.client_uuid),
                     "name": str(self.config.name or ""),
                     "mode": str(self.config.mode or "ptt"),
+                    "udp_port": int(self._udp_sock.getsockname()[1]),
                 }
                 self._control_send(sock, hello)
                 self._control_send_state(muted=bool(self._muted))

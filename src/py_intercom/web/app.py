@@ -27,7 +27,7 @@ def create_app() -> tuple[Flask, SocketIO]:
     app = Flask(__name__)
     app.config["SECRET_KEY"] = secrets.token_hex(32)
 
-    socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+    socketio = SocketIO(app, async_mode="threading")
 
     sessions: Dict[str, WebClientSession] = {}
     sessions_lock = threading.Lock()
