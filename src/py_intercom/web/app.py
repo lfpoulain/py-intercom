@@ -23,34 +23,6 @@ class WebClientSession:
     bridge: IntercomBridge
 
 
-def _parse_tx_mode_buses(raw: Any) -> dict[int, str] | None:
-    if not isinstance(raw, dict):
-        return None
-    out: dict[int, str] = {}
-    for k, v in raw.items():
-        try:
-            bid = int(k)
-        except Exception:
-            continue
-        mode = str(v or "").strip().lower()
-        if mode in ("ptt", "always_on"):
-            out[int(bid)] = mode
-    return out
-
-
-def _parse_output_mute_buses(raw: Any) -> dict[int, bool]:
-    out: dict[int, bool] = {}
-    if not isinstance(raw, dict):
-        return out
-    for k, v in raw.items():
-        try:
-            bid = int(k)
-        except Exception:
-            continue
-        out[int(bid)] = bool(v)
-    return out
-
-
 def create_app() -> tuple[Flask, SocketIO]:
     app = Flask(__name__)
     app.config["SECRET_KEY"] = secrets.token_hex(32)
@@ -142,8 +114,6 @@ def create_app() -> tuple[Flask, SocketIO]:
         name = str(data.get("name") or "plateau").strip()
         client_uuid = str(data.get("client_uuid") or "").strip() or secrets.token_hex(16)
         mode = str(data.get("mode") or "ptt").strip() or "ptt"
-        tx_mode_buses = _parse_tx_mode_buses(data.get("tx_mode_buses"))
-        output_mute_buses = _parse_output_mute_buses(data.get("output_mute_buses"))
 
         if not server_ip or server_port <= 0:
             emit("server", {"type": "error", "message": "server_ip/server_port required"})
@@ -179,14 +149,7 @@ def create_app() -> tuple[Flask, SocketIO]:
             # Defer stop to avoid calling stop() from within bridge control thread
             threading.Thread(target=_stop_session, args=(sid,), daemon=True).start()
 
-        cfg = BridgeConfig(
-            server_ip=server_ip,
-            server_port=int(server_port),
-            name=name,
-            mode=mode,
-            tx_mode_buses=tx_mode_buses,
-            output_mute_buses=output_mute_buses,
-        )
+        cfg = BridgeConfig(server_ip=server_ip, server_port=int(server_port), name=name, mode=mode)
         bridge = IntercomBridge(client_uuid=client_uuid, config=cfg, on_audio_frame=_on_audio_frame, on_control_msg=_on_control_msg, on_kick=_on_kick)
         bridge.start()
 
@@ -225,7 +188,7 @@ def create_app() -> tuple[Flask, SocketIO]:
         if sess is None:
             return
         try:
-            sess.bridge.set_state(ptt_general=bool(active))
+            sess.bridge.set_state(ptt_active=bool(active))
         except Exception:
             pass
 
@@ -257,29 +220,6 @@ def create_app() -> tuple[Flask, SocketIO]:
         if sess is None:
             return
         sess.bridge.config.mode = mode
-
-    @socketio.on("routing")
-    def on_routing(data: Any):
-        sid = str(request.sid)
-        if not isinstance(data, dict):
-            return
-        tx_mode_buses = _parse_tx_mode_buses(data.get("tx_mode_buses"))
-        output_mute_buses = _parse_output_mute_buses(data.get("output_mute_buses"))
-        with sessions_lock:
-            sess = sessions.get(sid)
-        if sess is None:
-            return
-        kwargs: dict[str, Any] = {}
-        if tx_mode_buses is not None:
-            kwargs["tx_mode_buses"] = tx_mode_buses
-        if "output_mute_buses" in data:
-            kwargs["output_mute_buses"] = output_mute_buses
-        if not kwargs:
-            return
-        try:
-            sess.bridge.set_state(**kwargs)
-        except Exception:
-            pass
 
     @socketio.on("audio_in")
     def on_audio_in(pcm: Any):

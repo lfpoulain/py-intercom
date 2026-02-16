@@ -9,7 +9,7 @@ Ce playbook décrit **l’état réel** de l’application telle qu’elle est i
 
 `py-intercom` est un intercom audio temps réel **LAN** en architecture **client/serveur**.
 
-- Le **serveur** reçoit les flux audio des clients, applique la config (routing/mute/gain), et renvoie à chaque client un mix "mix-minus" (le client reçoit le mix global moins sa propre contribution). Le serveur peut aussi capturer un **return bus** (entrée audio locale, ex: VB-Cable) et le mixer dans le flux envoyé aux clients abonnés.
+- Le **serveur** reçoit les flux audio des clients, applique la config (routing/mute), et renvoie à chaque client un mix "mix-minus" (le client reçoit le mix global moins sa propre contribution). Le serveur peut aussi capturer un **return bus** (entrée audio locale, ex: VB-Cable) et le mixer dans le flux envoyé aux clients abonnés.
 - Chaque **client** capture le micro, encode en Opus, envoie au serveur, puis lit le mix reçu dans son casque (option sidetone local). Le client peut s'abonner au return bus pour recevoir l'audio retour.
 
 L’app est utilisable via :
@@ -23,10 +23,11 @@ Ce que couvre la V1 :
 
 - Un serveur unique.
 - Des clients Python (GUI) qui envoient leur micro et reçoivent un retour casque.
-- Routage par bus (bus fixes), mute et gain par client, configuration d'outputs côté serveur.
-- **PTT** (Push-To-Talk) : général + par bus, avec raccourcis clavier globaux OS.
+- Routage par bus **dynamiques** (types `communication` / `diffusion`), mute par client, configuration d'outputs côté serveur.
+- **PTT** (Push-To-Talk) : mode **par bus** (`always_on` / `ptt`) avec raccourcis clavier globaux OS par bus.
 - **Mute mic par bus** : le client peut couper son micro sur un bus spécifique.
 - **Return bus** : le serveur capture une entrée audio locale (ex: sortie programme VMix via VB-Cable) et la mixe dans le flux des clients abonnés.
+- UX serveur : suppression des contrôles de gain return et gain client (fixés à 0 dB / unity) et suppression de l'affichage du mode client.
 - Presets JSON pour persister la config serveur et la config client.
 - Canal de contrôle TCP (keepalive + push config + kick).
 
@@ -42,7 +43,7 @@ Ce que la V1 ne couvre pas : voir **Roadmap**.
 5b. Si le **return bus** est activé, le serveur capture l'entrée audio locale, la resample à 48kHz, et la mixe dans le flux des clients ayant `listen_return_bus = true`.
 6. Le serveur envoie le mix-minus (+ return bus si abonné) en **UDP** à chaque client.
 7. Le client décode Opus, bufferise et joue dans le casque (callback output). Optionnellement, le client ajoute un **sidetone** local.
-8. En parallèle, le canal **TCP control** permet de synchroniser mute/gain/routes et d’afficher des états (connecté / âge).
+8. En parallèle, le canal **TCP control** permet de synchroniser mute/routes/états PTT par bus et d’afficher des états (connecté / âge).
 
 ## 3) Concepts actuels
 
@@ -54,17 +55,15 @@ Ce que la V1 ne couvre pas : voir **Roadmap**.
 Attributs gérés côté serveur :
 
 - mute serveur
-- gain (dB)
 - routage vers bus
 - état control TCP (connecté / âge)
 
 Attributs gérés côté client :
 
-- mode : `always_on` (micro toujours ouvert) ou `ptt` (micro activé par touche)
-- PTT général (active le micro sur tous les bus)
+- mode par bus : `always_on` (micro ouvert sur ce bus) ou `ptt` (micro activé par touche sur ce bus)
 - PTT par bus (active le micro sur un bus spécifique)
 - mute mic par bus (coupe le micro sur un bus spécifique, persisté dans le preset)
-- raccourcis clavier globaux OS via `pynput` (capturés même si l'app n'a pas le focus)
+- raccourcis clavier globaux OS par bus via `pynput` (capturés même si l'app n'a pas le focus)
 - `listen_return_bus` : abonnement au return bus (persisté dans le preset client)
 
 ### Return bus
@@ -75,7 +74,7 @@ Côté serveur :
 
 - Activation via checkbox "Return" dans l'UI (ou `--return-enabled` en CLI)
 - Sélection du device d'entrée (combo dans l'UI, ou `--return-input-device` en CLI)
-- Gain ajustable (`--return-gain-db` en CLI, slider dans l'UI)
+- Gain fixe à 0 dB (unity)
 - VU mètre "Return VU" dans le panneau serveur
 - L'audio capturé est resampleé à 48kHz et découpé en frames de 480 samples
 - Les frames sont mixées dans le mix-minus uniquement pour les clients ayant `listen_return_bus = true`
@@ -88,14 +87,19 @@ Côté client :
 
 ### Bus
 
-Dans l’implémentation actuelle, les bus sont **fixes** :
+Dans l’implémentation actuelle, les bus sont **dynamiques** avec deux types :
 
-- `0` : `Regie`
-- `1` : `Plateau`
-- `2` : `VMix`
+- `communication` : bus de communication (Régie)
+- `diffusion` : bus de diffusion (Plateau, VMix, etc.)
+
+Contraintes :
+
+- Le bus `0` est toujours le bus `communication` principal (Régie) et n'est pas supprimable.
+- Au moins un bus `diffusion` doit exister.
 
 Chaque bus maintient :
 
+- `name`, `bus_type`, `feed_to_regie`
 - `default_all_sources` (si vrai : bus ouvert par défaut)
 - une liste de `source_uuids` (persistée dans le preset serveur)
 
@@ -133,7 +137,7 @@ Types actuellement utilisés :
 - `hello` (client -> serveur) : `client_id`, `client_uuid`, `name`, `mode`, `udp_port`
 - `welcome` (serveur -> client)
 - `update` (serveur -> client) : push config (mute + routes + `return_vu_dbfs`)
-- `state` (client -> serveur) : `ptt_general`, `ptt_buses`, `mute_buses`, `listen_return_bus`, optionnellement `muted`
+- `state` (client -> serveur) : `ptt_buses`, `mute_buses`, `listen_return_bus`, optionnellement `muted`
 - `ping`/`pong` (keepalive, le `pong` inclut `return_vu_dbfs`)
 - `kick` (serveur -> client)
 
@@ -201,9 +205,9 @@ Les presets sont **effectivement implémentés** en JSON, avec écriture atomiqu
 - Chemin par défaut : `~\py-intercom\server_preset.json`
 - Contenu :
   - `outputs`: liste de `{device, bus_id}`
-  - `buses`: mapping `bus_id -> {default_all_sources, source_uuids}`
-  - `clients`: mapping `client_uuid -> {muted, gain_db, name}`
-  - `return_enabled`, `return_input_device`, `return_gain_db` (config return bus)
+  - `buses`: mapping `bus_id -> {name, bus_type, feed_to_regie, gain_db, default_all_sources, source_uuids}`
+  - `clients`: mapping `client_uuid -> {muted, gain_db, name}` (`gain_db` conservé pour compatibilité, valeur effective fixe à 0 dB)
+  - `return_enabled`, `return_input_device` (config return bus)
 
 ### Preset client
 
@@ -211,9 +215,9 @@ Les presets sont **effectivement implémentés** en JSON, avec écriture atomiqu
 - Contenu :
   - serveur (ip/port)
   - devices (input/output)
-  - identité (`client_uuid`, name, mode)
+  - identité (`client_uuid`, name)
   - gains, sidetone
-  - `ptt_general_key` : raccourci clavier PTT général
+  - `mode_buses` : mapping `bus_id -> mode` (`always_on`/`ptt`)
   - `ptt_bus_keys` : mapping `bus_id -> raccourci` pour PTT par bus
   - `mute_buses` : mapping `bus_id -> bool` pour mute mic par bus
   - `listen_return_bus` : abonnement au return bus
@@ -223,7 +227,7 @@ Les presets sont **effectivement implémentés** en JSON, avec écriture atomiqu
 ### Langage / libs
 
 - Python (projet `src/`)
-- UI : **PySide6** + **qt-material** (thème `dark_teal.xml`)
+- UI : **PySide6** (thème natif projet via palette + QSS)
 - Audio IO : **sounddevice**
 - DSP / buffers : **numpy**
 - Codec : **opuslib**
@@ -240,7 +244,7 @@ Note : le `requirements.txt` contient aussi des dépendances liées à une piste
   - codec Opus
   - utilitaires (devices, json I/O, logging)
   - `discovery.py` : auto-discovery LAN (beacon + listener)
-  - `theme.py` : application du thème qt-material + widgets `VuMeter` (barre colorée vert/jaune/rouge) et `StatusIndicator` (pastille en ligne/hors ligne)
+  - `theme.py` : application du thème natif Qt (palette + QSS) + widgets `VuMeter` (barre colorée vert/jaune/rouge) et `StatusIndicator` (pastille en ligne/hors ligne)
 
 - `py_intercom/server/`
   - `IntercomServer` : réception UDP, mix, broadcast, contrôle TCP, presets
@@ -281,8 +285,8 @@ Note : le `requirements.txt` contient aussi des dépendances liées à une piste
 3. Lancer un client (GUI), renseigner IP/port du serveur, sélectionner devices input/output, puis se connecter.
 4. Sur l'UI serveur :
    - la table clients affiche un **indicateur de statut** (pastille verte = en ligne, rouge = hors ligne) ; les clients déconnectés sont grisés
-   - ajuster les routes (cases Regie / Plateau / VMix)
-   - régler mute/gain par client
+   - ajuster les routes (colonnes bus dynamiques)
+   - régler mute par client
 5. Utiliser le bouton **ℹ** (en bas à droite) côté client/serveur pour diagnostiquer rapidement (ports, stats, buffers, underflows, control age, adresses clients).
 
 Conseil : garder un device de sortie "VMix" séparé (VB-Cable) en output serveur si besoin d'intégration VMix.
@@ -313,7 +317,6 @@ Conseil : garder un device de sortie "VMix" séparé (VB-Cable) en output serveu
 
 ## 11) Limitations connues (V1)
 
-- Les bus sont **fixes** (pas de création/renommage dynamique via UI).
 - Le resampling serveur (si output != 48kHz) est volontairement simple (objectif : robustesse avant qualité audiophile).
 - Pas de chiffrement/authentification : usage LAN.
 - WASAPI exclusive mode non supporté (retiré — causait echo/glitch, à revisiter).
@@ -381,8 +384,8 @@ Par défaut, `run_web.py` (sans arguments) lance en **HTTPS adhoc** sur le port 
 
 - **PTT** : bouton + raccourci `Espace` (touch-friendly sur mobile)
 - **Mute** : bouton avec icônes toggle (mic/mic-off) + raccourci `M`
-- **Mode** : PTT ou Always-on (modifiable en cours de connexion)
-- **Bus** : le client web est contraint au bus **Regie** (bus `0`) ; les bus Plateau/VMix sont forcés en mute côté bridge
+- **Mode** : PTT ou Always-on (global au client web, modifiable en cours de connexion)
+- **Bus** : le bridge web maintient un `ptt_buses` dynamique sur les bus annoncés par le serveur (le bouton PTT active/désactive tous les bus connus)
 - **Volume** : slider 0–150% via `GainNode`
 - **VU mètres** : TX (vert) et RX (bleu) avec peak decay
 - **Indicateur de connexion** : dot vert/gris + label texte
@@ -430,7 +433,6 @@ Tout ce qui suit n'est **pas** implémenté.
 - Jitter buffer adaptatif (ajustement dynamique de `start_frames`)
 - AEC (annulation d'écho)
 - Presets multiples (save-as / liste / load)
-- Bus dynamiques (création / renommage via UI)
 - EQ/comp/gate
 - Contrôle externe (REST/OSC/MIDI)
 - Multicast

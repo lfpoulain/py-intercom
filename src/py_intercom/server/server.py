@@ -44,12 +44,8 @@ class ClientState:
     control_connected: bool = False
     last_control_monotonic: float = 0.0
 
-    ptt_general: bool = False
     ptt_buses: Dict[int, bool] = field(default_factory=dict)
     mute_buses: Dict[int, bool] = field(default_factory=dict)
-    tx_mode_buses: Dict[int, str] = field(default_factory=dict)
-    tx_modes_configured: bool = False
-    output_mute_buses: Dict[int, bool] = field(default_factory=dict)
 
     listen_return_bus: bool = False
 
@@ -61,6 +57,8 @@ class AudioBus:
     source_ids: Set[int]
     gain_db: float = 0.0
     default_all_sources: bool = False
+    bus_type: str = "diffusion"  # communication | diffusion
+    feed_to_regie: bool = True
 
 
 @dataclass
@@ -106,7 +104,6 @@ class IntercomServer:
         discovery_enabled: bool = True,
         return_input_device: Optional[int] = None,
         return_enabled: bool = False,
-        return_gain_db: float = 0.0,
     ):
         self.bind_ip = bind_ip
         self.port = port
@@ -141,13 +138,35 @@ class IntercomServer:
         self._clients: Dict[int, ClientState] = {}
 
         # Default buses as per spec
-        # - Regie: receives all sources by default (unless explicitly routed)
-        # - Plateau / VMix: empty by default
+        # - Regie: communication bus (clients listen to this mix)
+        # - Plateau / VMix: diffusion buses (outputs, optional return to Regie)
         self._buses: Dict[int, AudioBus] = {
-            0: AudioBus(bus_id=0, name="Regie", source_ids=set(), default_all_sources=True),
-            1: AudioBus(bus_id=1, name="Plateau", source_ids=set(), default_all_sources=False),
-            2: AudioBus(bus_id=2, name="VMix", source_ids=set(), default_all_sources=False),
+            0: AudioBus(
+                bus_id=0,
+                name="Regie",
+                source_ids=set(),
+                default_all_sources=True,
+                bus_type="communication",
+                feed_to_regie=False,
+            ),
+            1: AudioBus(
+                bus_id=1,
+                name="Plateau",
+                source_ids=set(),
+                default_all_sources=False,
+                bus_type="diffusion",
+                feed_to_regie=True,
+            ),
+            2: AudioBus(
+                bus_id=2,
+                name="VMix",
+                source_ids=set(),
+                default_all_sources=False,
+                bus_type="diffusion",
+                feed_to_regie=True,
+            ),
         }
+        self._next_bus_id: int = 3
 
         # items are (raw_mix_48k, contributions_by_client_id)
         self._mix_queue: queue.Queue[object] = queue.Queue(maxsize=50)
@@ -168,26 +187,29 @@ class IntercomServer:
         self._next_output_id: int = 0
 
         if outputs is not None:
+            diffusion_fallback = self._first_diffusion_bus_id_unlocked()
             for o in outputs:
                 try:
                     dev = int(o.get("device"))
                     bid = int(o.get("bus_id", 0))
                 except Exception:
                     continue
+                bus = self._buses.get(int(bid))
+                if bus is None or str(bus.bus_type or "diffusion") != "diffusion":
+                    bid = int(diffusion_fallback)
                 oid = int(self._next_output_id)
                 self._next_output_id += 1
                 self._outputs[oid] = OutputState(output_id=oid, device=dev, bus_id=bid)
         elif output_device is not None:
             oid = int(self._next_output_id)
             self._next_output_id += 1
-            self._outputs[oid] = OutputState(output_id=oid, device=int(output_device), bus_id=0)
+            self._outputs[oid] = OutputState(output_id=oid, device=int(output_device), bus_id=self._first_diffusion_bus_id_unlocked())
 
         self._mix_thread: Optional[threading.Thread] = None
         self._running: bool = False
 
         self._return_input_device: Optional[int] = int(return_input_device) if return_input_device is not None else None
         self._return_enabled: bool = bool(return_enabled)
-        self._return_gain_db: float = float(return_gain_db)
         self._return_stream: Optional[sd.InputStream] = None
         self._return_lock = threading.Lock()
         self._return_in_samplerate: int = int(SAMPLE_RATE)
@@ -230,7 +252,95 @@ class IntercomServer:
             clients = {}
 
         with self._lock:
+            loaded_buses: Dict[int, AudioBus] = {
+                0: AudioBus(
+                    bus_id=0,
+                    name="Regie",
+                    source_ids=set(),
+                    default_all_sources=True,
+                    bus_type="communication",
+                    feed_to_regie=False,
+                )
+            }
+
+            if isinstance(buses, dict):
+                for bus_id_str, b in buses.items():
+                    try:
+                        bus_id = int(bus_id_str)
+                    except Exception:
+                        continue
+                    if not isinstance(b, dict):
+                        continue
+
+                    name = str(b.get("name") or ("Regie" if int(bus_id) == 0 else f"Bus {int(bus_id)}"))
+                    bus_type = str(b.get("bus_type") or ("communication" if int(bus_id) == 0 else "diffusion")).strip().lower()
+                    if bus_type not in ("communication", "diffusion"):
+                        bus_type = "communication" if int(bus_id) == 0 else "diffusion"
+
+                    try:
+                        gain_db = float(b.get("gain_db", 0.0))
+                    except Exception:
+                        gain_db = 0.0
+
+                    default_all_sources = bool(b.get("default_all_sources", int(bus_id) == 0))
+                    feed_to_regie_default = False if bus_type == "communication" else True
+                    feed_to_regie = bool(b.get("feed_to_regie", feed_to_regie_default))
+
+                    src_uuids = b.get("source_uuids")
+                    src_ids: Set[int] = set()
+                    if isinstance(src_uuids, list):
+                        for u in src_uuids:
+                            cid = int(self._client_id_from_uuid(str(u)))
+                            if cid != 0:
+                                src_ids.add(int(cid))
+
+                    if bool(default_all_sources) and len(src_ids) == 0:
+                        source_ids = set()
+                    else:
+                        source_ids = set(src_ids)
+
+                    loaded_buses[int(bus_id)] = AudioBus(
+                        bus_id=int(bus_id),
+                        name=name,
+                        source_ids=source_ids,
+                        gain_db=float(gain_db),
+                        default_all_sources=bool(default_all_sources),
+                        bus_type=str(bus_type),
+                        feed_to_regie=bool(feed_to_regie),
+                    )
+
+            # Regie bus is mandatory.
+            if 0 not in loaded_buses:
+                loaded_buses[0] = AudioBus(
+                    bus_id=0,
+                    name="Regie",
+                    source_ids=set(),
+                    default_all_sources=True,
+                    bus_type="communication",
+                    feed_to_regie=False,
+                )
+            else:
+                loaded_buses[0].bus_type = "communication"
+                loaded_buses[0].feed_to_regie = False
+                loaded_buses[0].default_all_sources = True
+
+            has_diffusion = any(str(b.bus_type or "diffusion") == "diffusion" for b in loaded_buses.values())
+            if not bool(has_diffusion):
+                next_bid = int(max(loaded_buses.keys(), default=0) + 1)
+                loaded_buses[int(next_bid)] = AudioBus(
+                    bus_id=int(next_bid),
+                    name="Plateau",
+                    source_ids=set(),
+                    default_all_sources=False,
+                    bus_type="diffusion",
+                    feed_to_regie=True,
+                )
+
+            self._buses = dict(loaded_buses)
+            self._next_bus_id = int(max(self._buses.keys(), default=0) + 1)
+
             if isinstance(outputs, list):
+                diffusion_fallback = self._first_diffusion_bus_id_unlocked()
                 for out in list(self._outputs.values()):
                     try:
                         if out.stream is not None:
@@ -248,36 +358,12 @@ class IntercomServer:
                         bid = int(o.get("bus_id", 0))
                     except Exception:
                         continue
+                    bus = self._buses.get(int(bid))
+                    if bus is None or str(bus.bus_type or "diffusion") != "diffusion":
+                        bid = int(diffusion_fallback)
                     oid = int(self._next_output_id)
                     self._next_output_id += 1
                     self._outputs[oid] = OutputState(output_id=oid, device=dev, bus_id=bid)
-
-            if isinstance(buses, dict):
-                for bus_id_str, b in buses.items():
-                    try:
-                        bus_id = int(bus_id_str)
-                    except Exception:
-                        continue
-                    if not isinstance(b, dict):
-                        continue
-                    bus = self._buses.get(int(bus_id))
-                    if bus is None:
-                        continue
-                    if "default_all_sources" in b:
-                        bus.default_all_sources = bool(b.get("default_all_sources"))
-
-                    src_uuids = b.get("source_uuids")
-                    src_ids: Set[int] = set()
-                    if isinstance(src_uuids, list):
-                        for u in src_uuids:
-                            cid = int(self._client_id_from_uuid(str(u)))
-                            if cid != 0:
-                                src_ids.add(int(cid))
-
-                    if bool(bus.default_all_sources) and len(src_ids) == 0:
-                        bus.source_ids = set()
-                    else:
-                        bus.source_ids = set(src_ids)
 
             now = time.monotonic()
             if isinstance(clients, dict):
@@ -304,8 +390,7 @@ class IntercomServer:
                                 st.muted = bool(c.get("muted"))
                         except Exception:
                             pass
-
-                        st.gain_db = 0.0
+                    st.gain_db = 0.0
                     st.control_connected = False
 
         with self._preset_lock:
@@ -337,6 +422,10 @@ class IntercomServer:
                     if u:
                         uuids.append(u)
                 buses[str(int(bus_id))] = {
+                    "name": str(bus.name or f"Bus {int(bus_id)}"),
+                    "bus_type": str(bus.bus_type or "diffusion"),
+                    "feed_to_regie": bool(bus.feed_to_regie),
+                    "gain_db": float(bus.gain_db),
                     "default_all_sources": bool(bus.default_all_sources),
                     "source_uuids": uuids,
                 }
@@ -348,7 +437,7 @@ class IntercomServer:
                     continue
                 clients[u] = {
                     "muted": bool(st.muted),
-                    "gain_db": 0.0,
+                    "gain_db": float(st.gain_db),
                     "name": str(st.name or ""),
                 }
 
@@ -367,6 +456,12 @@ class IntercomServer:
         except Exception as e:
             logger.debug("autosave preset failed: {}", e)
             return
+
+    def _first_diffusion_bus_id_unlocked(self) -> int:
+        for bid, bus in sorted(self._buses.items(), key=lambda kv: int(kv[0])):
+            if str(bus.bus_type or "diffusion") == "diffusion":
+                return int(bid)
+        return 0
 
     def _apply_preset_to_client(self, client_id: int) -> None:
         with self._lock:
@@ -423,7 +518,7 @@ class IntercomServer:
                     "addr": st.addr,
                     "age_s": max(0.0, now - st.last_packet_monotonic),
                     "muted": st.muted,
-                    "gain_db": 0.0,
+                    "gain_db": st.gain_db,
                     "vu_dbfs": st.vu_dbfs,
                     "last_timestamp_ms": st.last_timestamp_ms,
                     "last_sequence_number": st.last_sequence_number,
@@ -433,12 +528,8 @@ class IntercomServer:
                     "jb_concealed": 0 if jb_stats is None else int(jb_stats.concealed),
                     "control_connected": bool(st.control_connected),
                     "control_age_s": max(0.0, now - st.last_control_monotonic) if st.control_connected else None,
-                    "ptt_general": bool(st.ptt_general),
                     "ptt_buses": dict(st.ptt_buses),
                     "mute_buses": dict(st.mute_buses),
-                    "tx_mode_buses": dict(st.tx_mode_buses),
-                    "tx_modes_configured": bool(st.tx_modes_configured),
-                    "output_mute_buses": dict(st.output_mute_buses),
                 }
             return out
 
@@ -523,8 +614,49 @@ class IntercomServer:
         self._autosave_preset()
 
     def set_client_gain_db(self, client_id: int, gain_db: float) -> None:
-        # Client input gain is now client-side only and fixed server-side.
-        return
+        with self._lock:
+            st = self._clients.get(client_id)
+            if st is None:
+                return
+            # Per-client gain is intentionally fixed to unity (0 dB).
+            st.gain_db = 0.0
+
+        self._control_push_config(int(client_id))
+        self._autosave_preset()
+
+    def set_return_enabled(self, enabled: bool) -> None:
+        self._return_enabled = bool(enabled)
+        if not bool(self._running):
+            if not bool(self._return_enabled):
+                self._close_return_input_stream()
+            return
+
+        if not bool(self._return_enabled):
+            self._close_return_input_stream()
+            return
+
+        if self._return_input_device is None:
+            return
+
+        self._close_return_input_stream()
+        try:
+            self._open_return_input_stream(int(self._return_input_device))
+        except Exception as e:
+            logger.warning("return input restart failed: {}", e)
+
+    def set_return_input_device(self, device: Optional[int]) -> None:
+        self._return_input_device = int(device) if device is not None else None
+        if not bool(self._running):
+            return
+
+        self._close_return_input_stream()
+        if not bool(self._return_enabled) or self._return_input_device is None:
+            return
+
+        try:
+            self._open_return_input_stream(int(self._return_input_device))
+        except Exception as e:
+            logger.warning("return input device switch failed: {}", e)
 
     def get_buses_snapshot(self) -> Dict[int, dict]:
         with self._lock:
@@ -535,6 +667,8 @@ class IntercomServer:
                     "gain_db": bus.gain_db,
                     "source_ids": sorted(list(bus.source_ids)),
                     "default_all_sources": bool(bus.default_all_sources),
+                    "bus_type": str(bus.bus_type or "diffusion"),
+                    "feed_to_regie": bool(bus.feed_to_regie),
                 }
                 for bus_id, bus in self._buses.items()
             }
@@ -571,6 +705,71 @@ class IntercomServer:
                 bus.source_ids.discard(int(source_client_id))
 
         self._control_push_config(int(source_client_id))
+        self._autosave_preset()
+
+    def create_bus(self, name: str, *, bus_type: str = "diffusion", feed_to_regie: bool = True) -> int:
+        bus_type_norm = str(bus_type or "diffusion").strip().lower()
+        if bus_type_norm not in ("communication", "diffusion"):
+            bus_type_norm = "diffusion"
+
+        bus_name = str(name or "").strip() or "Bus"
+        with self._lock:
+            bus_id = int(self._next_bus_id)
+            self._next_bus_id += 1
+            self._buses[int(bus_id)] = AudioBus(
+                bus_id=int(bus_id),
+                name=bus_name,
+                source_ids=set(),
+                gain_db=0.0,
+                default_all_sources=bool(bus_type_norm == "communication"),
+                bus_type=str(bus_type_norm),
+                feed_to_regie=False if bus_type_norm == "communication" else bool(feed_to_regie),
+            )
+
+        self._control_push_all_configs()
+        self._autosave_preset()
+        return int(bus_id)
+
+    def remove_bus(self, bus_id: int) -> None:
+        bid = int(bus_id)
+        if bid == 0:
+            return
+
+        with self._lock:
+            bus = self._buses.get(int(bid))
+            if bus is None:
+                return
+            if str(bus.bus_type or "diffusion") == "diffusion":
+                diffusion_count = int(sum(1 for _x in self._buses.values() if str(_x.bus_type or "diffusion") == "diffusion"))
+                if diffusion_count <= 1:
+                    return
+
+            removed = self._buses.pop(int(bid), None)
+            if removed is None:
+                return
+            fallback_bus_id = self._first_diffusion_bus_id_unlocked()
+            for out in self._outputs.values():
+                if int(out.bus_id) == int(bid):
+                    out.bus_id = int(fallback_bus_id)
+
+        self._control_push_all_configs()
+        self._autosave_preset()
+
+    def set_bus_feed_to_regie(self, bus_id: int, enabled: bool) -> None:
+        bid = int(bus_id)
+        if bid == 0:
+            return
+
+        with self._lock:
+            bus = self._buses.get(int(bid))
+            if bus is None:
+                return
+            if str(bus.bus_type or "diffusion") == "communication":
+                bus.feed_to_regie = False
+            else:
+                bus.feed_to_regie = bool(enabled)
+
+        self._control_push_all_configs()
         self._autosave_preset()
 
     def start(self) -> None:
@@ -651,16 +850,29 @@ class IntercomServer:
                 except Exception:
                     pass
 
-            try:
-                if self._return_stream is not None:
-                    self._return_stream.stop()
-                    self._return_stream.close()
-            except Exception:
-                pass
-            self._return_stream = None
+            self._close_return_input_stream()
         finally:
             try:
                 self._sock.close()
+            except Exception:
+                pass
+
+    def _close_return_input_stream(self) -> None:
+        try:
+            if self._return_stream is not None:
+                self._return_stream.stop()
+                self._return_stream.close()
+        except Exception:
+            pass
+        self._return_stream = None
+
+        with self._return_lock:
+            self._return_vu_dbfs = -60.0
+            self._return_in_phase = 0.0
+            self._return_capture_buf = np.zeros((0,), dtype=np.float32)
+            try:
+                while True:
+                    self._return_frames.get_nowait()
             except Exception:
                 pass
 
@@ -782,26 +994,37 @@ class IntercomServer:
         data = (json.dumps(msg, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
         sock.sendall(data)
 
+    def _control_push_all_configs(self) -> None:
+        with self._lock:
+            client_ids = [int(cid) for cid in self._clients.keys()]
+        for cid in client_ids:
+            self._control_push_config(int(cid))
+
     def _control_push_config(self, client_id: int) -> None:
         with self._lock:
             st = self._clients.get(int(client_id))
             if st is None:
                 return
-            has_client_routes = bool(st.tx_modes_configured)
             cfg = {
                 "client_id": int(client_id),
                 "muted": bool(st.muted),
-                "gain_db": 0.0,
+                "gain_db": float(st.gain_db),
                 "return_vu_dbfs": float(self._return_vu_dbfs),
+                "buses": [
+                    {
+                        "bus_id": int(bus.bus_id),
+                        "name": str(bus.name or f"Bus {int(bus.bus_id)}"),
+                        "bus_type": str(bus.bus_type or "diffusion"),
+                        "feed_to_regie": bool(bus.feed_to_regie),
+                        "default_all_sources": bool(bus.default_all_sources),
+                    }
+                    for _bid, bus in sorted(self._buses.items(), key=lambda kv: int(kv[0]))
+                ],
                 "routes": {
                     str(bus_id): (
-                        str(st.tx_mode_buses.get(int(bus_id), "")).strip().lower() in ("ptt", "always_on")
-                        if has_client_routes
-                        else (
-                            True
-                            if (bool(bus.default_all_sources) and len(bus.source_ids) == 0)
-                            else (int(client_id) in set(bus.source_ids))
-                        )
+                        True
+                        if (bool(bus.default_all_sources) and len(bus.source_ids) == 0)
+                        else (int(client_id) in set(bus.source_ids))
                     )
                     for bus_id, bus in self._buses.items()
                 },
@@ -915,17 +1138,12 @@ class IntercomServer:
                             except Exception:
                                 pass
 
-                        ptt_general = msg.get("ptt_general")
                         ptt_buses = msg.get("ptt_buses")
                         mute_buses = msg.get("mute_buses")
-                        tx_mode_buses = msg.get("tx_mode_buses")
-                        output_mute_buses = msg.get("output_mute_buses")
                         listen_return_bus = msg.get("listen_return_bus")
                         with self._lock:
                             st = self._clients.get(int(cid))
                             if st is not None:
-                                if ptt_general is not None:
-                                    st.ptt_general = bool(ptt_general)
                                 if isinstance(ptt_buses, dict):
                                     try:
                                         st.ptt_buses = {int(k): bool(v) for k, v in ptt_buses.items()}
@@ -936,24 +1154,6 @@ class IntercomServer:
                                         st.mute_buses = {int(k): bool(v) for k, v in mute_buses.items()}
                                     except Exception:
                                         st.mute_buses = {}
-
-                                if isinstance(tx_mode_buses, dict):
-                                    tx_modes: Dict[int, str] = {}
-                                    try:
-                                        for k, v in tx_mode_buses.items():
-                                            mode = str(v or "").strip().lower()
-                                            if mode in ("ptt", "always_on"):
-                                                tx_modes[int(k)] = mode
-                                    except Exception:
-                                        tx_modes = {}
-                                    st.tx_mode_buses = tx_modes
-                                    st.tx_modes_configured = True
-
-                                if isinstance(output_mute_buses, dict):
-                                    try:
-                                        st.output_mute_buses = {int(k): bool(v) for k, v in output_mute_buses.items()}
-                                    except Exception:
-                                        st.output_mute_buses = {}
 
                                 if listen_return_bus is not None:
                                     st.listen_return_bus = bool(listen_return_bus)
@@ -1006,7 +1206,6 @@ class IntercomServer:
                         st.name = name
                         st.mode = mode
                         st.client_uuid = client_uuid
-                        st.gain_db = 0.0
                         if udp_port is not None:
                             st.addr = (str(addr[0]), int(udp_port))
                         st.control_connected = True
@@ -1043,8 +1242,12 @@ class IntercomServer:
                         st.control_connected = False
 
     def create_output(self, device: int, bus_id: int) -> int:
-        out = OutputState(output_id=0, device=int(device), bus_id=int(bus_id))
         with self._lock:
+            bus = self._buses.get(int(bus_id))
+            if bus is None or str(bus.bus_type or "diffusion") != "diffusion":
+                raise ValueError("output bus must be a diffusion bus")
+
+            out = OutputState(output_id=0, device=int(device), bus_id=int(bus_id))
             oid = int(self._next_output_id)
             self._next_output_id += 1
             out.output_id = oid
@@ -1073,6 +1276,9 @@ class IntercomServer:
         with self._lock:
             out = self._outputs.get(int(output_id))
             if out is None:
+                return
+            bus = self._buses.get(int(bus_id))
+            if bus is None or str(bus.bus_type or "diffusion") != "diffusion":
                 return
             out.bus_id = int(bus_id)
 
@@ -1185,25 +1391,16 @@ class IntercomServer:
 
                 with self._lock:
                     buses = {
-                        bus_id: (float(bus.gain_db), set(bus.source_ids), bool(bus.default_all_sources))
+                        bus_id: (
+                            float(bus.gain_db),
+                            set(bus.source_ids),
+                            bool(bus.default_all_sources),
+                            str(bus.bus_type or "diffusion"),
+                            bool(bus.feed_to_regie),
+                        )
                         for bus_id, bus in self._buses.items()
                     }
-                    clients_snapshot: list[
-                        tuple[
-                            int,
-                            ClientState,
-                            bool,
-                            float,
-                            str,
-                            bool,
-                            Dict[int, bool],
-                            Dict[int, bool],
-                            Dict[int, str],
-                            Dict[int, bool],
-                            bool,
-                            float,
-                        ]
-                    ] = []
+                    clients_snapshot: list[tuple[int, ClientState, bool, str, Dict[int, bool], Dict[int, bool], bool, float]] = []
                     for client_id, st in list(self._clients.items()):
                         try:
                             clients_snapshot.append(
@@ -1211,55 +1408,24 @@ class IntercomServer:
                                     int(client_id),
                                     st,
                                     bool(st.muted),
-                                    float(st.gain_db),
                                     str(st.mode or ""),
-                                    bool(st.ptt_general),
                                     dict(st.ptt_buses),
                                     dict(st.mute_buses),
-                                    dict(st.tx_mode_buses),
-                                    bool(st.tx_modes_configured),
-                                    dict(st.output_mute_buses),
                                     bool(st.control_connected),
                                     float(st.last_control_monotonic),
                                 )
                             )
                         except Exception:
-                            clients_snapshot.append((int(client_id), st, False, 0.0, "", False, {}, {}, {}, False, {}, False, 0.0))
+                            clients_snapshot.append((int(client_id), st, False, "", {}, {}, False, 0.0))
                     outputs = list(self._outputs.values())
 
                 per_client: Dict[int, np.ndarray] = {}
-                client_meta: Dict[
-                    int,
-                    tuple[
-                        bool,
-                        str,
-                        bool,
-                        Dict[int, bool],
-                        Dict[int, bool],
-                        Dict[int, str],
-                        bool,
-                        Dict[int, bool],
-                        bool,
-                        float,
-                    ],
-                ] = {}
+                client_meta: Dict[int, tuple[str, Dict[int, bool], Dict[int, bool], bool, float]] = {}
                 vu_updates: Dict[int, float] = {}
 
-                for (
-                    client_id,
-                    st,
-                    muted,
-                    gain_db,
-                    mode,
-                    ptt_general,
-                    ptt_buses,
-                    mute_buses,
-                    tx_mode_buses,
-                    tx_modes_configured,
-                    output_mute_buses,
-                    ctrl_ok,
-                    last_ctrl,
-                ) in clients_snapshot:
+                for client_id, st, muted, mode, ptt_buses, mute_buses, ctrl_ok, last_ctrl in clients_snapshot:
+                    if muted:
+                        continue
                     try:
                         payload = st.jb.pop()
                     except Exception:
@@ -1275,17 +1441,12 @@ class IntercomServer:
                     vu = rms_dbfs(frame)
                     vu_updates[int(client_id)] = float(vu)
 
-                    frame = apply_gain_db(frame, float(gain_db))
+                    # Per-client gain is fixed to unity.
                     per_client[int(client_id)] = frame
                     client_meta[int(client_id)] = (
-                        bool(muted),
                         str(mode or ""),
-                        bool(ptt_general),
                         dict(ptt_buses),
                         dict(mute_buses),
-                        dict(tx_mode_buses),
-                        bool(tx_modes_configured),
-                        dict(output_mute_buses),
                         bool(ctrl_ok),
                         float(last_ctrl),
                     )
@@ -1298,92 +1459,92 @@ class IntercomServer:
                                 st2.vu_dbfs = float(vu)
 
                 bus_mixes: Dict[int, np.ndarray] = {}
-                bus_contrib: Dict[int, Dict[int, np.ndarray]] = {}
 
                 def _client_active_for_bus(cid: int, bus_id: int) -> bool:
                     meta = client_meta.get(int(cid))
                     if meta is None:
                         return True
-                    muted, mode, ptt_general, ptt_buses, mute_buses, tx_mode_buses, tx_modes_configured, _output_mute_buses, ctrl_ok, last_ctrl = meta
-
-                    if bool(tx_modes_configured):
-                        bus_mode = str(tx_mode_buses.get(int(bus_id), "")).strip().lower()
-                        if bus_mode not in ("ptt", "always_on"):
-                            return False
-                    else:
-                        if bool(mute_buses.get(int(bus_id), False)):
-                            return False
-                        bus_mode = str(mode or "").strip().lower()
-
-                    if bus_mode == "always_on":
-                        return not bool(muted)
-
-                    if bus_mode == "ptt":
+                    mode, ptt_buses, mute_buses, ctrl_ok, last_ctrl = meta
+                    if bool(mute_buses.get(int(bus_id), False)):
+                        return False
+                    if str(mode) == "ptt":
                         # If control is disconnected, we may not receive PTT state updates.
                         # In that case, rely on client-side gating (audio presence) and do not block.
                         if not bool(ctrl_ok):
                             return True
-                        if bool(ptt_general):
-                            return True
                         return bool(ptt_buses.get(int(bus_id), False))
                     return True
 
-                def _client_has_route_for_bus(cid: int, bus_id: int) -> bool:
-                    meta = client_meta.get(int(cid))
-                    if meta is None:
-                        return True
-                    _muted, _mode, _ptt_general, _ptt_buses, _mute_buses, tx_mode_buses, tx_modes_configured, _output_mute_buses, _ctrl_ok, _last_ctrl = meta
-                    if not bool(tx_modes_configured):
-                        return True
-                    return str(tx_mode_buses.get(int(bus_id), "")).strip().lower() in ("ptt", "always_on")
+                bus_selected_ids: Dict[int, list[int]] = {}
+                bus_source_contrib: Dict[int, Dict[int, np.ndarray]] = {}
 
-                for bus_id, (bus_gain_db, bus_sources, bus_default_all) in buses.items():
+                for bus_id, (bus_gain_db, bus_sources, bus_default_all, _bus_type, _feed_to_regie) in buses.items():
                     raw_bus_mix = np.zeros((FRAME_SAMPLES,), dtype=np.float32)
-                    server_selected_ids: set[int]
+                    selected_ids: list[int]
                     if len(bus_sources) == 0 and bus_default_all:
-                        server_selected_ids = {int(cid) for cid in per_client.keys()}
+                        selected_ids = list(per_client.keys())
                     elif len(bus_sources) == 0 and not bus_default_all:
-                        server_selected_ids = set()
+                        selected_ids = []
                     else:
-                        server_selected_ids = {int(cid) for cid in per_client.keys() if int(cid) in bus_sources}
-
-                    selected_ids: list[int] = []
-                    for cid in per_client.keys():
-                        meta = client_meta.get(int(cid))
-                        if meta is None:
-                            if int(cid) in server_selected_ids:
-                                selected_ids.append(int(cid))
-                            continue
-
-                        tx_modes_configured = bool(meta[6])
-                        if tx_modes_configured:
-                            if _client_has_route_for_bus(int(cid), int(bus_id)):
-                                selected_ids.append(int(cid))
-                        else:
-                            if int(cid) in server_selected_ids:
-                                selected_ids.append(int(cid))
+                        selected_ids = [cid for cid in per_client.keys() if cid in bus_sources]
 
                     selected_ids = [cid for cid in selected_ids if _client_active_for_bus(int(cid), int(bus_id))]
+                    bus_selected_ids[int(bus_id)] = list(selected_ids)
 
                     for cid in selected_ids:
-                        raw_bus_mix += per_client[cid]
+                        try:
+                            raw_bus_mix += apply_gain_db(per_client[cid], float(bus_gain_db))
+                        except Exception:
+                            raw_bus_mix += per_client[cid]
 
-                    raw_bus_mix = apply_gain_db(raw_bus_mix, bus_gain_db)
                     raw_bus_mix = self._limit_peak(raw_bus_mix)
                     bus_mixes[int(bus_id)] = raw_bus_mix
+
                     contrib: Dict[int, np.ndarray] = {}
                     for cid in selected_ids:
-                        contrib[int(cid)] = apply_gain_db(per_client[cid], bus_gain_db)
-                    bus_contrib[int(bus_id)] = contrib
+                        try:
+                            contrib[int(cid)] = apply_gain_db(per_client[cid], float(bus_gain_db))
+                        except Exception:
+                            contrib[int(cid)] = per_client[cid]
+                    bus_source_contrib[int(bus_id)] = contrib
 
-                if bus_mixes:
+                regie_bus_id: Optional[int] = None
+                if 0 in buses:
+                    regie_bus_id = 0
+                else:
+                    for bid, (_g, _src, _def_all, btype, _feed) in buses.items():
+                        if str(btype) == "communication":
+                            regie_bus_id = int(bid)
+                            break
+
+                if regie_bus_id is not None:
+                    regie_contrib: Dict[int, np.ndarray] = {}
+
+                    for cid in bus_selected_ids.get(int(regie_bus_id), []):
+                        c = bus_source_contrib.get(int(regie_bus_id), {}).get(int(cid))
+                        if isinstance(c, np.ndarray):
+                            regie_contrib[int(cid)] = c
+
+                    for bid, (_g, _src, _def_all, btype, feed_to_regie) in buses.items():
+                        if int(bid) == int(regie_bus_id):
+                            continue
+                        if str(btype) != "diffusion" or not bool(feed_to_regie):
+                            continue
+                        contrib = bus_source_contrib.get(int(bid), {})
+                        for cid in bus_selected_ids.get(int(bid), []):
+                            if int(cid) in regie_contrib:
+                                continue
+                            c = contrib.get(int(cid))
+                            if isinstance(c, np.ndarray):
+                                regie_contrib[int(cid)] = c
+
+                    regie_mix = np.zeros((FRAME_SAMPLES,), dtype=np.float32)
+                    for c in regie_contrib.values():
+                        regie_mix += c
+                    regie_mix = self._limit_peak(regie_mix)
+
                     try:
-                        queued_bus_mixes = {int(bid): mix.copy() for bid, mix in bus_mixes.items()}
-                        queued_bus_contrib: Dict[int, Dict[int, np.ndarray]] = {
-                            int(bid): {int(cid): frame.copy() for cid, frame in contrib.items()}
-                            for bid, contrib in bus_contrib.items()
-                        }
-                        self._mix_queue.put_nowait((queued_bus_mixes, queued_bus_contrib))
+                        self._mix_queue.put_nowait((regie_mix.copy(), regie_contrib))
                     except queue.Full:
                         pass
 
@@ -1577,34 +1738,19 @@ class IntercomServer:
             except queue.Empty:
                 continue
 
-            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], dict):
-                bus_mixes = item[0]
-                bus_contrib = item[1] if isinstance(item[1], dict) else {}
-            elif isinstance(item, tuple) and len(item) == 2:
+            if isinstance(item, tuple) and len(item) == 2:
                 raw_mix, contrib = item
-                bus_mixes = {0: raw_mix} if isinstance(raw_mix, np.ndarray) else {}
-                bus_contrib = {0: contrib if isinstance(contrib, dict) else {}}
             else:
-                bus_mixes = {0: item} if isinstance(item, np.ndarray) else {}
-                bus_contrib = {}
+                raw_mix, contrib = item, {}
 
-            if not bus_mixes:
+            if not isinstance(raw_mix, np.ndarray):
                 continue
 
             ts_ms = int(time.time() * 1000) & 0xFFFFFFFF
             self._seq_out = (self._seq_out + 1) & 0xFFFFFFFF
 
             with self._lock:
-                dests = [
-                    (
-                        client_id,
-                        st.addr,
-                        st.encoder,
-                        bool(st.listen_return_bus),
-                        dict(st.output_mute_buses),
-                    )
-                    for client_id, st in self._clients.items()
-                ]
+                dests = [(client_id, st.addr, st.encoder, bool(st.listen_return_bus)) for client_id, st in self._clients.items()]
 
             return_frame = None
             if bool(self._return_enabled):
@@ -1616,33 +1762,20 @@ class IntercomServer:
             if return_frame is None or not isinstance(return_frame, np.ndarray) or int(getattr(return_frame, "shape", [0])[0]) != int(FRAME_SAMPLES):
                 return_frame = np.zeros((FRAME_SAMPLES,), dtype=np.float32)
             else:
-                try:
-                    return_frame = apply_gain_db(return_frame.astype(np.float32, copy=False), float(self._return_gain_db))
-                except Exception:
-                    return_frame = return_frame.astype(np.float32, copy=False)
+                return_frame = return_frame.astype(np.float32, copy=False)
 
-            for client_id, addr, enc, listen_return, output_mute_buses in dests:
+            for client_id, addr, enc, listen_return in dests:
                 try:
                     if int(addr[1]) <= 0:
                         continue
                 except Exception:
                     continue
                 try:
-                    mix_minus = np.zeros((FRAME_SAMPLES,), dtype=np.float32)
-                    for bus_id, bus_mix in bus_mixes.items():
-                        if bool(output_mute_buses.get(int(bus_id), False)):
-                            continue
-                        if not isinstance(bus_mix, np.ndarray):
-                            continue
-                        c = None
-                        try:
-                            c = bus_contrib.get(int(bus_id), {}).get(int(client_id))
-                        except Exception:
-                            c = None
-                        if isinstance(c, np.ndarray):
-                            mix_minus = mix_minus + (bus_mix - c)
-                        else:
-                            mix_minus = mix_minus + bus_mix
+                    c = contrib.get(int(client_id))
+                    if c is None:
+                        mix_minus = raw_mix
+                    else:
+                        mix_minus = raw_mix - c
 
                     if bool(listen_return):
                         mix_minus = mix_minus + return_frame

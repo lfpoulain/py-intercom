@@ -24,8 +24,6 @@ class BridgeConfig:
     server_port: int
     name: str
     mode: str = "ptt"
-    tx_mode_buses: Optional[dict] = None
-    output_mute_buses: Optional[dict] = None
 
 
 class IntercomBridge:
@@ -81,70 +79,17 @@ class IntercomBridge:
 
         self._state_lock = threading.Lock()
         self._muted = False
-        self._ptt_general = False
         self._ptt_buses: dict[int, bool] = {}
         self._mute_buses: dict[int, bool] = {}
-        self._tx_mode_buses: dict[int, str] = {}
-        self._tx_modes_configured: bool = False
-        self._output_mute_buses: dict[int, bool] = {}
-
-        has_explicit_tx_modes = isinstance(self.config.tx_mode_buses, dict)
-        self._tx_modes_configured = bool(has_explicit_tx_modes)
-        try:
-            if isinstance(self.config.tx_mode_buses, dict):
-                for k, v in self.config.tx_mode_buses.items():
-                    mode = str(v or "").strip().lower()
-                    if mode not in ("ptt", "always_on"):
-                        continue
-                    self._tx_mode_buses[int(k)] = mode
-        except Exception:
-            pass
-
-        if not has_explicit_tx_modes:
-            base_mode = str(self.config.mode or "always_on").strip().lower()
-            if base_mode not in ("ptt", "always_on"):
-                base_mode = "always_on"
-            for bid in (0, 1, 2):
-                self._tx_mode_buses[int(bid)] = str(base_mode)
-
-        try:
-            if isinstance(self.config.output_mute_buses, dict):
-                for k, v in self.config.output_mute_buses.items():
-                    self._output_mute_buses[int(k)] = bool(v)
-        except Exception:
-            self._output_mute_buses = {}
-        self._mute_buses = dict(self._output_mute_buses)
+        self._known_bus_ids: set[int] = {0}
 
     def _can_transmit_audio(self) -> bool:
         with self._state_lock:
-            muted = bool(self._muted)
+            if bool(self._muted):
+                return False
             mode = str(self.config.mode or "always_on")
-            ptt_general = bool(self._ptt_general)
             ptt_buses = dict(self._ptt_buses)
-            tx_mode_buses = dict(self._tx_mode_buses)
-            tx_modes_configured = bool(self._tx_modes_configured)
-
-        if tx_modes_configured:
-            has_routing = False
-            for bus_id, tx_mode in tx_mode_buses.items():
-                tx_mode_norm = str(tx_mode or "").strip().lower()
-                if tx_mode_norm not in ("ptt", "always_on"):
-                    continue
-                has_routing = True
-                if tx_mode_norm == "always_on":
-                    if not muted:
-                        return True
-                    continue
-                if ptt_general or bool(ptt_buses.get(int(bus_id), False)):
-                    return True
-            if has_routing:
-                return False
-
         if mode != "ptt":
-            if muted:
-                return False
-            return True
-        if ptt_general:
             return True
         return any(bool(v) for v in ptt_buses.values())
 
@@ -236,48 +181,17 @@ class IntercomBridge:
         except Exception:
             return
 
-    def set_state(
-        self,
-        *,
-        muted: Optional[bool] = None,
-        ptt_general: Optional[bool] = None,
-        ptt_buses: Optional[dict] = None,
-        mute_buses: Optional[dict] = None,
-        tx_mode_buses: Optional[dict] = None,
-        output_mute_buses: Optional[dict] = None,
-    ) -> None:
+    def set_state(self, *, muted: Optional[bool] = None, ptt_active: Optional[bool] = None) -> None:
         with self._state_lock:
             if muted is not None:
                 self._muted = bool(muted)
-            if ptt_general is not None:
-                self._ptt_general = bool(ptt_general)
-            if isinstance(ptt_buses, dict):
-                try:
-                    self._ptt_buses = {int(k): bool(v) for k, v in ptt_buses.items()}
-                except Exception:
-                    self._ptt_buses = {}
-            if isinstance(mute_buses, dict):
-                try:
-                    self._mute_buses = {int(k): bool(v) for k, v in mute_buses.items()}
-                except Exception:
-                    self._mute_buses = {}
-            if isinstance(tx_mode_buses, dict):
-                tx_modes: dict[int, str] = {}
-                try:
-                    for k, v in tx_mode_buses.items():
-                        mode = str(v or "").strip().lower()
-                        if mode in ("ptt", "always_on"):
-                            tx_modes[int(k)] = mode
-                except Exception:
-                    tx_modes = {}
-                self._tx_modes_configured = True
-                self._tx_mode_buses = tx_modes
-            if isinstance(output_mute_buses, dict):
-                try:
-                    self._output_mute_buses = {int(k): bool(v) for k, v in output_mute_buses.items()}
-                except Exception:
-                    self._output_mute_buses = {}
-                self._mute_buses = dict(self._output_mute_buses)
+            if ptt_active is not None:
+                active = bool(ptt_active)
+                target_buses = set(self._known_bus_ids) | set(self._ptt_buses.keys())
+                if len(target_buses) == 0:
+                    target_buses = {0}
+                for bid in target_buses:
+                    self._ptt_buses[int(bid)] = bool(active)
         self._control_send_state(muted=muted)
 
     def _control_send(self, sock: socket.socket, msg: dict[str, Any]) -> None:
@@ -294,11 +208,8 @@ class IntercomBridge:
             msg: dict[str, Any] = {
                 "type": "state",
                 "client_id": int(self.client_id),
-                "ptt_general": bool(self._ptt_general),
                 "ptt_buses": dict(self._ptt_buses),
                 "mute_buses": dict(self._mute_buses),
-                "tx_mode_buses": dict(self._tx_mode_buses),
-                "output_mute_buses": dict(self._output_mute_buses),
             }
             if muted is not None:
                 msg["muted"] = bool(muted)
@@ -327,6 +238,35 @@ class IntercomBridge:
                 if "muted" in cfg:
                     with self._state_lock:
                         self._muted = bool(cfg.get("muted"))
+                if "buses" in cfg:
+                    buses = cfg.get("buses")
+                    parsed_bus_ids: set[int] = set()
+                    if isinstance(buses, list):
+                        for b in buses:
+                            if not isinstance(b, dict):
+                                continue
+                            try:
+                                parsed_bus_ids.add(int(b.get("bus_id")))
+                            except Exception:
+                                continue
+                    elif isinstance(buses, dict):
+                        for k, b in buses.items():
+                            if isinstance(b, dict) and "bus_id" in b:
+                                try:
+                                    parsed_bus_ids.add(int(b.get("bus_id")))
+                                    continue
+                                except Exception:
+                                    pass
+                            try:
+                                parsed_bus_ids.add(int(k))
+                            except Exception:
+                                continue
+                    if len(parsed_bus_ids) == 0:
+                        parsed_bus_ids = {0}
+                    with self._state_lock:
+                        self._known_bus_ids = set(parsed_bus_ids)
+                        for bid in parsed_bus_ids:
+                            self._ptt_buses.setdefault(int(bid), False)
 
         if self._on_control_msg is not None:
             try:

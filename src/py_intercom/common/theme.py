@@ -1,83 +1,98 @@
 from __future__ import annotations
 
-import os
-from loguru import logger
 from PySide6 import QtCore, QtGui, QtWidgets
 
 def apply_theme(app: QtWidgets.QApplication) -> None:
-    """Apply qt-material dark_teal theme with project-wide customisations."""
-    theme = os.environ.get("PY_INTERCOM_QT_THEME", "dark_teal.xml")
-    invert_secondary = theme.lower().startswith("light_")
-    try:
-        from qt_material import apply_stylesheet
+    """Apply project-native Qt theme (no external theme engine)."""
+    bg = "#12171f"
+    surface = "#1b2330"
+    surface_alt = "#222c3b"
+    border = "#344256"
+    text = "#e8edf4"
+    muted = "#aab4c3"
+    accent = "#21b0a6"
+    accent_hover = "#2cc7bc"
+    accent_text = "#0a1317"
+    warning = "#f2b632"
+    danger = "#e25d5d"
+    success = "#2eb67d"
+    disabled_fg = "#6f7b8e"
 
-        extra = {
-            # Compact layout
-            "density_scale": "-2",
+    app.setStyle("Fusion")
 
-            # Semantic button colours
-            "danger": "#dc3545",
-            "warning": "#ffc107",
-            "success": "#17a2b8",
-
-            # Font
-            "font_family": "Segoe UI, Roboto, sans-serif",
-            "font_size": "13px",
-            "line_height": "13px",
-
-            # Compact QMenu items
-            "QMenu": {
-                "height": 28,
-                "padding": "4px 8px 4px 8px",
-            },
-        }
-        apply_stylesheet(app, theme=theme, invert_secondary=invert_secondary, extra=extra)
-    except Exception as e:
-        logger.warning("qt-material apply_stylesheet() failed: {}", e)
-
-    # Refinements that qt-material extra dict cannot express:
-    # - combo-box popup: dark selection, compact padding
-    # - button borders always visible, hover highlight, disabled state
-    # - QGroupBox title spacing
-    # Use env vars set by qt-material for colour consistency
-    primary = os.environ.get("QTMATERIAL_PRIMARYCOLOR", "#009688")
-    primary_light = os.environ.get("QTMATERIAL_PRIMARYLIGHTCOLOR", "#4db6ac")
-    primary_text = os.environ.get(
-        "QTMATERIAL_PRIMARYTEXTCOLOR",
-        "#000000" if invert_secondary else "#ffffff",
+    pal = QtGui.QPalette()
+    pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(bg))
+    pal.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor(text))
+    pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(surface))
+    pal.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor(surface_alt))
+    pal.setColor(QtGui.QPalette.ColorRole.ToolTipBase, QtGui.QColor(surface_alt))
+    pal.setColor(QtGui.QPalette.ColorRole.ToolTipText, QtGui.QColor(text))
+    pal.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor(text))
+    pal.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor(surface_alt))
+    pal.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor(text))
+    pal.setColor(QtGui.QPalette.ColorRole.BrightText, QtGui.QColor("#ffffff"))
+    pal.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(accent))
+    pal.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor(accent_text))
+    pal.setColor(QtGui.QPalette.ColorRole.PlaceholderText, QtGui.QColor(muted))
+    pal.setColor(
+        QtGui.QPalette.ColorGroup.Disabled,
+        QtGui.QPalette.ColorRole.Text,
+        QtGui.QColor(disabled_fg),
     )
-    popup_bg = os.environ.get(
-        "QTMATERIAL_SECONDARYDARKCOLOR",
-        "#ffffff" if invert_secondary else "#2b2b2b",
+    pal.setColor(
+        QtGui.QPalette.ColorGroup.Disabled,
+        QtGui.QPalette.ColorRole.ButtonText,
+        QtGui.QColor(disabled_fg),
     )
-    popup_fg = os.environ.get(
-        "QTMATERIAL_SECONDARYTEXTCOLOR",
-        "#000000" if invert_secondary else "#ffffff",
+    pal.setColor(
+        QtGui.QPalette.ColorGroup.Disabled,
+        QtGui.QPalette.ColorRole.WindowText,
+        QtGui.QColor(disabled_fg),
     )
-
-    warning = "#ffc107"
-    danger = "#dc3545"
-    success = "#17a2b8"
+    app.setPalette(pal)
 
     patch = f"""
+        QWidget {{
+            font-family: "Segoe UI", "Noto Sans", sans-serif;
+            font-size: 13px;
+            color: {text};
+        }}
+        QToolTip {{
+            border: 1px solid {border};
+            padding: 4px 8px;
+            color: {text};
+            background: {surface_alt};
+        }}
         QComboBox {{
+            border: 1px solid {border};
+            background: {surface_alt};
             padding: 2px 4px;
             max-height: 22px;
         }}
+        QComboBox::drop-down {{
+            border: none;
+            width: 18px;
+        }}
+        QComboBox:hover {{
+            border: 1px solid {accent_hover};
+        }}
         QComboBox QAbstractItemView {{
-            color: {popup_fg};
-            background: {popup_bg};
-            selection-background-color: {primary};
-            selection-color: {primary_text};
+            color: {text};
+            background: {surface};
+            selection-background-color: {accent};
+            selection-color: {accent_text};
             outline: none;
         }}
         QPushButton, QToolButton {{
-            border: 1px solid {primary_light};
+            border: 1px solid {border};
+            background: {surface_alt};
             padding: 3px 10px;
+            border-radius: 4px;
         }}
         QPushButton:hover, QToolButton:hover {{
-            background-color: {primary};
-            border: 1px solid {primary_light};
+            background-color: {accent};
+            color: {accent_text};
+            border: 1px solid {accent_hover};
         }}
         QPushButton[class="warning"], QToolButton[class="warning"] {{
             border: 1px solid {warning};
@@ -110,76 +125,72 @@ def apply_theme(app: QtWidgets.QApplication) -> None:
             color: #ffffff;
         }}
         QPushButton:disabled, QToolButton:disabled {{
-            border: 1px solid #555555;
-            color: #666666;
-            background-color: transparent;
+            border: 1px solid {border};
+            color: {disabled_fg};
+            background-color: {surface};
         }}
         QGroupBox {{
+            border: 1px solid {border};
+            border-radius: 6px;
             padding-top: 14px;
             margin-top: 6px;
         }}
         QGroupBox::title {{
             subcontrol-origin: margin;
             subcontrol-position: top left;
-            background-color: palette(window);
+            background-color: {bg};
             padding: 0 6px;
         }}
 
         /* --- Slider --- */
         QSlider::groove:horizontal {{
             height: 6px;
-            background: #3a3a3a;
+            background: {surface_alt};
             border-radius: 3px;
         }}
         QSlider::handle:horizontal {{
-            background: {primary};
-            border: 1px solid {primary_light};
+            background: {accent};
+            border: 1px solid {accent_hover};
             width: 14px;
             height: 14px;
             margin: -5px 0;
             border-radius: 7px;
         }}
         QSlider::handle:horizontal:hover {{
-            background: {primary_light};
+            background: {accent_hover};
         }}
         QSlider::sub-page:horizontal {{
-            background: {primary};
+            background: {accent};
             border-radius: 3px;
         }}
 
         /* --- Table --- */
         QTableWidget {{
-            gridline-color: #3a3a3a;
-            alternate-background-color: rgba(255, 255, 255, 6);
+            border: 1px solid {border};
+            gridline-color: {border};
+            alternate-background-color: {surface_alt};
         }}
         QHeaderView::section {{
-            background-color: #2a2a2a;
-            color: {primary_light};
+            background-color: {surface_alt};
+            color: {accent_hover};
             border: none;
-            border-bottom: 2px solid {primary};
+            border-bottom: 2px solid {accent};
             padding: 4px 6px;
             font-weight: bold;
         }}
 
         /* --- Status bar --- */
         QStatusBar {{
-            background: #1e1e1e;
-            color: #aaaaaa;
-            border-top: 1px solid #3a3a3a;
+            background: {surface};
+            color: {muted};
+            border-top: 1px solid {border};
             font-size: 12px;
         }}
         QStatusBar QLabel {{
             padding: 0 6px;
         }}
     """
-    existing = app.styleSheet() or ""
-    app.setStyleSheet(existing + patch)
-
-    # Palette: dark highlight for list/table selections
-    pal = app.palette()
-    pal.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(primary))
-    pal.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor(primary_text))
-    app.setPalette(pal)
+    app.setStyleSheet(patch)
 
 
 # ---------------------------------------------------------------------------
@@ -218,8 +229,8 @@ def centered_checkbox(cb: QtWidgets.QCheckBox) -> QtWidgets.QWidget:
 # Status indicator (colored dot: green=online, red=offline)
 # ---------------------------------------------------------------------------
 
-_STATUS_ONLINE = QtGui.QColor(76, 175, 80)    # Material green 500
-_STATUS_OFFLINE = QtGui.QColor(198, 40, 40)   # Material red 800
+_STATUS_ONLINE = QtGui.QColor(76, 175, 80)
+_STATUS_OFFLINE = QtGui.QColor(198, 40, 40)
 
 
 class StatusIndicator(QtWidgets.QWidget):

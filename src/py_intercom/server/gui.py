@@ -82,13 +82,6 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._return_enabled.setChecked(False)
         self._return_input_device = QtWidgets.QComboBox()
         patch_combo(self._return_input_device)
-        self._return_gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self._return_gain.setMinimum(-60)
-        self._return_gain.setMaximum(12)
-        self._return_gain.setValue(0)
-        self._return_gain_lbl = QtWidgets.QLabel("0 dB")
-        self._return_gain_lbl.setFixedWidth(50)
-        self._return_gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         self._return_vu = VuMeter()
         self._show_all_devices = QtWidgets.QCheckBox("Show all devices")
         self._refresh_devices_btn = QtWidgets.QToolButton()
@@ -112,10 +105,8 @@ class ServerWindow(QtWidgets.QMainWindow):
 
         # Row 1 — Return
         config_lay.addWidget(self._return_enabled, 1, 0)
-        config_lay.addWidget(self._return_input_device, 1, 1, 1, 2)
-        config_lay.addWidget(QtWidgets.QLabel("Return gain"), 1, 3)
-        config_lay.addWidget(self._return_gain, 1, 4)
-        config_lay.addWidget(self._return_gain_lbl, 1, 5)
+        config_lay.addWidget(QtWidgets.QLabel("Input"), 1, 1)
+        config_lay.addWidget(self._return_input_device, 1, 2, 1, 4)
 
         # Row 2 — Return meter
         config_lay.addWidget(QtWidgets.QLabel("Return VU"), 2, 0)
@@ -134,32 +125,24 @@ class ServerWindow(QtWidgets.QMainWindow):
         clients_lay.setContentsMargins(4, 4, 4, 4)
         clients_lay.setSpacing(2)
 
-        # Columns: 0=ClientID(hidden), 1=Name, 2=Mode(hidden), 3=Addr(hidden), 4=Status, 5=VU, 6=Muted, 7=Mic gain(fixed), 8=Regie, 9=Plateau, 10=VMix
-        self._clients = QtWidgets.QTableWidget(0, 11)
+        # Base columns: 0=ClientID(hidden), 1=Name, 2=Addr(hidden), 3=Status, 4=VU, 5=Muted
+        self._client_route_col_start = 6
+        self._client_bus_column_ids: list[int] = []
+        self._clients = QtWidgets.QTableWidget(0, self._client_route_col_start)
         self._clients.setHorizontalHeaderLabels(
-            ["Client ID", "Name", "Mode", "Addr", "", "VU", "Muted", "Mic", "Regie", "Plateau", "VMix"]
+            ["Client ID", "Name", "Addr", "", "VU", "Muted"]
         )
         self._clients.setColumnHidden(0, True)
-        self._clients.setColumnHidden(2, True)
-        self._clients.setColumnHidden(3, True)   # Addr hidden, shown in Info dialog
+        self._clients.setColumnHidden(2, True)   # Addr hidden, shown in Info dialog
         hdr = self._clients.horizontalHeader()
         hdr.setDefaultSectionSize(60)
-        hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)   # Name
-        hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)  # Mode (hidden)
-        hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Status
-        self._clients.setColumnWidth(4, 30)
-        hdr.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Fixed)   # VU
-        self._clients.setColumnWidth(5, 100)
-        hdr.setSectionResizeMode(6, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)   # Muted
-        hdr.setSectionResizeMode(7, QtWidgets.QHeaderView.ResizeMode.Fixed) # Mic gain (fixed)
-        self._clients.setColumnWidth(7, 55)
-        hdr.setSectionResizeMode(8, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Regie
-        self._clients.setColumnWidth(8, 70)
-        hdr.setSectionResizeMode(9, QtWidgets.QHeaderView.ResizeMode.Fixed)  # Plateau
-        self._clients.setColumnWidth(9, 70)
-        hdr.setSectionResizeMode(10, QtWidgets.QHeaderView.ResizeMode.Fixed) # VMix
-        self._clients.setColumnWidth(10, 70)
-        hdr.setStretchLastSection(False)
+        hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Name
+        self._clients.setColumnWidth(1, 80)
+        hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Status
+        self._clients.setColumnWidth(3, 30)
+        hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)   # VU
+        self._clients.setColumnWidth(4, 100)
+        hdr.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)   # Muted
         self._clients.verticalHeader().setDefaultSectionSize(26)
         self._clients.verticalHeader().setVisible(False)
         self._clients.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -191,12 +174,37 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._output_bus_widgets: Dict[int, QtWidgets.QComboBox] = {}
         self._output_vu_widgets: Dict[int, VuMeter] = {}
         self._output_devices_cache: list[tuple[str, int]] = []
+        self._bus_row_ids: list[int] = []
+        self._bus_feed_widgets: Dict[int, QtWidgets.QCheckBox] = {}
 
         self._bus_selector = QtWidgets.QComboBox()
         patch_combo(self._bus_selector)
-        self._bus_selector.addItem("Regie", 0)
-        self._bus_selector.addItem("Plateau", 1)
-        self._bus_selector.addItem("VMix", 2)
+
+        self._new_bus_name = QtWidgets.QLineEdit()
+        self._new_bus_name.setPlaceholderText("Bus name")
+        self._new_bus_type = QtWidgets.QComboBox()
+        patch_combo(self._new_bus_type)
+        self._new_bus_type.addItem("Diffusion", "diffusion")
+        self._new_bus_feed = QtWidgets.QCheckBox("Renvoyer dans Régie")
+        self._new_bus_feed.setChecked(True)
+        self._add_bus_btn = QtWidgets.QPushButton("Add bus")
+        self._add_bus_btn.setProperty("class", "success")
+        self._remove_bus_btn = QtWidgets.QPushButton("Remove bus")
+        self._remove_bus_btn.setProperty("class", "danger")
+        self._remove_bus_btn.setEnabled(False)
+
+        self._buses = QtWidgets.QTableWidget(0, 4)
+        self._buses.setHorizontalHeaderLabels(["ID", "Name", "Type", "Retour Regie"])
+        self._buses.verticalHeader().setVisible(False)
+        self._buses.verticalHeader().setDefaultSectionSize(24)
+        self._buses.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._buses.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self._buses.setAlternatingRowColors(True)
+        self._buses.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self._buses.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self._buses.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self._buses.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self._buses.itemSelectionChanged.connect(self._on_bus_selection_changed)
 
         self._add_output_device = QtWidgets.QComboBox()
         patch_combo(self._add_output_device)
@@ -232,6 +240,18 @@ class ServerWindow(QtWidgets.QMainWindow):
         outputs_layout = QtWidgets.QVBoxLayout(outputs_box)
         outputs_layout.setContentsMargins(4, 4, 4, 4)
         outputs_layout.setSpacing(2)
+
+        buses_top = QtWidgets.QGridLayout()
+        buses_top.addWidget(QtWidgets.QLabel("New bus"), 0, 0)
+        buses_top.addWidget(self._new_bus_name, 0, 1)
+        buses_top.addWidget(QtWidgets.QLabel("Type"), 0, 2)
+        buses_top.addWidget(self._new_bus_type, 0, 3)
+        buses_top.addWidget(self._new_bus_feed, 0, 4)
+        buses_top.addWidget(self._add_bus_btn, 0, 5)
+        buses_top.addWidget(self._remove_bus_btn, 0, 6)
+        outputs_layout.addLayout(buses_top)
+        outputs_layout.addWidget(self._buses)
+
         outputs_top = QtWidgets.QGridLayout()
         outputs_top.addWidget(QtWidgets.QLabel("Device"), 0, 0)
         outputs_top.addWidget(self._add_output_device, 0, 1, 1, 2)
@@ -275,9 +295,14 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._show_all_devices.stateChanged.connect(lambda _: self._start_device_refresh())
         self._start_btn.clicked.connect(self._start_server)
         self._stop_btn.clicked.connect(self._stop_server)
+        self._new_bus_type.currentIndexChanged.connect(self._on_new_bus_type_changed)
+        self._add_bus_btn.clicked.connect(self._on_add_bus)
+        self._remove_bus_btn.clicked.connect(self._on_remove_bus)
         self._add_output_btn.clicked.connect(self._on_add_output)
         self._remove_output_btn.clicked.connect(self._on_remove_output)
-        self._return_gain.valueChanged.connect(self._on_return_gain_changed)
+        self._return_enabled.stateChanged.connect(self._on_return_enabled_changed)
+        self._return_input_device.currentIndexChanged.connect(self._on_return_input_device_changed)
+        self._on_new_bus_type_changed(self._new_bus_type.currentIndex())
 
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(200)
@@ -290,8 +315,26 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._last_device_count: int = 0
         self._return_input_devices_cache: list[tuple[str, int]] = []
 
+        self._update_controls_for_server_state()
+
         QtCore.QTimer.singleShot(0, self._start_device_refresh)
         QtCore.QTimer.singleShot(0, self._load_preset_preview)
+
+    def _update_controls_for_server_state(self) -> None:
+        running = self._server is not None
+
+        self._new_bus_name.setEnabled(bool(running))
+        self._new_bus_type.setEnabled(bool(running))
+        self._add_bus_btn.setEnabled(bool(running))
+
+        self._add_output_device.setEnabled(bool(running))
+        self._bus_selector.setEnabled(bool(running))
+        can_add_output = bool(running) and self._add_output_device.currentData() is not None and self._bus_selector.currentData() is not None
+        self._add_output_btn.setEnabled(bool(can_add_output))
+
+        self._on_new_bus_type_changed(self._new_bus_type.currentIndex())
+        self._on_bus_selection_changed()
+        self._on_output_selection_changed()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._stop_server()
@@ -396,18 +439,35 @@ class ServerWindow(QtWidgets.QMainWindow):
                 continue
 
         buses = {
-            0: {"name": "Regie", "default_all_sources": True, "source_ids": []},
-            1: {"name": "Plateau", "default_all_sources": False, "source_ids": []},
-            2: {"name": "VMix", "default_all_sources": False, "source_ids": []},
+            0: {
+                "bus_id": 0,
+                "name": "Regie",
+                "bus_type": "communication",
+                "feed_to_regie": False,
+                "default_all_sources": True,
+                "source_ids": [],
+            }
         }
         for bus_id_str, b in buses_raw.items():
             try:
                 bid = int(bus_id_str)
             except Exception:
                 continue
-            if bid not in buses or not isinstance(b, dict):
+            if not isinstance(b, dict):
                 continue
-            buses[bid]["default_all_sources"] = bool(b.get("default_all_sources", buses[bid]["default_all_sources"]))
+            bus_type = str(b.get("bus_type") or ("communication" if int(bid) == 0 else "diffusion")).strip().lower()
+            if bus_type not in ("communication", "diffusion"):
+                bus_type = "communication" if int(bid) == 0 else "diffusion"
+
+            buses[int(bid)] = {
+                "bus_id": int(bid),
+                "name": str(b.get("name") or ("Regie" if int(bid) == 0 else f"Bus {int(bid)}")),
+                "bus_type": str("communication" if int(bid) == 0 else bus_type),
+                "feed_to_regie": False if int(bid) == 0 else bool(b.get("feed_to_regie", True)),
+                "default_all_sources": bool(b.get("default_all_sources", int(bid) == 0)),
+                "source_ids": [],
+            }
+
             uuids = b.get("source_uuids")
             if isinstance(uuids, list):
                 ids = []
@@ -415,7 +475,35 @@ class ServerWindow(QtWidgets.QMainWindow):
                     cid = uuid_to_id.get(str(u))
                     if cid is not None:
                         ids.append(int(cid))
-                buses[bid]["source_ids"] = ids
+                buses[int(bid)]["source_ids"] = ids
+
+        if 0 not in buses:
+            buses[0] = {
+                "bus_id": 0,
+                "name": "Regie",
+                "bus_type": "communication",
+                "feed_to_regie": False,
+                "default_all_sources": True,
+                "source_ids": [],
+            }
+        else:
+            buses[0]["bus_id"] = 0
+            buses[0]["name"] = str(buses[0].get("name") or "Regie")
+            buses[0]["bus_type"] = "communication"
+            buses[0]["feed_to_regie"] = False
+            buses[0]["default_all_sources"] = True
+
+        has_diffusion = any(str((b or {}).get("bus_type") or "diffusion") == "diffusion" for b in buses.values())
+        if not bool(has_diffusion):
+            next_bid = int(max(buses.keys(), default=0) + 1)
+            buses[int(next_bid)] = {
+                "bus_id": int(next_bid),
+                "name": "Plateau",
+                "bus_type": "diffusion",
+                "feed_to_regie": True,
+                "default_all_sources": False,
+                "source_ids": [],
+            }
 
         snap: Dict[int, dict] = {}
         for u, c in clients_raw.items():
@@ -424,23 +512,16 @@ class ServerWindow(QtWidgets.QMainWindow):
                 continue
             name = ""
             muted = False
-            gain_db = 0.0
             if isinstance(c, dict):
                 name = str(c.get("name") or "")
                 muted = bool(c.get("muted", False))
-                try:
-                    gain_db = float(c.get("gain_db", 0.0))
-                except Exception:
-                    gain_db = 0.0
             snap[int(cid)] = {
                 "client_id": int(cid),
                 "name": name,
-                "mode": "",
                 "client_uuid": str(u),
                 "addr": None,
                 "age_s": None,
                 "muted": muted,
-                "gain_db": float(gain_db),
                 "vu_dbfs": -60.0,
                 "last_timestamp_ms": 0,
                 "last_sequence_number": 0,
@@ -462,6 +543,8 @@ class ServerWindow(QtWidgets.QMainWindow):
                 "vu_dbfs": "",
             }
 
+        self._refresh_bus_selectors(buses)
+        self._refresh_buses_table(buses)
         self._refresh_outputs_table(outs, buses)
         self._set_clients_table(snap, buses)
 
@@ -495,10 +578,130 @@ class ServerWindow(QtWidgets.QMainWindow):
             pass
 
         self._outputs.setRowCount(0)
+        self._buses.setRowCount(0)
         self._output_row_ids = []
+        self._bus_row_ids = []
         self._output_device_widgets.clear()
         self._output_bus_widgets.clear()
+        self._bus_feed_widgets.clear()
+        self._client_bus_column_ids = []
         self._load_preset_preview()
+
+    def _on_new_bus_type_changed(self, _idx: int) -> None:
+        bus_type = str(self._new_bus_type.currentData() or "diffusion")
+        is_diffusion = str(bus_type) == "diffusion"
+        self._new_bus_feed.setEnabled(bool(self._server is not None and is_diffusion))
+        if not is_diffusion:
+            self._new_bus_feed.setChecked(False)
+
+    def _refresh_bus_selectors(self, buses: Dict[int, dict]) -> None:
+        sorted_buses = [
+            (int(bid), b)
+            for bid, b in sorted(buses.items(), key=lambda kv: int(kv[0]))
+            if str((b or {}).get("bus_type") or "diffusion") == "diffusion"
+        ]
+
+        self._bus_selector.blockSignals(True)
+        try:
+            current = self._bus_selector.currentData()
+            self._bus_selector.clear()
+            for bid, b in sorted_buses:
+                self._bus_selector.addItem(str(b.get("name") or f"Bus {int(bid)}"), int(bid))
+            if current is not None:
+                i = self._bus_selector.findData(current)
+                if i >= 0:
+                    self._bus_selector.setCurrentIndex(i)
+        finally:
+            self._bus_selector.blockSignals(False)
+
+    def _refresh_buses_table(self, buses: Dict[int, dict]) -> None:
+        bus_ids = [int(bid) for bid in sorted(buses.keys())]
+        rebuild = bus_ids != self._bus_row_ids
+        if rebuild:
+            self._buses.setRowCount(len(bus_ids))
+            self._bus_row_ids = list(bus_ids)
+            self._bus_feed_widgets.clear()
+
+        for row, bid in enumerate(bus_ids):
+            b = buses.get(int(bid), {})
+
+            def _set_item(col: int, text: str) -> None:
+                it = self._buses.item(row, col)
+                if it is None:
+                    it = QtWidgets.QTableWidgetItem(text)
+                    self._buses.setItem(row, col, it)
+                else:
+                    it.setText(text)
+
+            _set_item(0, str(int(bid)))
+            _set_item(1, str(b.get("name") or f"Bus {int(bid)}"))
+            _set_item(2, str(b.get("bus_type") or "diffusion"))
+
+            bus_type = str(b.get("bus_type") or "diffusion")
+            if rebuild:
+                cb = QtWidgets.QCheckBox()
+                cb.stateChanged.connect(lambda state, bus_id=int(bid): self._on_bus_feed_to_regie_changed(bus_id, state))
+                self._buses.setCellWidget(row, 3, centered_checkbox(cb))
+                self._bus_feed_widgets[int(bid)] = cb
+
+            cb = self._bus_feed_widgets.get(int(bid))
+            if cb is not None:
+                cb.blockSignals(True)
+                try:
+                    cb.setEnabled(self._server is not None and bus_type == "diffusion" and int(bid) != 0)
+                    cb.setChecked(bool(b.get("feed_to_regie", False)) if bus_type == "diffusion" and int(bid) != 0 else False)
+                finally:
+                    cb.blockSignals(False)
+
+        self._on_bus_selection_changed()
+
+    def _on_bus_selection_changed(self) -> None:
+        if self._server is None:
+            self._remove_bus_btn.setEnabled(False)
+            return
+
+        row = self._buses.currentRow()
+        if row < 0 or row >= len(self._bus_row_ids):
+            self._remove_bus_btn.setEnabled(False)
+            return
+
+        bus_id = int(self._bus_row_ids[row])
+        self._remove_bus_btn.setEnabled(int(bus_id) != 0)
+
+    def _on_add_bus(self) -> None:
+        if self._server is None:
+            return
+
+        name = str(self._new_bus_name.text() or "").strip()
+        bus_type = str(self._new_bus_type.currentData() or "diffusion")
+        feed_to_regie = bool(self._new_bus_feed.isChecked()) if bus_type == "diffusion" else False
+        try:
+            self._server.create_bus(name=name, bus_type=bus_type, feed_to_regie=feed_to_regie)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Bus", str(e))
+            return
+        self._new_bus_name.clear()
+
+    def _on_remove_bus(self) -> None:
+        if self._server is None:
+            return
+
+        row = self._buses.currentRow()
+        if row < 0 or row >= len(self._bus_row_ids):
+            return
+
+        bus_id = int(self._bus_row_ids[row])
+        if int(bus_id) == 0:
+            return
+        try:
+            self._server.remove_bus(int(bus_id))
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Bus", str(e))
+
+    def _on_bus_feed_to_regie_changed(self, bus_id: int, state: int) -> None:
+        if self._server is None:
+            return
+        self._server.set_bus_feed_to_regie(int(bus_id), _is_checked(state))
 
     def _refresh_outputs_table(self, outs: Dict[int, dict], buses: Dict[int, dict]) -> None:
         output_ids = [oid for oid in sorted(outs.keys())]
@@ -510,7 +713,12 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._output_bus_widgets.clear()
             self._output_vu_widgets.clear()
 
-        bus_names = {int(bid): str(b.get("name", bid)) for bid, b in buses.items()}
+        bus_names = {
+            int(bid): str(buses.get(int(bid), {}).get("name", bid))
+            for bid in buses.keys()
+            if str((buses.get(int(bid), {}).get("bus_type") or "diffusion")) == "diffusion"
+        }
+        sorted_bus_ids = [int(bid) for bid in sorted(bus_names.keys())]
 
         for row, oid in enumerate(output_ids):
             st = outs.get(int(oid), {})
@@ -538,7 +746,7 @@ class ServerWindow(QtWidgets.QMainWindow):
 
                 bus_cb = QtWidgets.QComboBox()
                 patch_combo(bus_cb)
-                for bid in sorted(bus_names.keys()):
+                for bid in sorted_bus_ids:
                     bus_cb.addItem(str(bus_names[bid]), int(bid))
                 bus_cb.currentIndexChanged.connect(lambda _i, out_id=int(oid): self._on_output_bus_changed(out_id))
                 self._outputs.setCellWidget(row, 2, bus_cb)
@@ -553,6 +761,7 @@ class ServerWindow(QtWidgets.QMainWindow):
                         i = dev_cb.findData(int(cur_dev))
                         if i >= 0:
                             dev_cb.setCurrentIndex(i)
+                    dev_cb.setEnabled(self._server is not None)
                 finally:
                     dev_cb.blockSignals(False)
 
@@ -560,11 +769,25 @@ class ServerWindow(QtWidgets.QMainWindow):
             if bus_cb is not None:
                 bus_cb.blockSignals(True)
                 try:
+                    selected_data = bus_cb.currentData()
+                    bus_cb.clear()
+                    for bid in sorted_bus_ids:
+                        bus_cb.addItem(str(bus_names[bid]), int(bid))
+
                     cur_bus = st.get("bus_id")
                     if cur_bus is not None:
                         i = bus_cb.findData(int(cur_bus))
                         if i >= 0:
                             bus_cb.setCurrentIndex(i)
+                        elif selected_data is not None:
+                            i = bus_cb.findData(selected_data)
+                            if i >= 0:
+                                bus_cb.setCurrentIndex(i)
+                    elif selected_data is not None:
+                        i = bus_cb.findData(selected_data)
+                        if i >= 0:
+                            bus_cb.setCurrentIndex(i)
+                    bus_cb.setEnabled(self._server is not None)
                 finally:
                     bus_cb.blockSignals(False)
 
@@ -595,8 +818,14 @@ class ServerWindow(QtWidgets.QMainWindow):
         dev = self._add_output_device.currentData()
         if dev is None:
             return
-        bus_id = int(self._bus_selector.currentData())
-        self._server.create_output(int(dev), int(bus_id))
+        bus_data = self._bus_selector.currentData()
+        if bus_data is None:
+            return
+        bus_id = int(bus_data)
+        try:
+            self._server.create_output(int(dev), int(bus_id))
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Output", str(e))
 
     def _on_remove_output(self) -> None:
         if self._server is None:
@@ -663,6 +892,25 @@ class ServerWindow(QtWidgets.QMainWindow):
         finally:
             self._add_output_device.blockSignals(False)
 
+        for _oid, dev_cb in self._output_device_widgets.items():
+            try:
+                selected = dev_cb.currentData()
+                dev_cb.blockSignals(True)
+                dev_cb.clear()
+                for label, idx in self._output_devices_cache:
+                    dev_cb.addItem(label, idx)
+                if selected is not None:
+                    i = dev_cb.findData(selected)
+                    if i >= 0:
+                        dev_cb.setCurrentIndex(i)
+            except Exception:
+                pass
+            finally:
+                try:
+                    dev_cb.blockSignals(False)
+                except Exception:
+                    pass
+
         self._return_input_device.blockSignals(True)
         try:
             current_in = self._return_input_device.currentData()
@@ -686,11 +934,16 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._output_row_ids = []
             self._load_preset_preview()
 
-    def _on_return_gain_changed(self, value: int) -> None:
-        try:
-            self._return_gain_lbl.setText(f"{int(value)} dB")
-        except Exception:
-            pass
+    def _on_return_enabled_changed(self, state: int) -> None:
+        if self._server is None:
+            return
+        self._server.set_return_enabled(_is_checked(state))
+
+    def _on_return_input_device_changed(self, _idx: int) -> None:
+        if self._server is None:
+            return
+        dev = self._return_input_device.currentData()
+        self._server.set_return_input_device(int(dev) if dev is not None else None)
 
     def _forget_selected_client(self) -> None:
         try:
@@ -746,11 +999,15 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._muted_widgets.clear()
         self._route_widgets.clear()
         self._vu_widgets.clear()
+        self._status_widgets.clear()
+        self._client_bus_column_ids = []
 
         self._output_row_ids = []
+        self._bus_row_ids = []
         self._output_device_widgets.clear()
         self._output_bus_widgets.clear()
         self._output_vu_widgets.clear()
+        self._bus_feed_widgets.clear()
 
         self._server = IntercomServer(
             bind_ip="0.0.0.0",
@@ -760,7 +1017,6 @@ class ServerWindow(QtWidgets.QMainWindow):
             discovery_enabled=self._discovery_cb.isChecked(),
             return_input_device=self._return_input_device.currentData(),
             return_enabled=self._return_enabled.isChecked(),
-            return_gain_db=float(self._return_gain.value()),
         )
 
         try:
@@ -779,9 +1035,19 @@ class ServerWindow(QtWidgets.QMainWindow):
 
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
-        self._return_enabled.setEnabled(False)
-        self._return_input_device.setEnabled(False)
-        self._return_gain.setEnabled(False)
+        self._update_controls_for_server_state()
+
+        try:
+            snap = self._server.get_clients_snapshot()
+            buses = self._server.get_buses_snapshot()
+            outs = self._server.get_outputs_snapshot()
+            self._refresh_bus_selectors(buses)
+            self._refresh_buses_table(buses)
+            self._set_clients_table(snap, buses)
+            self._refresh_outputs_table(outs, buses)
+        except Exception:
+            pass
+
         self._timer.start()
         self._status_label.setText(f"Running on port {int(self._port.value())}")
 
@@ -795,12 +1061,10 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._server = None
             self._start_btn.setEnabled(True)
             self._stop_btn.setEnabled(False)
-            self._return_enabled.setEnabled(True)
-            self._return_input_device.setEnabled(True)
-            self._return_gain.setEnabled(True)
             self._clients.setRowCount(0)
             self._outputs.setRowCount(0)
             self._remove_output_btn.setEnabled(False)
+            self._forget_client_btn.setEnabled(False)
             self._status_label.setText("Stopped")
             self._return_vu.set_level(-60.0)
 
@@ -808,12 +1072,18 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._muted_widgets.clear()
             self._route_widgets.clear()
             self._vu_widgets.clear()
+            self._status_widgets.clear()
 
             self._output_row_ids = []
             self._output_device_widgets.clear()
             self._output_bus_widgets.clear()
             self._output_vu_widgets.clear()
+            self._buses.setRowCount(0)
+            self._bus_row_ids = []
+            self._bus_feed_widgets.clear()
+            self._client_bus_column_ids = []
 
+            self._update_controls_for_server_state()
             self._load_preset_preview()
 
     def _refresh_clients(self) -> None:
@@ -823,6 +1093,8 @@ class ServerWindow(QtWidgets.QMainWindow):
         buses = self._server.get_buses_snapshot()
         outs = self._server.get_outputs_snapshot()
         stats = self._server.get_stats_snapshot()
+        self._refresh_bus_selectors(buses)
+        self._refresh_buses_table(buses)
         self._set_clients_table(snap, buses)
         self._refresh_outputs_table(outs, buses)
         try:
@@ -836,6 +1108,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         except Exception:
             have_sel = False
         self._forget_client_btn.setEnabled(bool(have_sel))
+        self._update_controls_for_server_state()
 
     def _show_geek_info(self) -> None:
         port = int(self._port.value())
@@ -890,16 +1163,14 @@ class ServerWindow(QtWidgets.QMainWindow):
                     "",
                     f"Selected client_id: {selected}",
                     f"Name: {st.get('name', '')}",
-                    f"Mode: {st.get('mode', '')}",
                     f"UUID: {st.get('client_uuid') or '-'}",
                     f"Addr: {addr[0]}:{addr[1]}" if addr else "Addr: -",
                     f"Muted: {st.get('muted', False)}",
-                    f"Gain: {st.get('gain_db', 0.0)}",
                     f"Ctrl: {st.get('control_connected', False)}",
                 ]
             )
 
-        server_preset = None
+        server_preset = ""
         if self._server is not None:
             try:
                 server_preset = str(self._server.get_preset_paths_snapshot().get("server_preset") or "")
@@ -926,11 +1197,33 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._reset_total_config()
 
     def _set_clients_table(self, snap: Dict[int, dict], buses: Dict[int, dict]) -> None:
-        # Columns: 0=ClientID(hidden), 1=Name, 2=Mode(hidden), 3=Addr(hidden),
-        #          4=Status, 5=VU, 6=Muted, 7=Mic(fixed 100%), 8=Regie, 9=Plateau, 10=VMix
         client_ids = [client_id for client_id, _st in sorted(snap.items(), key=lambda kv: kv[0])]
+        bus_ids = [int(bid) for bid in sorted(buses.keys())]
 
-        rebuild = client_ids != self._client_row_ids
+        bus_columns_changed = bus_ids != self._client_bus_column_ids
+        if bus_columns_changed:
+            self._client_bus_column_ids = list(bus_ids)
+            labels = ["Client ID", "Name", "Addr", "", "VU", "Muted"]
+            labels.extend([str(buses.get(int(bid), {}).get("name") or f"Bus {int(bid)}") for bid in bus_ids])
+            self._clients.setColumnCount(int(self._client_route_col_start + len(bus_ids)))
+            self._clients.setHorizontalHeaderLabels(labels)
+            self._clients.setColumnHidden(0, True)
+            self._clients.setColumnHidden(2, True)
+            hdr = self._clients.horizontalHeader()
+            hdr.setDefaultSectionSize(60)
+            hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            self._clients.setColumnWidth(1, 80)
+            hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            self._clients.setColumnWidth(3, 30)
+            hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            self._clients.setColumnWidth(4, 100)
+            hdr.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+            for idx, _bid in enumerate(bus_ids):
+                col = int(self._client_route_col_start + idx)
+                hdr.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.Fixed)
+                self._clients.setColumnWidth(col, 82)
+
+        rebuild = bool(bus_columns_changed) or client_ids != self._client_row_ids
         if rebuild:
             self._clients.setRowCount(len(client_ids))
             self._client_row_ids = list(client_ids)
@@ -953,15 +1246,6 @@ class ServerWindow(QtWidgets.QMainWindow):
                 self._status_widgets.clear()
 
         def route_checked(bus_id: int, client_id: int) -> bool:
-            st = snap.get(int(client_id), {})
-            tx_modes = st.get("tx_mode_buses")
-            if bool(st.get("tx_modes_configured", False)):
-                if isinstance(tx_modes, dict):
-                    return str(tx_modes.get(str(int(bus_id)), tx_modes.get(int(bus_id), ""))).strip().lower() in (
-                        "ptt",
-                        "always_on",
-                    )
-                return False
             b = buses.get(int(bus_id))
             if not b:
                 return False
@@ -987,24 +1271,23 @@ class ServerWindow(QtWidgets.QMainWindow):
 
             _set_item(0, str(client_id))
             _set_item(1, str(st.get("name", "")))
-            _set_item(2, str(st.get("mode", "")))
             addr = st.get("addr")
-            _set_item(3, f"{addr[0]}:{addr[1]}" if addr else "")
+            _set_item(2, f"{addr[0]}:{addr[1]}" if addr else "")
 
-            # col 4 — Status indicator
+            # col 3 — Status indicator
             disconnected = not bool(st.get("control_connected", False))
             if rebuild:
                 si = StatusIndicator()
-                self._clients.setCellWidget(row, 4, centered_checkbox(si))  # reuse centering helper
+                self._clients.setCellWidget(row, 3, centered_checkbox(si))  # reuse centering helper
                 self._status_widgets[int(client_id)] = si
             si = self._status_widgets.get(int(client_id))
             if si is not None:
                 si.set_online(not disconnected)
 
-            # col 5 — VU meter
+            # col 4 — VU meter
             if rebuild:
                 vu = VuMeter()
-                self._clients.setCellWidget(row, 5, vu)
+                self._clients.setCellWidget(row, 4, vu)
                 self._vu_widgets[int(client_id)] = vu
             vu = self._vu_widgets.get(int(client_id))
             if vu is not None:
@@ -1022,11 +1305,11 @@ class ServerWindow(QtWidgets.QMainWindow):
                     self._clients.setItem(row, col, it)
                 it.setForeground(QtGui.QBrush(fg))
 
-            # col 6 — Muted checkbox (centered)
+            # col 5 — Muted checkbox (centered)
             if rebuild:
                 muted = QtWidgets.QCheckBox()
                 muted.stateChanged.connect(lambda state, cid=client_id: self._on_muted_changed(cid, state))
-                self._clients.setCellWidget(row, 6, centered_checkbox(muted))
+                self._clients.setCellWidget(row, 5, centered_checkbox(muted))
                 self._muted_widgets[int(client_id)] = muted
             muted = self._muted_widgets.get(int(client_id))
             if muted is not None:
@@ -1034,21 +1317,22 @@ class ServerWindow(QtWidgets.QMainWindow):
                     muted.blockSignals(True)
                     try:
                         muted.setChecked(bool(st.get("muted", False)))
+                        muted.setEnabled(self._server is not None)
                     finally:
                         muted.blockSignals(False)
                 except RuntimeError:
                     self._client_row_ids = []
                     return
 
-            # col 7 — Mic gain is fixed at 100% on server side
-            _set_item(7, "100%")
-
-            # cols 8,9,10 — Regie, Plateau, VMix (centered)
-            for col, bus_id in enumerate((0, 1, 2), start=8):
+            # Dynamic route columns (one per bus)
+            for idx, bus_id in enumerate(self._client_bus_column_ids):
+                col = int(self._client_route_col_start + idx)
                 key = (int(client_id), int(bus_id))
                 if rebuild:
                     cb = QtWidgets.QCheckBox()
-                    cb.setEnabled(False)
+                    cb.stateChanged.connect(
+                        lambda state, cid=client_id, bid=bus_id: self._on_route_changed(cid, bid, state)
+                    )
                     self._clients.setCellWidget(row, col, centered_checkbox(cb))
                     self._route_widgets[key] = cb
                 cb = self._route_widgets.get(key)
@@ -1057,6 +1341,7 @@ class ServerWindow(QtWidgets.QMainWindow):
                         cb.blockSignals(True)
                         try:
                             cb.setChecked(route_checked(bus_id, client_id))
+                            cb.setEnabled(self._server is not None)
                         finally:
                             cb.blockSignals(False)
                     except RuntimeError:
@@ -1072,6 +1357,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         if self._server is None:
             return
         self._server.set_client_muted(client_id, _is_checked(state))
+
 
 def run_gui(port: int) -> int:
     app = QtWidgets.QApplication(sys.argv)

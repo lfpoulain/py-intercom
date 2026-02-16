@@ -7,6 +7,17 @@ Intercom audio temps réel sur LAN (architecture client/serveur).
 - UI: PySide6
 - Return bus: capture audio locale côté serveur (ex: VB-Cable) mixée dans le flux des clients abonnés
 
+## État actuel (résumé)
+
+- Bus **dynamiques** côté serveur avec types `communication` (Régie) et `diffusion` (Plateau/VMix/etc.).
+- Routing et mute par client, par bus.
+- PTT côté client en **mode par bus** (`always_on` / `ptt`) avec raccourcis clavier par bus.
+- Return bus configurable à chaud (activation + device d'entrée) pendant que le serveur tourne.
+- Gains côté serveur simplifiés pour l'UX :
+  - gain return fixe à `0 dB` (unity)
+  - gain client effectif fixe à `0 dB` (unity)
+- Table clients serveur simplifiée : plus de colonne mode/gain.
+
 ## Prérequis
 
 - Python 3.x
@@ -44,6 +55,8 @@ Activer les logs debug:
 ```powershell
 .\.venv\Scripts\python run_server.py --gui --debug
 ```
+
+Mode CLI (sans GUI) supporté pour l'usage serveur headless (`run_server.py` sans `--gui`).
 
 ### Client
 
@@ -128,4 +141,4 @@ Lister les devices audio:
 
 ## Documentation
 
-Voir `playbook.md`.
+Voir `playbook.md` pour le détail protocole, presets, modèle bus et workflow.

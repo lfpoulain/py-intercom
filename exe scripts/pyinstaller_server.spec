@@ -2,7 +2,7 @@
 
 import os
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
 
 _spec_path = globals().get("SPECPATH")
@@ -30,18 +30,10 @@ except Exception:
     pass
 
 _datas = []
-try:
-    _datas += collect_data_files("qt_material")
-except Exception:
-    pass
 
 _hiddenimports = []
 _hiddenimports += collect_submodules("py_intercom.server")
 _hiddenimports += collect_submodules("py_intercom.common")
-try:
-    _hiddenimports += collect_submodules("qt_material")
-except Exception:
-    pass
 
 
 a = Analysis(

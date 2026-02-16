@@ -349,50 +349,6 @@ select option {
   opacity: 0.7;
 }
 
-.bus-grid {
-  display: grid;
-  grid-template-columns: 1fr 1.4fr auto;
-  gap: 6px 8px;
-  align-items: center;
-  margin-bottom: 14px;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.02);
-}
-
-.bus-grid-head {
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  color: var(--text2);
-}
-
-.bus-name {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.bus-select {
-  padding-top: 6px;
-  padding-bottom: 6px;
-  font-size: 12px;
-}
-
-.bus-mute-wrap {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text2);
-}
-
-.bus-mute-wrap input {
-  accent-color: var(--warn);
-}
-
 kbd {
   display: inline-block;
   background: rgba(255,255,255,0.08);

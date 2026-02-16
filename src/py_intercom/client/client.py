@@ -36,11 +36,8 @@ class ClientConfig:
     sidetone_enabled: bool = False
     sidetone_gain_db: float = -12.0
 
-    ptt_general_key: Optional[str] = None
     ptt_bus_keys: Optional[dict] = None
     mute_buses: Optional[dict] = None
-    tx_mode_buses: Optional[dict] = None
-    output_mute_buses: Optional[dict] = None
 
     listen_return_bus: bool = False
 
@@ -143,44 +140,17 @@ class IntercomClient:
         self._ctrl_last_rx_monotonic: float = 0.0
         self._ctrl_last_tx_monotonic: float = 0.0
         self._ctrl_routes: Optional[dict] = None
+        self._ctrl_buses: dict[int, dict] = {}
 
-        self._ptt_general: bool = False
         self._ptt_buses: dict[int, bool] = {}
         self._mute_buses: dict[int, bool] = {}
-        self._tx_mode_buses: dict[int, str] = {}
-        self._tx_modes_configured: bool = False
-        self._output_mute_buses: dict[int, bool] = {}
         self._listen_return_bus: bool = bool(self.config.listen_return_bus)
-
-        has_explicit_tx_modes = isinstance(self.config.tx_mode_buses, dict)
-        self._tx_modes_configured = bool(has_explicit_tx_modes)
         try:
-            if isinstance(self.config.tx_mode_buses, dict):
-                for k, v in self.config.tx_mode_buses.items():
-                    mode = str(v or "").strip().lower()
-                    if mode not in ("ptt", "always_on"):
-                        continue
-                    self._tx_mode_buses[int(k)] = mode
+            if isinstance(self.config.mute_buses, dict):
+                for k, v in self.config.mute_buses.items():
+                    self._mute_buses[int(k)] = bool(v)
         except Exception:
-            pass
-
-        if not has_explicit_tx_modes:
-            base_mode = str(self.config.mode or "always_on").strip().lower()
-            if base_mode not in ("ptt", "always_on"):
-                base_mode = "always_on"
-            for bid in (0, 1, 2):
-                self._tx_mode_buses[int(bid)] = str(base_mode)
-
-        try:
-            output_mute_buses = self.config.output_mute_buses
-            if not isinstance(output_mute_buses, dict):
-                output_mute_buses = self.config.mute_buses
-            if isinstance(output_mute_buses, dict):
-                for k, v in output_mute_buses.items():
-                    self._output_mute_buses[int(k)] = bool(v)
-        except Exception:
-            self._output_mute_buses = {}
-        self._mute_buses = dict(self._output_mute_buses)
+            self._mute_buses = {}
 
     def get_stats_snapshot(self) -> dict:
         with self._state_lock:
@@ -237,21 +207,23 @@ class IntercomClient:
                 "control_connected": bool(self._ctrl_connected),
                 "control_age_s": ctrl_age_s,
                 "control_tx_age_s": ctrl_tx_age_s,
-                "ptt_general": bool(self._ptt_general),
                 "ptt_buses": dict(self._ptt_buses),
                 "mute_buses": dict(self._mute_buses),
-                "tx_mode_buses": dict(self._tx_mode_buses),
-                "output_mute_buses": dict(self._output_mute_buses),
                 "listen_return_bus": bool(self._listen_return_bus),
                 "routes": dict(self._ctrl_routes or {}),
+                "buses": {
+                    str(int(bid)): {
+                        "bus_id": int(bid),
+                        "name": str(b.get("name") or f"Bus {int(bid)}"),
+                        "bus_type": str(b.get("bus_type") or "diffusion"),
+                        "feed_to_regie": bool(b.get("feed_to_regie", False)),
+                    }
+                    for bid, b in self._ctrl_buses.items()
+                    if isinstance(b, dict)
+                },
                 "name": str(self.config.name or ""),
-                "mode": str(self.config.mode or ""),
+                "mode": "per_bus",
             }
-
-    def set_ptt_general(self, active: bool) -> None:
-        with self._state_lock:
-            self._ptt_general = bool(active)
-        self._control_send_state()
 
     def set_ptt_bus(self, bus_id: int, active: bool) -> None:
         with self._state_lock:
@@ -259,27 +231,8 @@ class IntercomClient:
         self._control_send_state()
 
     def set_mute_bus(self, bus_id: int, muted: bool) -> None:
-        self.set_output_mute_bus(int(bus_id), bool(muted))
-
-    def set_output_mute_bus(self, bus_id: int, muted: bool) -> None:
         with self._state_lock:
-            self._output_mute_buses[int(bus_id)] = bool(muted)
             self._mute_buses[int(bus_id)] = bool(muted)
-        self._control_send_state()
-
-    def set_tx_mode_bus(self, bus_id: int, mode: str) -> None:
-        mode_norm = str(mode or "").strip().lower()
-        if mode_norm in ("", "off", "none", "disabled"):
-            with self._state_lock:
-                self._tx_modes_configured = True
-                self._tx_mode_buses.pop(int(bus_id), None)
-            self._control_send_state()
-            return
-        if mode_norm not in ("ptt", "always_on"):
-            return
-        with self._state_lock:
-            self._tx_modes_configured = True
-            self._tx_mode_buses[int(bus_id)] = mode_norm
         self._control_send_state()
 
     def set_listen_return_bus(self, enabled: bool) -> None:
@@ -413,6 +366,7 @@ class IntercomClient:
         self._kick_message = ""
         self._ctrl_connected = False
         self._ctrl_routes = None
+        self._ctrl_buses = {}
         self._tx_packets = 0
         self._tx_udp_sent = 0
         self._rx_packets = 0
@@ -471,20 +425,14 @@ class IntercomClient:
         if sock is None or not self._ctrl_connected:
             return
         with self._state_lock:
-            ptt_general = bool(self._ptt_general)
             ptt_buses = dict(self._ptt_buses)
             mute_buses = dict(self._mute_buses)
-            tx_mode_buses = dict(self._tx_mode_buses)
-            output_mute_buses = dict(self._output_mute_buses)
             listen_return_bus = bool(self._listen_return_bus)
         msg: dict = {
             "type": "state",
             "client_id": int(self.client_id),
-            "ptt_general": bool(ptt_general),
             "ptt_buses": dict(ptt_buses),
             "mute_buses": dict(mute_buses),
-            "tx_mode_buses": dict(tx_mode_buses),
-            "output_mute_buses": dict(output_mute_buses),
             "listen_return_bus": bool(listen_return_bus),
         }
         if muted is not None:
@@ -497,37 +445,9 @@ class IntercomClient:
 
     def _can_transmit_audio(self) -> bool:
         with self._state_lock:
-            muted = bool(self._muted)
-            mode = str(self.config.mode or "always_on")
-            ptt_general = bool(self._ptt_general)
+            if bool(self._muted):
+                return False
             ptt_buses = dict(self._ptt_buses)
-            tx_mode_buses = dict(self._tx_mode_buses)
-            tx_modes_configured = bool(self._tx_modes_configured)
-
-        if tx_modes_configured:
-            has_routing = False
-            for bus_id, tx_mode in tx_mode_buses.items():
-                tx_mode_norm = str(tx_mode or "").strip().lower()
-                if tx_mode_norm not in ("ptt", "always_on"):
-                    continue
-                has_routing = True
-                if tx_mode_norm == "always_on":
-                    if not muted:
-                        return True
-                    continue
-                if ptt_general or bool(ptt_buses.get(int(bus_id), False)):
-                    return True
-            if has_routing:
-                return False
-
-        if mode != "ptt":
-            if muted:
-                return False
-            return True
-
-        if ptt_general:
-            return True
-
         return any(bool(v) for v in ptt_buses.values())
 
     def _control_handle_msg(self, msg: dict) -> None:
@@ -558,6 +478,41 @@ class IntercomClient:
                 if "routes" in cfg and isinstance(cfg.get("routes"), dict):
                     try:
                         self._ctrl_routes = dict(cfg.get("routes") or {})
+                    except Exception:
+                        pass
+                if "buses" in cfg:
+                    buses = cfg.get("buses")
+                    try:
+                        parsed: dict[int, dict] = {}
+                        if isinstance(buses, list):
+                            for b in buses:
+                                if not isinstance(b, dict):
+                                    continue
+                                try:
+                                    bid = int(b.get("bus_id"))
+                                except Exception:
+                                    continue
+                                parsed[int(bid)] = {
+                                    "bus_id": int(bid),
+                                    "name": str(b.get("name") or f"Bus {int(bid)}"),
+                                    "bus_type": str(b.get("bus_type") or "diffusion"),
+                                    "feed_to_regie": bool(b.get("feed_to_regie", False)),
+                                }
+                        elif isinstance(buses, dict):
+                            for k, b in buses.items():
+                                if not isinstance(b, dict):
+                                    continue
+                                try:
+                                    bid = int(k)
+                                except Exception:
+                                    continue
+                                parsed[int(bid)] = {
+                                    "bus_id": int(bid),
+                                    "name": str(b.get("name") or f"Bus {int(bid)}"),
+                                    "bus_type": str(b.get("bus_type") or "diffusion"),
+                                    "feed_to_regie": bool(b.get("feed_to_regie", False)),
+                                }
+                        self._ctrl_buses = parsed
                     except Exception:
                         pass
                 if "return_vu_dbfs" in cfg:
@@ -597,7 +552,7 @@ class IntercomClient:
                     "client_id": int(self.client_id),
                     "client_uuid": str(self.config.client_uuid or ""),
                     "name": str(self.config.name or ""),
-                    "mode": str(self.config.mode or "always_on"),
+                    "mode": "ptt",
                     "udp_port": int(self._sock.getsockname()[1]),
                 }
                 self._control_send(sock, hello)
