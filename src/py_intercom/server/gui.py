@@ -136,13 +136,13 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._clients.setColumnHidden(2, True)   # Addr hidden, shown in Info dialog
         hdr = self._clients.horizontalHeader()
         hdr.setDefaultSectionSize(60)
-        hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Name
-        self._clients.setColumnWidth(1, 80)
+        hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)   # Name
         hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Status
         self._clients.setColumnWidth(3, 30)
         hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)   # VU
         self._clients.setColumnWidth(4, 100)
         hdr.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)   # Muted
+        hdr.setStretchLastSection(True)
         self._clients.verticalHeader().setDefaultSectionSize(26)
         self._clients.verticalHeader().setVisible(False)
         self._clients.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -430,6 +430,34 @@ class ServerWindow(QtWidgets.QMainWindow):
             buses_raw = dict(data.get("buses") or {})
         if isinstance(data, dict) and isinstance(data.get("clients"), dict):
             clients_raw = dict(data.get("clients") or {})
+
+        return_enabled = False
+        return_input_device: Optional[int] = None
+        if isinstance(data, dict):
+            return_enabled = bool(data.get("return_enabled", False))
+            raw_dev = data.get("return_input_device", None)
+            try:
+                return_input_device = int(raw_dev) if raw_dev is not None else None
+            except Exception:
+                return_input_device = None
+
+        self._return_enabled.blockSignals(True)
+        try:
+            self._return_enabled.setChecked(bool(return_enabled))
+        finally:
+            self._return_enabled.blockSignals(False)
+
+        self._return_input_device.blockSignals(True)
+        try:
+            if return_input_device is None:
+                i = self._return_input_device.findData(None)
+                self._return_input_device.setCurrentIndex(i if i >= 0 else 0)
+            else:
+                i = self._return_input_device.findData(int(return_input_device))
+                if i >= 0:
+                    self._return_input_device.setCurrentIndex(i)
+        finally:
+            self._return_input_device.blockSignals(False)
 
         uuid_to_id: Dict[str, int] = {}
         for u in clients_raw.keys():
@@ -1211,8 +1239,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._clients.setColumnHidden(2, True)
             hdr = self._clients.horizontalHeader()
             hdr.setDefaultSectionSize(60)
-            hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Fixed)
-            self._clients.setColumnWidth(1, 80)
+            hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
             hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)
             self._clients.setColumnWidth(3, 30)
             hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)
@@ -1220,8 +1247,8 @@ class ServerWindow(QtWidgets.QMainWindow):
             hdr.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
             for idx, _bid in enumerate(bus_ids):
                 col = int(self._client_route_col_start + idx)
-                hdr.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.Fixed)
-                self._clients.setColumnWidth(col, 82)
+                hdr.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setStretchLastSection(True)
 
         rebuild = bool(bus_columns_changed) or client_ids != self._client_row_ids
         if rebuild:

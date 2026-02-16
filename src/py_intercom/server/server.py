@@ -23,6 +23,15 @@ from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import unpack_audio_packet, pack_audio_packet
 
 
+SERVER_UDP_SOCKET_BUFFER_BYTES = 128 * 1024
+SERVER_CLIENT_JB_START_FRAMES = 2
+SERVER_CLIENT_JB_MAX_FRAMES = 12
+SERVER_CLIENT_JB_TRIM_TARGET_FRAMES = 4
+SERVER_MIX_QUEUE_MAX_FRAMES = 12
+SERVER_RETURN_QUEUE_MAX_FRAMES = 20
+SERVER_OUTPUT_BUFFER_MAX_MS = 400
+
+
 @dataclass
 class ClientState:
     addr: Tuple[str, int]
@@ -30,7 +39,10 @@ class ClientState:
     decoder: OpusDecoder = field(default_factory=OpusDecoder, repr=False)
     encoder: OpusEncoder = field(default_factory=OpusEncoder, repr=False)
     jb: OpusPacketJitterBuffer = field(
-        default_factory=lambda: OpusPacketJitterBuffer(start_frames=3, max_frames=60),
+        default_factory=lambda: OpusPacketJitterBuffer(
+            start_frames=int(SERVER_CLIENT_JB_START_FRAMES),
+            max_frames=int(SERVER_CLIENT_JB_MAX_FRAMES),
+        ),
         repr=False,
     )
     muted: bool = False
@@ -111,12 +123,12 @@ class IntercomServer:
 
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
-            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, int(SERVER_UDP_SOCKET_BUFFER_BYTES))
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, int(SERVER_UDP_SOCKET_BUFFER_BYTES))
         except Exception:
             pass
         self._sock.bind((self.bind_ip, self.port))
-        self._sock.settimeout(0.5)
+        self._sock.settimeout(0.2)
 
         self._opus_ok: bool = True
         self._opus_err: str = ""
@@ -169,7 +181,7 @@ class IntercomServer:
         self._next_bus_id: int = 3
 
         # items are (raw_mix_48k, contributions_by_client_id)
-        self._mix_queue: queue.Queue[object] = queue.Queue(maxsize=50)
+        self._mix_queue: queue.Queue[object] = queue.Queue(maxsize=int(SERVER_MIX_QUEUE_MAX_FRAMES))
         self._stop = threading.Event()
         self._seq_out = 0
 
@@ -215,7 +227,7 @@ class IntercomServer:
         self._return_in_samplerate: int = int(SAMPLE_RATE)
         self._return_in_phase: float = 0.0
         self._return_capture_buf: np.ndarray = np.zeros((0,), dtype=np.float32)
-        self._return_frames: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=120)
+        self._return_frames: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=int(SERVER_RETURN_QUEUE_MAX_FRAMES))
         self._return_vu_dbfs: float = -60.0
 
         self._ctrl_sock: Optional[socket.socket] = None
@@ -250,6 +262,17 @@ class IntercomServer:
         clients = data.get("clients")
         if not isinstance(clients, dict):
             clients = {}
+
+        raw_return_input_device = data.get("return_input_device", None)
+        try:
+            preset_return_input_device = int(raw_return_input_device) if raw_return_input_device is not None else None
+        except Exception:
+            preset_return_input_device = None
+
+        preset_return_enabled = bool(data.get("return_enabled", self._return_enabled))
+
+        self._return_input_device = preset_return_input_device
+        self._return_enabled = bool(preset_return_enabled)
 
         with self._lock:
             loaded_buses: Dict[int, AudioBus] = {
@@ -441,7 +464,14 @@ class IntercomServer:
                     "name": str(st.name or ""),
                 }
 
-        server_data = {"version": 1, "outputs": outputs, "buses": buses, "clients": clients}
+        server_data = {
+            "version": 1,
+            "outputs": outputs,
+            "buses": buses,
+            "clients": clients,
+            "return_enabled": bool(self._return_enabled),
+            "return_input_device": int(self._return_input_device) if self._return_input_device is not None else None,
+        }
 
         p = self._preset_path
         atomic_write_json(p, server_data)
@@ -629,13 +659,16 @@ class IntercomServer:
         if not bool(self._running):
             if not bool(self._return_enabled):
                 self._close_return_input_stream()
+            self._autosave_preset()
             return
 
         if not bool(self._return_enabled):
             self._close_return_input_stream()
+            self._autosave_preset()
             return
 
         if self._return_input_device is None:
+            self._autosave_preset()
             return
 
         self._close_return_input_stream()
@@ -643,20 +676,24 @@ class IntercomServer:
             self._open_return_input_stream(int(self._return_input_device))
         except Exception as e:
             logger.warning("return input restart failed: {}", e)
+        self._autosave_preset()
 
     def set_return_input_device(self, device: Optional[int]) -> None:
         self._return_input_device = int(device) if device is not None else None
         if not bool(self._running):
+            self._autosave_preset()
             return
 
         self._close_return_input_stream()
         if not bool(self._return_enabled) or self._return_input_device is None:
+            self._autosave_preset()
             return
 
         try:
             self._open_return_input_stream(int(self._return_input_device))
         except Exception as e:
             logger.warning("return input device switch failed: {}", e)
+        self._autosave_preset()
 
     def get_buses_snapshot(self) -> Dict[int, dict]:
         with self._lock:
@@ -1426,6 +1463,21 @@ class IntercomServer:
                 for client_id, st, muted, mode, ptt_buses, mute_buses, ctrl_ok, last_ctrl in clients_snapshot:
                     if muted:
                         continue
+
+                    try:
+                        jb_buf = int(st.jb.buffered_frames)
+                    except Exception:
+                        jb_buf = 0
+                    if jb_buf > int(SERVER_CLIENT_JB_TRIM_TARGET_FRAMES + 2):
+                        to_drop = int(jb_buf - int(SERVER_CLIENT_JB_TRIM_TARGET_FRAMES))
+                        for _ in range(max(0, to_drop)):
+                            try:
+                                stale = st.jb.pop()
+                            except Exception:
+                                break
+                            if stale is None:
+                                break
+
                     try:
                         payload = st.jb.pop()
                     except Exception:
@@ -1546,7 +1598,14 @@ class IntercomServer:
                     try:
                         self._mix_queue.put_nowait((regie_mix.copy(), regie_contrib))
                     except queue.Full:
-                        pass
+                        try:
+                            self._mix_queue.get_nowait()
+                        except Exception:
+                            pass
+                        try:
+                            self._mix_queue.put_nowait((regie_mix.copy(), regie_contrib))
+                        except Exception:
+                            pass
 
                 for out in outputs:
                     mix = bus_mixes.get(int(out.bus_id))
@@ -1558,7 +1617,10 @@ class IntercomServer:
                         else:
                             out.buf = np.concatenate([out.buf, mix.astype(np.float32, copy=False)])
 
-                        max_samples = int(SAMPLE_RATE * 3)
+                        max_samples = max(
+                            int(FRAME_SAMPLES * 2),
+                            int(float(SAMPLE_RATE) * float(SERVER_OUTPUT_BUFFER_MAX_MS) / 1000.0),
+                        )
                         if out.buf.size > max_samples:
                             out.buf = out.buf[-max_samples:]
 
@@ -1734,7 +1796,7 @@ class IntercomServer:
     def _broadcast_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                item = self._mix_queue.get(timeout=0.5)
+                item = self._mix_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
 
@@ -1755,9 +1817,10 @@ class IntercomServer:
             return_frame = None
             if bool(self._return_enabled):
                 try:
-                    return_frame = self._return_frames.get_nowait()
+                    while True:
+                        return_frame = self._return_frames.get_nowait()
                 except Exception:
-                    return_frame = None
+                    pass
 
             if return_frame is None or not isinstance(return_frame, np.ndarray) or int(getattr(return_frame, "shape", [0])[0]) != int(FRAME_SAMPLES):
                 return_frame = np.zeros((FRAME_SAMPLES,), dtype=np.float32)

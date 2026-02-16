@@ -83,15 +83,33 @@ class OpusPacketJitterBuffer:
                     del self._buf[key]
                 else:
                     exp = int(self._expected_seq)
-                    farthest = max(self._buf.keys(), key=lambda k: _seq_distance(int(k), exp))
-                    del self._buf[int(farthest)]
+                    ahead = []
+                    for k in self._buf.keys():
+                        d = _seq_distance(int(k), exp)
+                        if d >= 0:
+                            ahead.append((int(d), int(k)))
+
+                    if len(ahead) > 0:
+                        # Realtime policy: drop the oldest pending frame first.
+                        # Keeping newest frames avoids slowly drifting into high latency.
+                        _oldest_dist, oldest_key = min(ahead, key=lambda t: int(t[0]))
+                        del self._buf[int(oldest_key)]
+                    else:
+                        key = min(self._buf.keys())
+                        del self._buf[int(key)]
 
     def pop(self) -> Optional[bytes]:
         with self._lock:
             if not self._started:
                 if len(self._buf) < int(self.start_frames):
                     return None
-                key = min(self._buf.keys())
+                keys_sorted = sorted(self._buf.keys())
+                # Realtime startup: do not begin from the oldest enqueued packet.
+                # Keep only a minimal safety window before playout starts.
+                start_idx = max(0, int(len(keys_sorted) - int(self.start_frames)))
+                key = int(keys_sorted[start_idx])
+                for stale_key in keys_sorted[:start_idx]:
+                    self._buf.pop(int(stale_key), None)
                 self._expected_seq = int(key)
                 self._started = True
 

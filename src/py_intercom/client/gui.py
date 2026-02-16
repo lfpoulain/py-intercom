@@ -571,44 +571,50 @@ class ClientWindow(QtWidgets.QMainWindow):
             except Exception:
                 old_modes[int(bid)] = "ptt"
 
-        if apply_saved:
-            try:
-                saved_keys = self._preset_get("ptt_bus_keys", {})
-                if isinstance(saved_keys, dict):
-                    for k, v in saved_keys.items():
-                        try:
-                            old_keys[int(k)] = str(v or "")
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+        try:
+            saved_keys = self._preset_get("ptt_bus_keys", {})
+            if not isinstance(saved_keys, dict):
+                saved_keys = {}
+        except Exception:
+            saved_keys = {}
 
-            try:
-                saved_mutes = self._preset_get("mute_buses", {})
-                if isinstance(saved_mutes, dict):
-                    for k, v in saved_mutes.items():
-                        try:
-                            old_mutes[int(k)] = bool(v)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+        try:
+            saved_mutes = self._preset_get("mute_buses", {})
+            if not isinstance(saved_mutes, dict):
+                saved_mutes = {}
+        except Exception:
+            saved_mutes = {}
 
-            try:
-                saved_modes = self._preset_get("mode_buses", {})
-                if isinstance(saved_modes, dict):
-                    for k, v in saved_modes.items():
-                        try:
-                            bid = int(k)
-                            mode = str(v or "ptt")
-                            old_modes[bid] = mode if mode in ("always_on", "ptt") else "ptt"
-                        except Exception:
-                            pass
-                elif str(self._preset_get("mode", "ptt") or "ptt") == "always_on":
-                    for bid in parsed.keys():
-                        old_modes[int(bid)] = "always_on"
-            except Exception:
-                pass
+        try:
+            saved_modes = self._preset_get("mode_buses", {})
+            if not isinstance(saved_modes, dict):
+                saved_modes = {}
+        except Exception:
+            saved_modes = {}
+
+        try:
+            legacy_always_on = str(self._preset_get("mode", "ptt") or "ptt") == "always_on"
+        except Exception:
+            legacy_always_on = False
+
+        for bid in parsed.keys():
+            ibid = int(bid)
+
+            if apply_saved:
+                old_keys[ibid] = str(saved_keys.get(str(ibid), "") or "")
+                old_mutes[ibid] = bool(saved_mutes.get(str(ibid), False))
+            else:
+                if ibid not in old_keys or not str(old_keys.get(ibid) or ""):
+                    old_keys[ibid] = str(saved_keys.get(str(ibid), "") or "")
+                if ibid not in old_mutes:
+                    old_mutes[ibid] = bool(saved_mutes.get(str(ibid), False))
+
+            mode_val = str(old_modes.get(ibid) or "")
+            if mode_val not in ("always_on", "ptt"):
+                mode_val = str(saved_modes.get(str(ibid), "") or "")
+            if mode_val not in ("always_on", "ptt"):
+                mode_val = "always_on" if bool(legacy_always_on) else "ptt"
+            old_modes[ibid] = str(mode_val)
 
         self._clear_layout(self._bus_rows_layout)
         self._shortcut_widgets = []
@@ -653,7 +659,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             clear_btn.setToolTip("Clear shortcut")
             clear_btn.clicked.connect(lambda _checked=False, e=edit: e.setKeySequence(QtGui.QKeySequence("")))
             mode_value = str(mode_combo.currentData() or "ptt")
-            key_enabled = (not bool(self._connected)) and mode_value == "ptt"
+            key_enabled = mode_value == "ptt"
             edit.setEnabled(bool(key_enabled))
             clear_btn.setEnabled(bool(key_enabled))
 
@@ -905,9 +911,9 @@ class ClientWindow(QtWidgets.QMainWindow):
         edit = self._ptt_bus_keys.get(int(bus_id))
         clear_btn = self._ptt_bus_clear.get(int(bus_id))
         if edit is not None:
-            edit.setEnabled((not bool(self._connected)) and mode == "ptt")
+            edit.setEnabled(mode == "ptt")
         if clear_btn is not None:
-            clear_btn.setEnabled((not bool(self._connected)) and mode == "ptt")
+            clear_btn.setEnabled(mode == "ptt")
 
         try:
             if self._global_ptt is not None:
@@ -1306,10 +1312,8 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._apply_ptt_modes_to_client()
 
         try:
-            for edit in self._ptt_bus_keys.values():
-                edit.setEnabled(False)
-            for b in self._ptt_bus_clear.values():
-                b.setEnabled(False)
+            if self._client is not None:
+                self._client.set_listen_return_bus(bool(self._listen_return_bus.isChecked()))
         except Exception:
             pass
 

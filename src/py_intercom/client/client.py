@@ -19,6 +19,13 @@ from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import pack_audio_packet, unpack_audio_packet
 
 
+# Realtime-oriented buffering (10 ms Opus frames).
+CLIENT_UDP_SOCKET_BUFFER_BYTES = 128 * 1024
+CLIENT_JB_START_FRAMES = 2
+CLIENT_JB_MAX_FRAMES = 12
+CLIENT_JB_TRIM_TARGET_FRAMES = 4
+
+
 @dataclass
 class ClientConfig:
     server_ip: str
@@ -62,18 +69,21 @@ class IntercomClient:
 
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
-            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, int(CLIENT_UDP_SOCKET_BUFFER_BYTES))
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, int(CLIENT_UDP_SOCKET_BUFFER_BYTES))
         except Exception:
             pass
         self._sock.bind(("0.0.0.0", 0))
         self._server_addr = (self.config.server_ip, int(self.config.server_port))
-        self._sock.settimeout(0.5)
+        self._sock.settimeout(0.2)
 
         self._enc = OpusEncoder()
         self._dec = OpusDecoder()
 
-        self._jb = OpusPacketJitterBuffer(start_frames=3, max_frames=60)
+        self._jb = OpusPacketJitterBuffer(
+            start_frames=int(CLIENT_JB_START_FRAMES),
+            max_frames=int(CLIENT_JB_MAX_FRAMES),
+        )
 
         self._opus_ok: bool = True
         self._opus_err: str = ""
@@ -533,13 +543,14 @@ class IntercomClient:
     def _control_loop(self) -> None:
         backoff_s = 1.0
         liveness_timeout_s = 6.0
+        ping_interval_s = 0.25
 
         while not self._stop.is_set():
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(1.0)
                 sock.connect((self.config.server_ip, int(self.config.control_port or 0)))
-                sock.settimeout(0.5)
+                sock.settimeout(0.2)
                 self._ctrl_sock = sock
                 self._ctrl_connected = True
                 self._ctrl_last_rx_monotonic = time.monotonic()
@@ -565,7 +576,7 @@ class IntercomClient:
                     if now - float(self._ctrl_last_rx_monotonic) >= float(liveness_timeout_s):
                         logger.debug("control liveness timeout (no rx for {:.1f}s)", float(liveness_timeout_s))
                         break
-                    if now - float(self._ctrl_last_tx_monotonic) >= 2.0:
+                    if now - float(self._ctrl_last_tx_monotonic) >= float(ping_interval_s):
                         try:
                             self._control_send(sock, {"type": "ping", "t": int(time.time() * 1000)})
                             self._ctrl_last_tx_monotonic = now
@@ -923,6 +934,24 @@ class IntercomClient:
         if out_sr != int(SAMPLE_RATE):
             outdata[:] = 0
             return
+
+        try:
+            jb_buf = int(self._jb.buffered_frames)
+        except Exception:
+            jb_buf = 0
+        if jb_buf > int(CLIENT_JB_TRIM_TARGET_FRAMES + 2):
+            to_drop = int(jb_buf - int(CLIENT_JB_TRIM_TARGET_FRAMES))
+            dropped = 0
+            for _ in range(max(0, to_drop)):
+                try:
+                    stale = self._jb.pop()
+                except Exception:
+                    break
+                if stale is None:
+                    break
+                dropped += 1
+            if dropped > 0:
+                logger.debug("realtime trim: dropped {} queued frames (jb_buf={})", dropped, jb_buf)
 
         y_net = np.zeros((int(frames),), dtype=np.float32)
         off = 0
