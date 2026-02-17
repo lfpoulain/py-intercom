@@ -16,6 +16,14 @@ Depuis la racine du repo :
 docker compose -f docker/docker-compose.yml up -d --build
 ```
 
+Ou depuis le dossier `docker/` :
+
+```bash
+docker compose up -d --build
+```
+
+Structure attendue (important) : `docker-compose.yml` et le sous-dossier `web/` doivent être au même niveau.
+
 Au démarrage, le conteneur :
 
 1. clone le repo depuis Gitea si absent,

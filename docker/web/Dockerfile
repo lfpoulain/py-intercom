@@ -10,11 +10,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git libopus0 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY docker/web/requirements.txt /tmp/requirements.txt
+COPY web/requirements.txt /tmp/requirements.txt
 RUN python -m pip install --upgrade pip \
     && pip install -r /tmp/requirements.txt
 
-COPY docker/web/entrypoint.sh /usr/local/bin/web-entrypoint.sh
+COPY web/entrypoint.sh /usr/local/bin/web-entrypoint.sh
 RUN chmod +x /usr/local/bin/web-entrypoint.sh
 
 EXPOSE 8443

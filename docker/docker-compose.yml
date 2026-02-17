@@ -1,8 +1,8 @@
 services:
   py-intercom-web:
     build:
-      context: ..
-      dockerfile: docker/web/Dockerfile
+      context: .
+      dockerfile: web/Dockerfile
     container_name: py-intercom-web
     restart: unless-stopped
     environment:
