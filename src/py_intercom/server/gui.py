@@ -415,6 +415,20 @@ class ServerWindow(QtWidgets.QMainWindow):
     def _preset_paths(self) -> Path:
         return Path.home() / "py-intercom" / "server_preset.json"
 
+    def _save_return_preview_to_preset(self) -> None:
+        server_preset = self._preset_paths()
+        try:
+            data = read_json_file(server_preset)
+            if not isinstance(data, dict):
+                data = {}
+
+            dev = self._return_input_device.currentData()
+            data["return_enabled"] = bool(self._return_enabled.isChecked())
+            data["return_input_device"] = int(dev) if dev is not None else None
+            atomic_write_json(server_preset, data)
+        except Exception as e:
+            logger.debug("save return preview failed: {}", e)
+
     def _load_preset_preview(self) -> None:
         if self._server is not None:
             return
@@ -964,11 +978,13 @@ class ServerWindow(QtWidgets.QMainWindow):
 
     def _on_return_enabled_changed(self, state: int) -> None:
         if self._server is None:
+            self._save_return_preview_to_preset()
             return
         self._server.set_return_enabled(_is_checked(state))
 
     def _on_return_input_device_changed(self, _idx: int) -> None:
         if self._server is None:
+            self._save_return_preview_to_preset()
             return
         dev = self._return_input_device.currentData()
         self._server.set_return_input_device(int(dev) if dev is not None else None)

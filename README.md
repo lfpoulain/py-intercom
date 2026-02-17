@@ -13,10 +13,26 @@ Intercom audio temps réel sur LAN (architecture client/serveur).
 - Routing et mute par client, par bus.
 - PTT côté client en **mode par bus** (`always_on` / `ptt`) avec raccourcis clavier par bus.
 - Return bus configurable à chaud (activation + device d'entrée) pendant que le serveur tourne.
+- Return bus persisté côté serveur (`return_enabled`, `return_input_device`) dans `server_preset.json`.
 - Gains côté serveur simplifiés pour l'UX :
   - gain return fixe à `0 dB` (unity)
   - gain client effectif fixe à `0 dB` (unity)
 - Table clients serveur simplifiée : plus de colonne mode/gain.
+- Pipeline audio réglé pour rester proche du realtime (anti-backlog):
+  - jitter buffer client/serveur `start_frames=2`, `max_frames=12`
+  - politique "drop oldest, keep newest" en cas de saturation
+  - trim actif côté client si la file dérive
+  - output buffer serveur borné (~400 ms max)
+
+## Latence / mode realtime
+
+Le moteur préfère un micro-glitch ponctuel plutôt qu'une accumulation de latence.
+
+- Keepalive control client: ping ~250 ms, timeout control ~200 ms.
+- Buffers UDP client/serveur: 128 KB (RCV/SND).
+- Le jitter buffer démarre sur une fenêtre récente au lieu de rejouer un backlog ancien.
+
+En LAN stable, la latence cible reste typiquement de l'ordre de quelques dizaines de millisecondes.
 
 ## Prérequis
 

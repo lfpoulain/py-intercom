@@ -141,6 +141,11 @@ Types actuellement utilisés :
 - `ping`/`pong` (keepalive, le `pong` inclut `return_vu_dbfs`)
 - `kick` (serveur -> client)
 
+Fréquence keepalive actuelle (client):
+
+- ping toutes ~250 ms
+- timeout socket control à ~200 ms
+
 Note : le champ `udp_port` dans `hello` permet au serveur de connaître le port UDP du client dès la connexion TCP, sans attendre le premier paquet UDP. Cela résout le problème où un client en mode PTT devait appuyer une première fois sur PTT avant de recevoir l'audio.
 
 ### Auto-discovery (UDP broadcast)
@@ -184,12 +189,27 @@ Note importante :
 
 - Classe : `OpusPacketJitterBuffer` (`common/jitter_buffer.py`)
 - Bufferise les **payloads Opus bruts** (pas les PCM décodés) pour permettre le PLC Opus natif.
-- `start_frames` = 3 (30ms de buffering initial avant de commencer la lecture).
-- `max_frames` = 60.
+- Réglage realtime actuel (client + serveur):
+  - `start_frames` = 2 (~20ms de buffering initial)
+  - `max_frames` = 12 (~120ms max dans la JB)
 - Thread-safe (lock interne) : le thread RX push, le callback audio pop.
 - **Fast-forward** : quand `expected_seq` est loin derrière le buffer (gap > `start_frames`), saute directement au frame le plus proche au lieu de crawler +1 par pop.
 - **PLC** : pour les petits gaps (1-3 frames manquants), retourne `b""` que le décodeur Opus interprète comme Packet Loss Concealment.
 - Le décodage Opus se fait dans le callback audio (pas dans le thread RX), ce qui garantit un rythme de décodage fixe.
+- Politique anti-latence:
+  - au démarrage du playout, la JB démarre sur une fenêtre récente (pas le plus vieux paquet),
+  - en overflow, la JB jette d'abord les paquets les plus anciens en attente.
+
+### Politique realtime anti-backlog
+
+- Buffers UDP client/serveur réduits à 128 KB (RCV/SND).
+- Côté client:
+  - trim actif de la JB (cible ~4 frames) si une dérive apparaît,
+  - timeout UDP court (~200 ms) pour limiter l'accumulation latente.
+- Côté serveur:
+  - `mix_queue` bornée (12 frames) avec politique "drop oldest, keep newest" si saturation,
+  - queue return bornée (20 frames) et sélection de la frame return la plus récente au broadcast,
+  - buffer output borné à ~400 ms max (au lieu de plusieurs secondes).
 
 ### Encodeur par client (serveur)
 
@@ -296,11 +316,16 @@ Conseil : garder un device de sortie "VMix" séparé (VB-Cable) en output serveu
 | Composant | Valeur |
 |---|---|
 | Frame Opus | 10 ms |
-| Jitter buffer (3 × 10ms) | 30 ms |
+| Jitter buffer (2 × 10ms) | 20 ms |
 | Driver WASAPI shared | ~10-20 ms |
 | Réseau LAN | ~1-2 ms |
 | Codec Opus (encode+decode) | < 3 ms |
-| **Total estimé** | **~50-60 ms** |
+| **Total estimé** | **~35-55 ms** |
+
+Notes:
+
+- La chaîne est réglée pour rester proche du temps réel (préférence au "drop" de vieux paquets plutôt qu'à l'accumulation de délai).
+- En cas de jitter réseau/driver sévère, le système peut produire un micro-glitch ponctuel au lieu d'augmenter durablement la latence.
 
 ## 10) VU mètres
 
@@ -331,6 +356,11 @@ Conseil : garder un device de sortie "VMix" séparé (VB-Cable) en output serveu
 - Si tu vois des `Underflows` côté serveur (dans `i`) :
   - augmenter la latence/buffer au niveau driver/device (Windows)
   - essayer un autre host API/device
+
+- Si tu observes une latence variable au démarrage :
+  - côté client, surveiller `jb_buf`, `playback_samples`, `jb_missing`, `playout_underflows` (logs debug)
+  - côté serveur, surveiller `mix_q`, `underflows`, `return_q`
+  - vérifier que les streams audio s'ouvrent bien en `latency=low`
 
 - Si la connexion “semble” OK mais pas de contrôle :
   - vérifier que le TCP control est joignable sur `5001` (pare-feu Windows)

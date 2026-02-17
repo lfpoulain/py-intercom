@@ -312,6 +312,10 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._disconnect_btn.setEnabled(False)
 
         self._mute = QtWidgets.QCheckBox("Mute mic")
+        try:
+            self._mute.setChecked(bool(self._preset_get("muted", False)))
+        except Exception:
+            self._mute.setChecked(False)
         self._mute.setEnabled(False)
 
         self._listen_return_bus = QtWidgets.QCheckBox("Listen return bus")
@@ -322,32 +326,45 @@ class ClientWindow(QtWidgets.QMainWindow):
             pass
 
         self._sidetone = QtWidgets.QCheckBox("Sidetone (hear self locally)")
+        try:
+            self._sidetone.setChecked(bool(self._preset_get("sidetone_enabled", False)))
+        except Exception:
+            self._sidetone.setChecked(False)
         self._sidetone.setEnabled(False)
 
         self._sidetone_gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self._sidetone_gain.setMinimum(-60)
         self._sidetone_gain.setMaximum(0)
-        self._sidetone_gain.setValue(-12)
+        try:
+            self._sidetone_gain.setValue(int(self._preset_get("sidetone_gain_db", -12)))
+        except Exception:
+            self._sidetone_gain.setValue(-12)
         self._sidetone_gain.setEnabled(False)
-        self._sidetone_gain_lbl = QtWidgets.QLabel("-12 dB")
+        self._sidetone_gain_lbl = QtWidgets.QLabel(f"{int(self._sidetone_gain.value())} dB")
         self._sidetone_gain_lbl.setFixedWidth(50)
         self._sidetone_gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
 
         self._mic_gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self._mic_gain.setMinimum(-60)
         self._mic_gain.setMaximum(12)
-        self._mic_gain.setValue(0)
+        try:
+            self._mic_gain.setValue(int(self._preset_get("input_gain_db", 0)))
+        except Exception:
+            self._mic_gain.setValue(0)
         self._mic_gain.setEnabled(False)
-        self._mic_gain_lbl = QtWidgets.QLabel("0 dB")
+        self._mic_gain_lbl = QtWidgets.QLabel(f"{int(self._mic_gain.value())} dB")
         self._mic_gain_lbl.setFixedWidth(50)
         self._mic_gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
 
         self._hp_gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self._hp_gain.setMinimum(-60)
         self._hp_gain.setMaximum(12)
-        self._hp_gain.setValue(0)
+        try:
+            self._hp_gain.setValue(int(self._preset_get("output_gain_db", 0)))
+        except Exception:
+            self._hp_gain.setValue(0)
         self._hp_gain.setEnabled(False)
-        self._hp_gain_lbl = QtWidgets.QLabel("0 dB")
+        self._hp_gain_lbl = QtWidgets.QLabel(f"{int(self._hp_gain.value())} dB")
         self._hp_gain_lbl.setFixedWidth(50)
         self._hp_gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
 
@@ -1394,6 +1411,10 @@ class ClientWindow(QtWidgets.QMainWindow):
                     pass
 
     def _on_mute_changed(self, state: int) -> None:
+        try:
+            self._preset_set("muted", bool(_is_checked(state)))
+        except Exception:
+            pass
         if self._client is None:
             return
         self._client.set_muted(_is_checked(state))
@@ -1413,23 +1434,39 @@ class ClientWindow(QtWidgets.QMainWindow):
 
     def _on_mic_gain_changed(self, value: int) -> None:
         self._mic_gain_lbl.setText(f"{value} dB")
+        try:
+            self._preset_set("input_gain_db", float(value))
+        except Exception:
+            pass
         if self._client is None:
             return
         self._client.set_input_gain_db(float(value))
 
     def _on_hp_gain_changed(self, value: int) -> None:
         self._hp_gain_lbl.setText(f"{value} dB")
+        try:
+            self._preset_set("output_gain_db", float(value))
+        except Exception:
+            pass
         if self._client is None:
             return
         self._client.set_output_gain_db(float(value))
 
     def _on_sidetone_changed(self, state: int) -> None:
+        try:
+            self._preset_set("sidetone_enabled", bool(_is_checked(state)))
+        except Exception:
+            pass
         if self._client is None:
             return
         self._client.set_sidetone_enabled(_is_checked(state))
 
     def _on_sidetone_gain_changed(self, value: int) -> None:
         self._sidetone_gain_lbl.setText(f"{value} dB")
+        try:
+            self._preset_set("sidetone_gain_db", float(value))
+        except Exception:
+            pass
         if self._client is None:
             return
         self._client.set_sidetone_gain_db(float(value))
