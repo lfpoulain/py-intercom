@@ -24,6 +24,7 @@ CLIENT_UDP_SOCKET_BUFFER_BYTES = 128 * 1024
 CLIENT_JB_START_FRAMES = 2
 CLIENT_JB_MAX_FRAMES = 12
 CLIENT_JB_TRIM_TARGET_FRAMES = 4
+CLIENT_CONTROL_MAX_LINE_BYTES = 64 * 1024
 
 
 @dataclass
@@ -588,6 +589,12 @@ class IntercomClient:
                         if not chunk:
                             break
                         buf += chunk
+                        if len(buf) > int(CLIENT_CONTROL_MAX_LINE_BYTES):
+                            logger.debug(
+                                "control buffer overflow (>{} bytes), reconnecting",
+                                int(CLIENT_CONTROL_MAX_LINE_BYTES),
+                            )
+                            break
                     except socket.timeout:
                         continue
                     except Exception:

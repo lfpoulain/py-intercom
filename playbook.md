@@ -145,6 +145,11 @@ Fréquence keepalive actuelle (client):
 
 - ping toutes ~250 ms
 - timeout socket control à ~200 ms
+- buffer de ligne JSON control borné à 64 KB (client/serveur/bridge web)
+
+Comportement serveur sur état control stale:
+
+- en mode PTT, si le control d'un client est périmé (pas de mise à jour depuis ~2 s), le serveur ne bloque pas la voix sur un état PTT potentiellement obsolète et retombe sur le gating côté présence audio.
 
 Note : le champ `udp_port` dans `hello` permet au serveur de connaître le port UDP du client dès la connexion TCP, sans attendre le premier paquet UDP. Cela résout le problème où un client en mode PTT devait appuyer une première fois sur PTT avant de recevoir l'audio.
 
@@ -410,6 +415,12 @@ Par défaut, `run_web.py` (sans arguments) lance en **HTTPS adhoc** sur le port 
 - **TX** : micro → `ScriptProcessor` (capture à `sampleRate` du contexte) → resample linéaire vers 48kHz (avec tracking de phase) → découpe en frames de 480 samples → conversion float32 → int16 LE → Socket.IO `audio_in` → bridge encode Opus → UDP vers serveur.
 - **RX** : serveur envoie mix-minus UDP → bridge `OpusPacketJitterBuffer` → playout thread (tick 10ms) → décode Opus → float32 → int16 LE → Socket.IO `audio_out` → frontend int16→float32 → resample vers contexte SR → `playQueue` → `ScriptProcessor` → `GainNode` → haut-parleur.
 
+Réglages realtime actuels du bridge web (alignés sur client Python) :
+
+- JB Opus : `start_frames=2`, `max_frames=12`, trim actif cible ~4 frames
+- Buffers UDP : 128 KB (RCV/SND)
+- Control TCP : ping ~250 ms, timeout socket ~200 ms, buffer ligne JSON borné à 64 KB
+
 ### Fonctionnalités
 
 - **PTT** : bouton + raccourci `Espace` (touch-friendly sur mobile)
@@ -452,8 +463,8 @@ Le client web est accessible à `https://<ip>:8443/` (HTTPS).
 |---|---|
 | WebAudio ScriptProcessor buffer | ~42ms (2048 samples @ 48kHz) |
 | Socket.IO WebSocket round-trip | ~1-5ms (LAN) |
-| Bridge jitter buffer | 30ms (3 × 10ms) |
-| **Surcoût total estimé** | **~75-80ms** |
+| Bridge jitter buffer | ~20ms (2 × 10ms) |
+| **Surcoût total estimé** | **~65-70ms** |
 
 ## 14) Roadmap (non implémenté)
 

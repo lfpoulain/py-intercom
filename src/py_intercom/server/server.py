@@ -30,6 +30,8 @@ SERVER_CLIENT_JB_TRIM_TARGET_FRAMES = 4
 SERVER_MIX_QUEUE_MAX_FRAMES = 12
 SERVER_RETURN_QUEUE_MAX_FRAMES = 20
 SERVER_OUTPUT_BUFFER_MAX_MS = 400
+SERVER_CONTROL_STALE_TIMEOUT_S = 2.0
+SERVER_CONTROL_MAX_LINE_BYTES = 64 * 1024
 
 
 @dataclass
@@ -1119,6 +1121,13 @@ class IntercomServer:
                     if not chunk:
                         break
                     buf += chunk
+                    if len(buf) > int(SERVER_CONTROL_MAX_LINE_BYTES):
+                        logger.debug(
+                            "control buffer overflow from {} (>{} bytes), closing session",
+                            addr,
+                            int(SERVER_CONTROL_MAX_LINE_BYTES),
+                        )
+                        break
                 except socket.timeout:
                     continue
                 except Exception:
@@ -1511,6 +1520,7 @@ class IntercomServer:
                                 st2.vu_dbfs = float(vu)
 
                 bus_mixes: Dict[int, np.ndarray] = {}
+                now_mono = time.monotonic()
 
                 def _client_active_for_bus(cid: int, bus_id: int) -> bool:
                     meta = client_meta.get(int(cid))
@@ -1520,9 +1530,15 @@ class IntercomServer:
                     if bool(mute_buses.get(int(bus_id), False)):
                         return False
                     if str(mode) == "ptt":
-                        # If control is disconnected, we may not receive PTT state updates.
+                        # If control is disconnected or stale, we may not receive PTT state updates.
                         # In that case, rely on client-side gating (audio presence) and do not block.
-                        if not bool(ctrl_ok):
+                        control_fresh = bool(ctrl_ok)
+                        if control_fresh:
+                            try:
+                                control_fresh = (now_mono - float(last_ctrl)) <= float(SERVER_CONTROL_STALE_TIMEOUT_S)
+                            except Exception:
+                                control_fresh = False
+                        if not control_fresh:
                             return True
                         return bool(ptt_buses.get(int(bus_id), False))
                     return True

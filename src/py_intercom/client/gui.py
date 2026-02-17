@@ -464,6 +464,9 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._show_all_devices.stateChanged.connect(lambda _: self._start_device_refresh())
         self._connect_btn.clicked.connect(self._connect)
         self._disconnect_btn.clicked.connect(self._disconnect)
+        self._server_ip.editingFinished.connect(self._on_connection_fields_changed)
+        self._server_port.valueChanged.connect(lambda _value: self._on_connection_fields_changed())
+        self._name.editingFinished.connect(self._on_connection_fields_changed)
 
         self._mute.stateChanged.connect(self._on_mute_changed)
         self._listen_return_bus.stateChanged.connect(self._on_listen_return_bus_changed)
@@ -879,6 +882,17 @@ class ClientWindow(QtWidgets.QMainWindow):
             return
         self._preset_save()
 
+    def _on_connection_fields_changed(self) -> None:
+        try:
+            if not isinstance(self._preset, dict):
+                self._preset = {}
+            self._preset["server_ip"] = str(self._server_ip.text().strip())
+            self._preset["server_port"] = int(self._server_port.value())
+            self._preset["name"] = str(self._name.text().strip())
+        except Exception:
+            return
+        self._preset_save()
+
     def _on_ptt_bus_key_changed(self, bus_id: int) -> None:
         if int(bus_id) not in self._ptt_bus_keys:
             return
@@ -1061,6 +1075,10 @@ class ClientWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         # Full stop: network + audio streams
+        try:
+            self._on_connection_fields_changed()
+        except Exception:
+            pass
         try:
             self._stop_discovery_listener()
         except Exception:
