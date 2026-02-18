@@ -73,6 +73,14 @@ select option {
   color: var(--accent);
 }
 
+.logo-img {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  object-fit: cover;
+  box-shadow: 0 0 0 1px var(--border2);
+}
+
 .topbar-title {
   font-size: 17px;
   font-weight: 700;
@@ -188,8 +196,6 @@ select option {
 .input:focus { border-color: var(--accent); }
 .input::placeholder { color: rgba(139,157,195,0.5); }
 
-.input-port { width: 90px; flex-shrink: 0; }
-
 .server-row {
   display: flex;
   gap: 6px;
@@ -238,7 +244,6 @@ select option {
   gap: 4px;
 }
 .ip-port-row .input:first-child { flex: 1; }
-.ip-sep { color: var(--text2); font-size: 16px; font-weight: 300; }
 
 .field-row {
   display: flex;
@@ -310,35 +315,12 @@ select option {
 }
 .btn-ptt.active svg { color: #fff; }
 
-/* Mute button */
-.btn-mute {
-  display: inline-flex;
-  width: 80px;
-  height: 72px;
-  touch-action: manipulation;
-  flex-direction: column;
-  gap: 3px;
-  font-size: 11px;
-  font-weight: 600;
-  border-radius: var(--radius);
-  background: var(--surface2);
-  color: var(--text2);
-  border: 2px solid var(--border2);
-  user-select: none;
-  -webkit-user-select: none;
-}
-.btn-mute svg { width: 20px; height: 20px; }
-.btn-mute:not(:disabled):hover { border-color: var(--warn); }
-.btn-mute.active {
-  background: var(--warn);
-  border-color: var(--warn);
-  color: #1a1000;
-}
-
-.controls-row {
-  display: flex;
+/* PTT grid */
+.ptt-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 .shortcuts-hint {
@@ -347,6 +329,30 @@ select option {
   color: var(--text2);
   margin-bottom: 14px;
   opacity: 0.7;
+}
+
+.listen-row {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.toggle {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text2);
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border2);
+  padding: 6px 10px;
+  border-radius: 999px;
+}
+
+.toggle input {
+  accent-color: var(--accent);
 }
 
 kbd {
@@ -484,7 +490,7 @@ kbd {
   .app { padding: 0 10px 16px; }
   .card-body { padding: 12px; }
   .btn-ptt { height: 80px; font-size: 20px; }
-  .btn-mute { height: 80px; width: 90px; }
+  .ptt-grid { grid-template-columns: 1fr; }
   .input { font-size: 16px; } /* prevent iOS zoom on focus */
   .discovery-select { font-size: 16px; }
 }

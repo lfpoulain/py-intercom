@@ -9,14 +9,14 @@ Intercom audio temps réel sur LAN (architecture client/serveur).
 
 ## État actuel (résumé)
 
-- Bus **dynamiques** côté serveur avec types `communication` (Régie) et `diffusion` (Plateau/VMix/etc.).
-- Routing et mute par client, par bus.
-- PTT côté client en **mode par bus** (`always_on` / `ptt`) avec raccourcis clavier par bus.
+- Bus **fixes** : Régie (bus 0, bidirectionnel), Plateau (bus 1), VMix (bus 2).
+- PTT côté client **par bus uniquement**.
+- Écoute : toggle séparé pour **Régie** et **Return bus**.
 - Return bus configurable à chaud (activation + device d'entrée) pendant que le serveur tourne.
 - Gains côté serveur simplifiés pour l'UX :
   - gain return fixe à `0 dB` (unity)
   - gain client effectif fixe à `0 dB` (unity)
-- Table clients serveur simplifiée : plus de colonne mode/gain.
+- Ports audio/contrôle **fixes** (5000/5001).
 
 ## Prérequis
 
@@ -120,9 +120,9 @@ Options : `--host`, `--port`, `--debug`, `--ssl-adhoc`, `--ssl-cert`, `--ssl-key
 
 ## Ports
 
-- Audio (UDP): `5000` (par défaut)
-- Contrôle (TCP): `5001` (par défaut)
-- Discovery (UDP broadcast): `5002` (par défaut)
+- Audio (UDP): `5000` (fixe)
+- Contrôle (TCP): `5001` (fixe)
+- Discovery (UDP broadcast): `5002` (fixe)
 - Client Web (HTTPS): `8443` (par défaut)
 
 ## Presets

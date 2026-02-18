@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>py-intercom — Client Web</title>
+    <link rel="icon" type="image/png" href="/img/logo.png" />
     <link rel="stylesheet" href="/static/style.css" />
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
   </head>
@@ -12,7 +13,7 @@
       <!-- Header bar -->
       <header class="topbar">
         <div class="topbar-left">
-          <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+          <img class="logo-img" src="/img/logo.png" alt="py-intercom" />
           <span class="topbar-title">py-intercom</span>
           <span class="topbar-badge">web</span>
         </div>
@@ -44,22 +45,11 @@
               </div>
               <div class="ip-port-row">
                 <input id="serverIp" class="input" placeholder="192.168.1.10" />
-                <span class="ip-sep">:</span>
-                <input id="serverPort" class="input input-port" type="number" value="5000" />
               </div>
             </div>
-            <div class="field-row">
-              <div class="field-group field-half">
-                <label class="field-label">Nom</label>
-                <input id="name" class="input" placeholder="Plateau" />
-              </div>
-              <div class="field-group field-half">
-                <label class="field-label">Mode</label>
-                <select id="mode" class="input">
-                  <option value="ptt" selected>Push-to-Talk</option>
-                  <option value="always_on">Always-on</option>
-                </select>
-              </div>
+            <div class="field-group">
+              <label class="field-label">Nom</label>
+              <input id="name" class="input" placeholder="Plateau" />
             </div>
             <div class="connect-actions">
               <button id="btnConnect" class="btn btn-primary btn-lg">
@@ -79,20 +69,31 @@
             <span id="statusLine" class="status-badge">Déconnecté</span>
           </div>
           <div class="card-body">
-            <!-- PTT + Mute -->
-            <div class="controls-row">
-              <button id="btnPtt" class="btn btn-ptt" disabled>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
-                <span class="ptt-label">PTT</span>
+            <!-- PTT buses -->
+            <div class="ptt-grid">
+              <button id="btnBus0" class="btn btn-ptt" data-bus-id="0" disabled>
+                <span class="ptt-label">Régie</span>
               </button>
-              <button id="btnMute" class="btn btn-mute" disabled>
-                <svg id="muteIconOff" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
-                <svg id="muteIconOn" class="hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" x2="22" y1="2" y2="22"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
-                <span id="muteLabel">Mute</span>
+              <button id="btnBus1" class="btn btn-ptt" data-bus-id="1" disabled>
+                <span class="ptt-label">Plateau</span>
+              </button>
+              <button id="btnBus2" class="btn btn-ptt" data-bus-id="2" disabled>
+                <span class="ptt-label">VMix</span>
               </button>
             </div>
             <div class="shortcuts-hint">
-              <kbd>Espace</kbd> PTT &nbsp;&middot;&nbsp; <kbd>M</kbd> Mute
+              <kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> PTT &nbsp;&middot;&nbsp; <kbd>Espace</kbd> Régie
+            </div>
+
+            <div class="listen-row">
+              <label class="toggle">
+                <input id="listenRegie" type="checkbox" checked />
+                <span>Écoute Régie</span>
+              </label>
+              <label class="toggle">
+                <input id="listenReturnBus" type="checkbox" />
+                <span>Écoute retour</span>
+              </label>
             </div>
 
             <!-- VU Meters -->

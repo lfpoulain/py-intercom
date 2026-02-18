@@ -3,16 +3,17 @@ from __future__ import annotations
 import atexit
 import secrets
 import threading
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict
 
 import numpy as np
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, send_from_directory
 from flask_socketio import SocketIO, emit
 from loguru import logger
 
 from ..common.audio import float32_to_int16_bytes
-from ..common.constants import FRAME_SAMPLES
+from ..common.constants import AUDIO_UDP_PORT, FRAME_SAMPLES
 from ..common.discovery import DiscoveryListener
 from .bridge import BridgeConfig, IntercomBridge
 
@@ -54,6 +55,11 @@ def create_app() -> tuple[Flask, SocketIO]:
     @app.get("/")
     def index():
         return render_template("index.html")
+
+    @app.get("/img/<path:filename>")
+    def img_asset(filename: str):
+        base_dir = Path(__file__).resolve().parents[1] / "img"
+        return send_from_directory(base_dir, filename)
 
     @app.get("/api/discovery")
     def api_discovery():
@@ -106,17 +112,13 @@ def create_app() -> tuple[Flask, SocketIO]:
             return
 
         server_ip = str(data.get("server_ip") or "").strip()
-        try:
-            server_port = int(data.get("server_port") or 0)
-        except Exception:
-            server_port = 0
-
         name = str(data.get("name") or "plateau").strip()
         client_uuid = str(data.get("client_uuid") or "").strip() or secrets.token_hex(16)
-        mode = str(data.get("mode") or "ptt").strip() or "ptt"
+        listen_return_bus = bool(data.get("listen_return_bus", False))
+        listen_regie = bool(data.get("listen_regie", True))
 
-        if not server_ip or server_port <= 0:
-            emit("server", {"type": "error", "message": "server_ip/server_port required"})
+        if not server_ip:
+            emit("server", {"type": "error", "message": "server_ip required"})
             return
 
         _stop_session(sid)
@@ -149,7 +151,13 @@ def create_app() -> tuple[Flask, SocketIO]:
             # Defer stop to avoid calling stop() from within bridge control thread
             threading.Thread(target=_stop_session, args=(sid,), daemon=True).start()
 
-        cfg = BridgeConfig(server_ip=server_ip, server_port=int(server_port), name=name, mode=mode)
+        cfg = BridgeConfig(
+            server_ip=server_ip,
+            server_port=int(AUDIO_UDP_PORT),
+            name=name,
+            listen_return_bus=bool(listen_return_bus),
+            listen_regie=bool(listen_regie),
+        )
         bridge = IntercomBridge(client_uuid=client_uuid, config=cfg, on_audio_frame=_on_audio_frame, on_control_msg=_on_control_msg, on_kick=_on_kick)
         bridge.start()
 
@@ -165,8 +173,7 @@ def create_app() -> tuple[Flask, SocketIO]:
                 "client_uuid": client_uuid,
                 "client_id": int(bridge.client_id),
                 "server_ip": server_ip,
-                "server_port": int(server_port),
-                "mode": mode,
+                "server_port": int(AUDIO_UDP_PORT),
                 "name": name,
             },
         )
@@ -177,49 +184,53 @@ def create_app() -> tuple[Flask, SocketIO]:
         _stop_session(sid)
         emit("server", {"type": "left"})
 
-    @socketio.on("ptt")
-    def on_ptt(data: Any):
+    @socketio.on("ptt_bus")
+    def on_ptt_bus(data: Any):
         sid = str(request.sid)
         active = False
+        bus_id = None
         if isinstance(data, dict):
             active = bool(data.get("active"))
+            bus_id = data.get("bus_id")
         with sessions_lock:
             sess = sessions.get(sid)
         if sess is None:
             return
         try:
-            sess.bridge.set_state(ptt_active=bool(active))
+            if bus_id is not None:
+                sess.bridge.set_ptt_bus(int(bus_id), bool(active))
         except Exception:
             pass
 
-    @socketio.on("mute")
-    def on_mute(data: Any):
+    @socketio.on("listen_return_bus")
+    def on_listen_return_bus(data: Any):
         sid = str(request.sid)
-        muted = False
+        enabled = False
         if isinstance(data, dict):
-            muted = bool(data.get("muted"))
+            enabled = bool(data.get("enabled"))
         with sessions_lock:
             sess = sessions.get(sid)
         if sess is None:
             return
         try:
-            sess.bridge.set_state(muted=bool(muted))
+            sess.bridge.set_listen_return_bus(bool(enabled))
         except Exception:
             pass
 
-    @socketio.on("mode")
-    def on_mode(data: Any):
+    @socketio.on("listen_regie")
+    def on_listen_regie(data: Any):
         sid = str(request.sid)
-        if not isinstance(data, dict):
-            return
-        mode = str(data.get("mode") or "").strip()
-        if mode not in ("ptt", "always_on"):
-            return
+        enabled = False
+        if isinstance(data, dict):
+            enabled = bool(data.get("enabled"))
         with sessions_lock:
             sess = sessions.get(sid)
         if sess is None:
             return
-        sess.bridge.config.mode = mode
+        try:
+            sess.bridge.set_listen_regie(bool(enabled))
+        except Exception:
+            pass
 
     @socketio.on("audio_in")
     def on_audio_in(pcm: Any):

@@ -2,22 +2,22 @@
 
 ---
 
-## 1. Les deux types de bus
+## 1. Les bus fixes
 
-### Bus de Communication (Régie)
+### Bus Régie (0)
 
 Canal bidirectionnel permanent. Tout le monde en régie l'entend en continu. C'est le "canal d'équipe".
 
-- Écoute automatique pour tous les clients abonnés
+- Écoute activable par client (toggle "Écoute Régie")
 - Le serveur mix les flux de tous les membres et envoie à chacun (sans son propre flux = pas d'écho)
 - Les présentateurs qui répondent via micro intercom arrivent ici
 - Pas d'output device externe, c'est du casque client uniquement
 
-### Bus de Diffusion (Plateau, VMix, etc.)
+### Bus de Diffusion (Plateau = 1, VMix = 2)
 
 Canal unidirectionnel vers un output device. Personne ne "s'abonne" pour écouter. C'est un "tuyau de sortie".
 
-- Activé par PTT ou always-on côté client
+- Activé par PTT côté client
 - Envoie le mix vers un ou plusieurs outputs (VB-Cable, etc.)
 - Toggle serveur : "Renvoyer dans Régie" (défaut : oui)
 - Le serveur mix les sources assignées et push vers les outputs
@@ -33,10 +33,9 @@ Canal unidirectionnel vers un output device. Personne ne "s'abonne" pour écoute
 | Fonction | Description |
 |----------|-------------|
 | Input | 1 micro sélectionné |
-| Mode micro | PTT (par bus) ou Always-On (par bus) |
+| Mode micro | PTT (par bus uniquement) |
 | Envoi | Flux audio vers le serveur (silence si aucun PTT actif) |
-| Écoute | Bus Régie uniquement (mix reçu du serveur) |
-| Sidetone | Retour local de son propre micro dans le casque |
+| Écoute | Bus Régie + Return bus si activés |
 | PTT par bus | Peut PTT dans plusieurs bus de diffusion simultanément |
 
 ### Serveur (machine régie)
@@ -54,7 +53,7 @@ Canal unidirectionnel vers un output device. Personne ne "s'abonne" pour écoute
 
 | Output | Rôle |
 |--------|------|
-| Casque client | Reçoit le mix du Bus Régie + sidetone local |
+| Casque client | Reçoit le mix du Bus Régie (+ return si activé) |
 | VB-Cable 1 | Reçoit le mix du Bus Plateau → VMix |
 | VB-Cable 2 | Reçoit le mix du Bus VMix → VMix |
 | Autres | Tout output ajouté dynamiquement, un bus peut avoir plusieurs outputs |
@@ -66,10 +65,10 @@ Canal unidirectionnel vers un output device. Personne ne "s'abonne" pour écoute
 ### Flux 1 : Client vers Serveur
 
 ```
-Micro Client → [PTT actif ou Always-On ?] → Encode Opus → Serveur (UDP)
+Micro Client → [PTT actif ?] → Encode Opus → Serveur (UDP)
 ```
 
-Si aucun PTT actif et pas en always-on → le client envoie du silence (ou rien).
+Si aucun PTT actif → le client envoie du silence (ou rien).
 
 ### Flux 2 : Serveur mix Régie vers Client
 
@@ -77,7 +76,7 @@ Si aucun PTT actif et pas en always-on → le client envoie du silence (ou rien)
 Serveur reçoit flux → Mix Bus Régie → Déduplique (exclut flux du destinataire) → Casque Client
 ```
 
-L'assistant reçoit le mix Régie SANS son propre flux dedans (pas d'écho, le sidetone est géré localement).
+L'assistant reçoit le mix Régie SANS son propre flux dedans (pas d'écho).
 
 ### Flux 3 : Serveur mix Diffusion vers Output
 
@@ -114,8 +113,7 @@ Comment le serveur construit le mix pour chaque client :
 | Action | Client | Serveur | Notes |
 |--------|--------|---------|-------|
 | Capture micro | ✓ | — | Encode Opus, envoie en UDP |
-| Décision PTT / Always-On | ✓ | — | Par bus de diffusion, côté client |
-| Sidetone (retour micro local) | ✓ | — | Pur local, pas de réseau |
+| Décision PTT | ✓ | — | Par bus, côté client |
 | Assigner un client à un bus | — | ✓ | Matrice checkboxes sur l'UI serveur |
 | Mixer les flux audio | — | ✓ | Un mix par client (Régie) + un mix par output (Diffusion) |
 | Déduplication | — | ✓ | Exclut le flux propre + déduplique les renvois |
@@ -140,12 +138,12 @@ Comment le serveur construit le mix pour chaque client :
 5. Toggle "Renvoyer dans Régie" = ON → le serveur copie le flux dans le **Bus Régie**
 6. L'assistant entend le réal parler au plateau via son casque `BUS RÉGIE`
 
-### Scénario B : Le réal parle à la régie en continu
+### Scénario B : Le réal parle à la régie (PTT Régie)
 
-1. Le réal est en **always-on sur Bus Régie**
-2. Son flux est envoyé en permanence au serveur
+1. Le réal maintient le **PTT Régie**
+2. Son flux est envoyé au serveur pendant l’appui
 3. Le serveur mix et envoie à **l'assistant** (sans le flux de l'assistant lui-même)
-4. Le réal n'entend PAS son propre flux dans le Bus Régie (sidetone local uniquement)
+4. Le réal n'entend PAS son propre flux dans le Bus Régie
 
 ### Scénario C : Le réal parle au live (VMix) sans que le plateau sache
 
@@ -172,11 +170,11 @@ Comment le serveur construit le mix pour chaque client :
 
 ## 7. Règles de routage du serveur
 
-**Règle 1 — Exclusion du propre flux :** Quand le serveur construit le mix du Bus Régie pour un client X, il exclut le flux de X. Le sidetone est géré en local par le client.
+**Règle 1 — Exclusion du propre flux :** Quand le serveur construit le mix du Bus Régie pour un client X, il exclut le flux de X.
 
 **Règle 2 — Déduplication intelligente :** Si un flux source est présent dans le Bus Régie ET dans un bus de diffusion renvoyé, il n'est inclus qu'une seule fois dans le mix envoyé au client.
 
-**Règle 3 — PTT côté client :** C'est le client qui décide quand envoyer son audio. Si aucun PTT actif et pas en always-on, le client n'envoie rien (économie réseau).
+**Règle 3 — PTT côté client :** C'est le client qui décide quand envoyer son audio. Si aucun PTT actif, le client n'envoie rien (économie réseau).
 
 **Règle 4 — Assignment côté serveur :** Le serveur décide quel client a accès à quel bus. Le client peut PTT dans un bus seulement si le serveur l'y a autorisé.
 
