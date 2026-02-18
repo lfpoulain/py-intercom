@@ -18,15 +18,6 @@ from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import pack_audio_packet, unpack_audio_packet
 
 
-WEB_BRIDGE_UDP_SOCKET_BUFFER_BYTES = 128 * 1024
-WEB_BRIDGE_JB_START_FRAMES = 2
-WEB_BRIDGE_JB_MAX_FRAMES = 12
-WEB_BRIDGE_JB_TRIM_TARGET_FRAMES = 4
-WEB_BRIDGE_CONTROL_MAX_LINE_BYTES = 64 * 1024
-WEB_BRIDGE_CONTROL_LIVENESS_TIMEOUT_S = 6.0
-WEB_BRIDGE_CONTROL_PING_INTERVAL_S = 0.25
-
-
 @dataclass
 class BridgeConfig:
     server_ip: str
@@ -58,10 +49,7 @@ class IntercomBridge:
 
         self._enc = OpusEncoder()
         self._dec = OpusDecoder()
-        self._jb = OpusPacketJitterBuffer(
-            start_frames=int(WEB_BRIDGE_JB_START_FRAMES),
-            max_frames=int(WEB_BRIDGE_JB_MAX_FRAMES),
-        )
+        self._jb = OpusPacketJitterBuffer(start_frames=3, max_frames=60)
 
         self._on_audio_frame = on_audio_frame
         self._on_control_msg = on_control_msg
@@ -69,8 +57,8 @@ class IntercomBridge:
 
         self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            self._udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, int(WEB_BRIDGE_UDP_SOCKET_BUFFER_BYTES))
-            self._udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, int(WEB_BRIDGE_UDP_SOCKET_BUFFER_BYTES))
+            self._udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+            self._udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
         except Exception:
             pass
         self._udp_sock.bind(("0.0.0.0", 0))
@@ -288,13 +276,13 @@ class IntercomBridge:
 
     def _control_loop(self) -> None:
         backoff_s = 1.0
-        liveness_timeout_s = float(WEB_BRIDGE_CONTROL_LIVENESS_TIMEOUT_S)
+        liveness_timeout_s = 6.0
         while not self._stop.is_set():
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(1.0)
                 sock.connect((self.config.server_ip, int(self.config.server_port) + int(CONTROL_PORT_OFFSET)))
-                sock.settimeout(0.2)
+                sock.settimeout(0.5)
 
                 self._ctrl_sock = sock
                 self._ctrl_connected = True
@@ -321,7 +309,7 @@ class IntercomBridge:
                     if now - float(last_rx) >= float(liveness_timeout_s):
                         logger.debug("web bridge control liveness timeout (no rx for {:.1f}s)", float(liveness_timeout_s))
                         break
-                    if now - last_ping >= float(WEB_BRIDGE_CONTROL_PING_INTERVAL_S):
+                    if now - last_ping >= 2.0:
                         try:
                             self._control_send(sock, {"type": "ping", "t": int(time.time() * 1000)})
                             last_ping = now
@@ -333,12 +321,6 @@ class IntercomBridge:
                         if not chunk:
                             break
                         buf += chunk
-                        if len(buf) > int(WEB_BRIDGE_CONTROL_MAX_LINE_BYTES):
-                            logger.debug(
-                                "web bridge control buffer overflow (>{} bytes), reconnecting",
-                                int(WEB_BRIDGE_CONTROL_MAX_LINE_BYTES),
-                            )
-                            break
                     except socket.timeout:
                         continue
                     except Exception:
@@ -407,20 +389,6 @@ class IntercomBridge:
             next_t += tick_s
             if next_t < now - 0.1:
                 next_t = now
-
-            try:
-                jb_buf = int(self._jb.buffered_frames)
-            except Exception:
-                jb_buf = 0
-            if jb_buf > int(WEB_BRIDGE_JB_TRIM_TARGET_FRAMES + 2):
-                to_drop = int(jb_buf - int(WEB_BRIDGE_JB_TRIM_TARGET_FRAMES))
-                for _ in range(max(0, to_drop)):
-                    try:
-                        stale = self._jb.pop()
-                    except Exception:
-                        break
-                    if stale is None:
-                        break
 
             try:
                 payload = self._jb.pop()

@@ -25,6 +25,7 @@ CLIENT_JB_START_FRAMES = 2
 CLIENT_JB_MAX_FRAMES = 12
 CLIENT_JB_TRIM_TARGET_FRAMES = 4
 CLIENT_CONTROL_MAX_LINE_BYTES = 64 * 1024
+CLIENT_PLC_GRACE_S = 0.12
 
 
 @dataclass
@@ -137,6 +138,7 @@ class IntercomClient:
         self._tx_socket_errors = 0
         self._rx_socket_errors = 0
         self._playout_underflows = 0
+        self._last_audio_rx_monotonic = 0.0
         self._last_stats_log = time.monotonic()
 
         self._in_stream: Optional[sd.InputStream] = None
@@ -383,6 +385,7 @@ class IntercomClient:
         self._rx_packets = 0
         self._tx_socket_errors = 0
         self._rx_socket_errors = 0
+        self._last_audio_rx_monotonic = 0.0
 
         # Restart network threads
         self._rx_thread = threading.Thread(target=self._rx_loop, name="udp-rx", daemon=True)
@@ -894,6 +897,7 @@ class IntercomClient:
                 self._jb.push(seq, payload)
             except Exception:
                 continue
+            self._last_audio_rx_monotonic = now
 
             now = time.monotonic()
             if now - self._last_stats_log >= 5.0:
@@ -971,7 +975,19 @@ class IntercomClient:
 
             if p is None:
                 self._playout_underflows += 1
-                chunk = np.zeros((int(FRAME_SAMPLES),), dtype=np.float32)
+                recent_rx = False
+                try:
+                    recent_rx = (time.monotonic() - float(self._last_audio_rx_monotonic)) <= float(CLIENT_PLC_GRACE_S)
+                except Exception:
+                    recent_rx = False
+                if recent_rx:
+                    try:
+                        chunk = self._dec.decode(b"")
+                    except Exception:
+                        self._opus_decode_errors += 1
+                        chunk = np.zeros((int(FRAME_SAMPLES),), dtype=np.float32)
+                else:
+                    chunk = np.zeros((int(FRAME_SAMPLES),), dtype=np.float32)
             else:
                 try:
                     chunk = self._dec.decode(p)
