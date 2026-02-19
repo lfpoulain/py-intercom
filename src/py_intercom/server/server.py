@@ -5,7 +5,6 @@ import queue
 import socket
 import threading
 import time
-import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -14,10 +13,11 @@ import numpy as np
 import sounddevice as sd
 from loguru import logger
 
-from ..common.audio import apply_gain_db, rms_dbfs
+from ..common.audio import apply_gain_db, limit_peak, rms_dbfs
 from ..common.constants import AUDIO_UDP_PORT, CHANNELS, CONTROL_PORT_OFFSET, FRAME_SAMPLES, SAMPLE_RATE
 from ..common.discovery import DiscoveryBeacon
-from ..common.devices import list_devices
+from ..common.devices import list_devices, resolve_device
+from ..common.identity import client_id_from_uuid
 from ..common.jitter_buffer import OpusPacketJitterBuffer
 from ..common.jsonio import atomic_write_json, read_json_file
 from ..common.opus_codec import OpusDecoder, OpusEncoder
@@ -67,27 +67,11 @@ class OutputState:
     buf: np.ndarray = field(default_factory=lambda: np.zeros((0,), dtype=np.float32))
     underflows: int = 0
     vu_dbfs: float = -60.0
+    last_callback_monotonic: float = 0.0
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 class IntercomServer:
-    @staticmethod
-    def _limit_peak(x: np.ndarray, limit: float = 0.99) -> np.ndarray:
-        try:
-            peak = float(np.max(np.abs(x)))
-        except Exception:
-            return x
-        if peak > 1.0 and peak > 0.0:
-            x = x * (float(limit) / peak)
-        return x
-
-    @staticmethod
-    def _client_id_from_uuid(client_uuid: str) -> int:
-        try:
-            return int(zlib.crc32(str(client_uuid).encode("utf-8")) & 0xFFFFFFFF)
-        except Exception:
-            return 0
-
     def __init__(
         self,
         bind_ip: str = "0.0.0.0",
@@ -192,6 +176,7 @@ class IntercomServer:
             self._outputs[oid] = OutputState(output_id=oid, device=int(output_device), bus_id=self._default_output_bus_id())
 
         self._mix_thread: Optional[threading.Thread] = None
+        self._retry_thread: Optional[threading.Thread] = None
         self._running: bool = False
 
         self._return_input_device: Optional[int] = int(return_input_device) if return_input_device is not None else None
@@ -248,27 +233,11 @@ class IntercomServer:
         except Exception:
             devices = []
 
-        def _resolve_device(saved_name: str, saved_hostapi: str, fallback_idx: Optional[int]) -> Optional[int]:
-            if saved_name and devices:
-                for d in devices:
-                    if str(d.name) == saved_name and (not saved_hostapi or str(d.hostapi) == saved_hostapi):
-                        return int(d.index)
-            if fallback_idx is not None:
-                try:
-                    fallback_idx = int(fallback_idx)
-                except Exception:
-                    return None
-                if not devices:
-                    return int(fallback_idx)
-                for d in devices:
-                    if int(d.index) == int(fallback_idx):
-                        return int(d.index)
-            return None
-
-        return_input_device = _resolve_device(
+        return_input_device = resolve_device(
             return_input_device_name,
             return_input_device_hostapi,
             return_input_device,
+            devices,
         )
 
         feed_by_id = {1: True, 2: True}
@@ -321,7 +290,7 @@ class IntercomServer:
                         dev = None
                     dev_name = str(o.get("device_name") or "")
                     dev_hostapi = str(o.get("device_hostapi") or "")
-                    dev = _resolve_device(dev_name, dev_hostapi, dev)
+                    dev = resolve_device(dev_name, dev_hostapi, dev, devices)
                     if dev is None:
                         continue
 
@@ -335,7 +304,7 @@ class IntercomServer:
                     u = str(client_uuid or "")
                     if not u:
                         continue
-                    cid = int(self._client_id_from_uuid(u))
+                    cid = int(client_id_from_uuid(u))
                     if cid == 0:
                         continue
                     st = self._clients.get(int(cid))
@@ -531,6 +500,37 @@ class IntercomServer:
 
         self._autosave_preset()
 
+    def _stream_is_active(self, stream: Optional[sd.OutputStream]) -> bool:
+        if stream is None:
+            return False
+        try:
+            return bool(stream.active)
+        except Exception:
+            return False
+
+    def reopen_outputs(self, *, force: bool = False) -> None:
+        if not self._running or self._stop.is_set():
+            return
+        with self._lock:
+            outputs = list(self._outputs.values())
+
+        for out in outputs:
+            if not force and self._stream_is_active(out.stream):
+                continue
+            try:
+                with out.lock:
+                    old_stream = out.stream
+                    out.stream = None
+                try:
+                    if old_stream is not None:
+                        old_stream.stop()
+                        old_stream.close()
+                except Exception:
+                    pass
+                self._open_output_stream(out)
+            except Exception as e:
+                logger.warning("output {} reopen failed: {}", int(out.output_id), e)
+
     def set_return_enabled(self, enabled: bool) -> None:
         self._return_enabled = bool(enabled)
         try:
@@ -650,6 +650,14 @@ class IntercomServer:
         if ok == 0 and last_err is not None:
             raise last_err
 
+        if outputs and any(out.stream is None or not self._stream_is_active(out.stream) for out in outputs):
+            self._retry_thread = threading.Thread(
+                target=self._retry_output_streams,
+                name="output-retry",
+                daemon=True,
+            )
+            self._retry_thread.start()
+
         try:
             if self._return_enabled and self._return_input_device is not None:
                 self._open_return_input_stream(int(self._return_input_device))
@@ -695,6 +703,37 @@ class IntercomServer:
                 self._sock.close()
             except Exception:
                 pass
+
+    def _retry_output_streams(self) -> None:
+        retries = 3
+        delay_s = 1.0
+        for attempt in range(retries):
+            if self._stop.is_set():
+                return
+            time.sleep(delay_s)
+            with self._lock:
+                outputs = list(self._outputs.values())
+            now = time.monotonic()
+            pending = [
+                out
+                for out in outputs
+                if out.stream is None
+                or not self._stream_is_active(out.stream)
+                or (now - float(out.last_callback_monotonic)) > 1.0
+            ]
+            if not pending:
+                return
+            for out in pending:
+                try:
+                    self._open_output_stream(out)
+                except Exception as e:
+                    logger.warning(
+                        "output {} retry {}/{} failed: {}",
+                        int(out.output_id),
+                        attempt + 1,
+                        retries,
+                        e,
+                    )
 
     def _close_return_input_stream(self) -> None:
         try:
@@ -761,7 +800,7 @@ class IntercomServer:
             else:
                 mono = np.mean(indata.astype(np.float32, copy=False), axis=1)
 
-        y = self._limit_peak(mono)
+        y = limit_peak(mono)
         y = np.clip(y.astype(np.float32, copy=False), -1.0, 1.0)
 
         with self._return_lock:
@@ -771,14 +810,16 @@ class IntercomServer:
                 self._return_vu_dbfs = -60.0
 
         try:
-            while True:
-                self._return_frames.put_nowait(y.astype(np.float32, copy=False))
-                break
+            self._return_frames.put_nowait(y.astype(np.float32, copy=False))
         except queue.Full:
             try:
                 self._return_frames.get_nowait()
             except Exception:
-                return
+                pass
+            try:
+                self._return_frames.put_nowait(y.astype(np.float32, copy=False))
+            except Exception:
+                pass
 
     def _control_send(self, sock: socket.socket, msg: dict) -> None:
         data = (json.dumps(msg, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
@@ -970,18 +1011,23 @@ class IntercomServer:
                         if st is None:
                             st = ClientState(addr=(str(addr[0]), 0), last_packet_monotonic=now)
                             self._clients[int(client_id)] = st
+                        # Full reset of audio backend for this client
+                        try:
+                            st.decoder = OpusDecoder()
+                        except Exception:
+                            pass
+                        st.jb = OpusPacketJitterBuffer(start_frames=3, max_frames=60)
+                        st.last_timestamp_ms = 0
+                        st.last_sequence_number = 0
                         st.name = name
                         st.client_uuid = client_uuid
                         st.ptt_buses = {}
-                        try:
-                            st.jb.reset()
-                        except Exception:
-                            pass
                         st.vu_dbfs = -60.0
                         if udp_port is not None:
                             st.addr = (str(addr[0]), int(udp_port))
                         st.control_connected = True
                         st.last_control_monotonic = now
+                        st.last_packet_monotonic = now
 
                     if client_uuid:
                         with self._preset_lock:
@@ -1091,13 +1137,15 @@ class IntercomServer:
 
         sr = int(SAMPLE_RATE)
         blocksize = int(FRAME_SAMPLES)
+        stream: Optional[sd.OutputStream] = None
         try:
             with out.lock:
                 out.samplerate = int(sr)
                 out.phase = 0.0
                 out.buf = np.zeros((0,), dtype=np.float32)
+                out.last_callback_monotonic = 0.0
 
-            out.stream = sd.OutputStream(
+            stream = sd.OutputStream(
                 samplerate=float(sr),
                 channels=CHANNELS,
                 dtype="float32",
@@ -1108,7 +1156,9 @@ class IntercomServer:
                     oid, outdata, frames, time_info, status
                 ),
             )
-            out.stream.start()
+            stream.start()
+            with out.lock:
+                out.stream = stream
             logger.debug(
                 "audio output stream started: out_id={} bus_id={} sr={} ch={} blocksize={} latency=low",
                 int(out.output_id),
@@ -1118,6 +1168,14 @@ class IntercomServer:
                 blocksize,
             )
         except Exception as e:
+            try:
+                if stream is not None:
+                    stream.stop()
+                    stream.close()
+            except Exception:
+                pass
+            with out.lock:
+                out.stream = None
             raise RuntimeError(f"failed to open output stream: {e}") from e
 
     def _mix_loop(self) -> None:
@@ -1220,7 +1278,7 @@ class IntercomServer:
                         except Exception:
                             raw_bus_mix += per_client[cid]
 
-                    raw_bus_mix = self._limit_peak(raw_bus_mix)
+                    raw_bus_mix = limit_peak(raw_bus_mix)
                     bus_mixes[int(bus_id)] = raw_bus_mix
 
                     contrib: Dict[int, np.ndarray] = {}
@@ -1251,7 +1309,7 @@ class IntercomServer:
                 regie_mix = np.zeros((FRAME_SAMPLES,), dtype=np.float32)
                 for c in regie_contrib.values():
                     regie_mix += c
-                regie_mix = self._limit_peak(regie_mix)
+                regie_mix = limit_peak(regie_mix)
 
                 try:
                     regie_vu_dbfs = float(rms_dbfs(regie_mix))
@@ -1291,6 +1349,10 @@ class IntercomServer:
         if out is None:
             outdata[:] = 0.0
             return
+
+        now = time.monotonic()
+        with out.lock:
+            out.last_callback_monotonic = float(now)
 
         out_sr = int(out.samplerate)
 
@@ -1347,8 +1409,16 @@ class IntercomServer:
                 data, addr = self._sock.recvfrom(2048)
             except socket.timeout:
                 continue
-            except OSError:
+            except OSError as e:
                 self._rx_socket_errors += 1
+                # WinError 10054 (WSAECONNRESET): Windows reports ICMP
+                # "port unreachable" when a previous sendto() targeted a
+                # closed client port.  This is harmless — just retry
+                # immediately so we don't block reception from other clients.
+                err_code = getattr(e, 'winerror', None) or getattr(e, 'errno', None)
+                if err_code == 10054:
+                    continue
+                logger.debug("_rx_loop OSError: {} sock_err_count={}", e, self._rx_socket_errors)
                 if self._stop.is_set():
                     return
                 time.sleep(0.1)
@@ -1379,6 +1449,11 @@ class IntercomServer:
                     self._clients[pkt.client_id] = st
                     logger.info("new client {} from {}", pkt.client_id, addr)
                 else:
+                    try:
+                        if now - float(st.last_packet_monotonic) > 2.0:
+                            st.jb.reset()
+                    except Exception:
+                        pass
                     st.addr = addr
                     st.last_packet_monotonic = now
                 st.last_timestamp_ms = pkt.timestamp_ms
@@ -1466,7 +1541,7 @@ class IntercomServer:
 
                     if bool(listen_return):
                         mix_minus = mix_minus + apply_gain_db(return_frame, float(return_gain_db))
-                    mix_minus = self._limit_peak(mix_minus)
+                    mix_minus = limit_peak(mix_minus)
                     mix_minus = np.clip(mix_minus, -1.0, 1.0)
 
                     payload = enc.encode(mix_minus)

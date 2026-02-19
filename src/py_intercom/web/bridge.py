@@ -4,7 +4,6 @@ import json
 import socket
 import threading
 import time
-import zlib
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -12,6 +11,7 @@ import numpy as np
 from loguru import logger
 
 from ..common.audio import int16_bytes_to_float32
+from ..common.identity import client_id_from_uuid
 from ..common.constants import CONTROL_PORT_OFFSET, FRAME_SAMPLES, SAMPLE_RATE
 from ..common.jitter_buffer import OpusPacketJitterBuffer
 from ..common.opus_codec import OpusDecoder, OpusEncoder
@@ -28,13 +28,6 @@ class BridgeConfig:
 
 
 class IntercomBridge:
-    @staticmethod
-    def client_id_from_uuid(client_uuid: str) -> int:
-        try:
-            return int(zlib.crc32(str(client_uuid).encode("utf-8")) & 0xFFFFFFFF)
-        except Exception:
-            return 0
-
     def __init__(
         self,
         *,
@@ -45,7 +38,7 @@ class IntercomBridge:
         on_kick: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.client_uuid = str(client_uuid)
-        self.client_id = int(self.client_id_from_uuid(self.client_uuid))
+        self.client_id = int(client_id_from_uuid(self.client_uuid))
         self.config = config
 
         self._enc = OpusEncoder()

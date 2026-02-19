@@ -25,6 +25,10 @@
     volumeValue: document.getElementById("volumeValue"),
     discoverySelect: document.getElementById("discoverySelect"),
     btnRefreshDiscovery: document.getElementById("btnRefreshDiscovery"),
+    inputDeviceSelect: document.getElementById("inputDeviceSelect"),
+    outputDeviceSelect: document.getElementById("outputDeviceSelect"),
+    outputDeviceGroup: document.getElementById("outputDeviceGroup"),
+    btnRefreshDevices: document.getElementById("btnRefreshDevices"),
   };
 
   // --- Persistence ---
@@ -36,6 +40,8 @@
         listenRegie: el.listenRegie.checked,
         listenReturnBus: el.listenReturnBus.checked,
         volume: el.volumeSlider.value,
+        inputDeviceId: el.inputDeviceSelect.value,
+        outputDeviceId: el.outputDeviceSelect.value,
       }));
     } catch (_) {}
   };
@@ -52,6 +58,9 @@
         el.volumeSlider.value = s.volume;
         el.volumeValue.textContent = s.volume + "%";
       }
+      // Device IDs are restored after enumerateDevices populates the lists
+      if (s.inputDeviceId) el.inputDeviceSelect.dataset.savedId = s.inputDeviceId;
+      if (s.outputDeviceId) el.outputDeviceSelect.dataset.savedId = s.outputDeviceId;
     } catch (_) {}
   };
 
@@ -99,6 +108,88 @@
   let intercomAlive = false;
   let lastControlTs = 0;
   const CTRL_TIMEOUT_MS = 3000;
+  let actualSR = TARGET_SR;
+
+  // --- Device enumeration ---
+  const sinkIdSupported = typeof HTMLMediaElement !== "undefined" &&
+    typeof HTMLMediaElement.prototype.setSinkId === "function";
+
+  const populateDeviceSelect = (select, devices, kind, restoreId) => {
+    const prev = restoreId !== undefined ? restoreId : select.value;
+    while (select.options.length > 1) select.remove(1);
+    let idx = 0;
+    let matched = false;
+    for (const d of devices) {
+      if (d.kind !== kind) continue;
+      idx++;
+      const opt = document.createElement("option");
+      opt.value = d.deviceId;
+      opt.textContent = d.label || `${kind === "audioinput" ? "Micro" : "Sortie"} ${idx}`;
+      select.appendChild(opt);
+      if (prev && d.deviceId === prev) { select.value = d.deviceId; matched = true; }
+    }
+    if (!matched) select.value = "";
+  };
+
+  const _doEnumerate = async (restoreIn, restoreOut) => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    populateDeviceSelect(el.inputDeviceSelect, devices, "audioinput", restoreIn);
+    if (sinkIdSupported) {
+      populateDeviceSelect(el.outputDeviceSelect, devices, "audiooutput", restoreOut);
+    } else {
+      if (el.outputDeviceGroup) el.outputDeviceGroup.style.display = "none";
+    }
+  };
+
+  // Request mic permission to get real labels, then enumerate
+  const enumerateWithPermission = async () => {
+    if (!navigator.mediaDevices) return;
+    const savedIn = el.inputDeviceSelect.dataset.savedId || el.inputDeviceSelect.value || "";
+    const savedOut = el.outputDeviceSelect.dataset.savedId || el.outputDeviceSelect.value || "";
+    if (el.btnRefreshDevices) el.btnRefreshDevices.disabled = true;
+    try {
+      // Brief getUserMedia to unlock labels, then immediately stop
+      const tmp = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      tmp.getTracks().forEach(t => t.stop());
+    } catch (_) {
+      // Permission denied or unavailable — enumerate anyway (labels may be empty)
+    }
+    try {
+      await _doEnumerate(savedIn, savedOut);
+      // Clear saved dataset hints after first successful restore
+      delete el.inputDeviceSelect.dataset.savedId;
+      delete el.outputDeviceSelect.dataset.savedId;
+    } catch (_) {}
+    if (el.btnRefreshDevices) el.btnRefreshDevices.disabled = false;
+  };
+
+  // Enumerate without requesting permission (uses cached permission state)
+  const enumerateDevices = async () => {
+    if (!navigator.mediaDevices) return;
+    const savedIn = el.inputDeviceSelect.dataset.savedId || "";
+    const savedOut = el.outputDeviceSelect.dataset.savedId || "";
+    // Check if permission already granted — if so, labels will be available
+    try {
+      const perm = await navigator.permissions.query({ name: "microphone" });
+      if (perm.state === "granted") {
+        await _doEnumerate(savedIn, savedOut);
+        delete el.inputDeviceSelect.dataset.savedId;
+        delete el.outputDeviceSelect.dataset.savedId;
+        return;
+      }
+    } catch (_) {}
+    // Permission not yet granted — just hide output if needed, leave selects at default
+    if (!sinkIdSupported && el.outputDeviceGroup) el.outputDeviceGroup.style.display = "none";
+  };
+
+  // Re-enumerate after getUserMedia during connect (labels now available)
+  const enumerateAfterPermission = async () => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    try {
+      await _doEnumerate(el.inputDeviceSelect.value, el.outputDeviceSelect.value);
+    } catch (_) {}
+  };
 
   // --- Discovery ---
   const fetchDiscovery = async () => {
@@ -191,12 +282,6 @@
     return out;
   };
 
-  const peakOf = (buf) => {
-    let p = 0;
-    for (let i = 0; i < buf.length; i++) { const a = Math.abs(buf[i]); if (a > p) p = a; }
-    return p;
-  };
-
   const rmsDbfs = (buf) => {
     if (!buf || buf.length === 0) return -60;
     let sum = 0;
@@ -219,6 +304,22 @@
   };
   requestAnimationFrame(updateMeters);
 
+  // --- Collapse ---
+  const cardConfig = document.getElementById("cardConfig");
+  const cardConfigHeader = document.getElementById("cardConfigHeader");
+
+  const setConfigCollapsed = (collapsed) => {
+    if (!cardConfig) return;
+    cardConfig.classList.toggle("card-collapsed", collapsed);
+  };
+
+  if (cardConfigHeader) {
+    cardConfigHeader.addEventListener("click", () => {
+      if (!cardConfig) return;
+      setConfigCollapsed(!cardConfig.classList.contains("card-collapsed"));
+    });
+  }
+
   // --- UI State ---
   const setConnState = (on) => {
     el.connDot.className = "conn-indicator " + (on ? "on" : "off");
@@ -234,7 +335,10 @@
     el.listenRegie.disabled = !isConnected;
     el.listenReturnBus.disabled = !isConnected;
     setConnState(isConnected);
-    if (!isConnected) {
+    if (isConnected) {
+      setConfigCollapsed(true);
+    } else {
+      setConfigCollapsed(false);
       for (const [bid] of pttBuses.entries()) {
         setPttBus(bid, false, { emit: false });
       }
@@ -277,14 +381,16 @@
     if (audioCtx.state === "suspended") {
       await audioCtx.resume();
     }
-    logLine(`audio: sr=${audioCtx.sampleRate} state=${audioCtx.state}`);
-    audioRateOk = audioCtx.sampleRate === TARGET_SR;
-    if (!audioRateOk) {
-      const sr = audioCtx.sampleRate;
-      try { await audioCtx.close(); } catch (_) {}
-      audioCtx = null;
-      throw new Error(`AudioContext ${sr}Hz incompatible (48kHz requis)`);
-    }
+    actualSR = audioCtx.sampleRate;
+    audioRateOk = true;
+    logLine(`audio: sr=${actualSR} state=${audioCtx.state}${actualSR !== TARGET_SR ? " (resampling TX)" : ""}`);
+
+    // Resume AudioContext after interruptions (phone calls, notifications on mobile)
+    audioCtx.onstatechange = () => {
+      if (audioCtx && audioCtx.state === "suspended") {
+        audioCtx.resume().catch(() => {});
+      }
+    };
 
     if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
       try { await audioCtx.close(); } catch (_) {}
@@ -294,23 +400,43 @@
       );
     }
 
+    const inputDeviceId = el.inputDeviceSelect.value || "";
+    const audioConstraints = {
+      channelCount: 1,
+      sampleRate: TARGET_SR,
+      sampleSize: 16,
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    };
+    if (inputDeviceId) audioConstraints.deviceId = { exact: inputDeviceId };
+
     try {
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          sampleRate: TARGET_SR,
-          sampleSize: 16,
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-        }
-      });
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
     } catch (err) {
-      // Teardown context if mic denied
-      try { await audioCtx.close(); } catch (_) {}
-      audioCtx = null;
-      throw new Error("Micro refusé: " + (err.message || err));
+      if (inputDeviceId && err.name === "OverconstrainedError") {
+        // Fallback: retry without deviceId constraint
+        try {
+          micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1, sampleRate: TARGET_SR, sampleSize: 16,
+              echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+            }
+          });
+          logLine("micro: périphérique sélectionné indisponible, utilisation du défaut");
+        } catch (err2) {
+          try { await audioCtx.close(); } catch (_) {}
+          audioCtx = null;
+          throw new Error("Micro refusé: " + (err2.message || err2));
+        }
+      } else {
+        try { await audioCtx.close(); } catch (_) {}
+        audioCtx = null;
+        throw new Error("Micro refusé: " + (err.message || err));
+      }
     }
+    // Labels are now available — refresh device lists
+    enumerateAfterPermission();
     micNode = audioCtx.createMediaStreamSource(micStream);
 
     micProc = audioCtx.createScriptProcessor(2048, 1, 1);
@@ -318,7 +444,6 @@
     micProc.connect(audioCtx.destination);
 
     let captureBuf = new Float32Array(0);
-    let capturePhase = 0.0;
 
     micProc.onaudioprocess = (e) => {
       if (!socket || !joined) return;
@@ -326,12 +451,27 @@
 
       const ch0 = e.inputBuffer.getChannelData(0);
       txMeter = Math.max(txMeter, meterFromDb(rmsDbfs(ch0)));
-      const srcSR = audioCtx.sampleRate;
-      if (srcSR !== TARGET_SR) { return; }
 
-      const merged = new Float32Array(captureBuf.length + ch0.length);
+      // Resample to 48 kHz if needed (e.g. iOS Safari at 44100 Hz)
+      let samples = ch0;
+      if (actualSR !== TARGET_SR) {
+        const ratio = TARGET_SR / actualSR;
+        const outLen = Math.round(ch0.length * ratio);
+        const resampled = new Float32Array(outLen);
+        for (let i = 0; i < outLen; i++) {
+          const pos = i / ratio;
+          const idx = Math.floor(pos);
+          const frac = pos - idx;
+          const a = ch0[idx] || 0;
+          const b = ch0[Math.min(idx + 1, ch0.length - 1)] || 0;
+          resampled[i] = a + frac * (b - a);
+        }
+        samples = resampled;
+      }
+
+      const merged = new Float32Array(captureBuf.length + samples.length);
       merged.set(captureBuf, 0);
-      merged.set(ch0, captureBuf.length);
+      merged.set(samples, captureBuf.length);
       captureBuf = merged;
 
       while (captureBuf.length >= FRAME_SAMPLES) {
@@ -343,7 +483,27 @@
 
     gainNode = audioCtx.createGain();
     gainNode.gain.value = outputVolume;
-    gainNode.connect(audioCtx.destination);
+
+    // Output device routing via setSinkId on a hidden Audio element
+    const outputDeviceId = el.outputDeviceSelect.value || "";
+    if (sinkIdSupported && outputDeviceId) {
+      try {
+        const dest = audioCtx.createMediaStreamDestination();
+        gainNode.connect(dest);
+        const audioEl = new Audio();
+        audioEl.srcObject = dest.stream;
+        audioEl.autoplay = true;
+        await audioEl.setSinkId(outputDeviceId);
+        audioEl.play().catch(() => {});
+        logLine(`sortie: ${el.outputDeviceSelect.options[el.outputDeviceSelect.selectedIndex]?.text || outputDeviceId}`);
+      } catch (e) {
+        // Fallback to default output
+        gainNode.connect(audioCtx.destination);
+        logLine("sortie: périphérique sélectionné indisponible, utilisation du défaut");
+      }
+    } else {
+      gainNode.connect(audioCtx.destination);
+    }
 
     playProc = audioCtx.createScriptProcessor(2048, 1, 1);
     playProc.onaudioprocess = (e) => { e.outputBuffer.getChannelData(0).set(popPlay(e.outputBuffer.length)); };
@@ -495,6 +655,15 @@
   el.discoverySelect.addEventListener("change", applyDiscoverySelection);
   el.btnRefreshDiscovery.addEventListener("click", fetchDiscovery);
 
+  if (el.btnRefreshDevices) {
+    el.btnRefreshDevices.addEventListener("click", () => {
+      enumerateWithPermission().catch(() => {});
+    });
+  }
+
+  el.inputDeviceSelect.addEventListener("change", saveSettings);
+  el.outputDeviceSelect.addEventListener("change", saveSettings);
+
   el.listenRegie.addEventListener("change", () => {
     setListenRegie(el.listenRegie.checked);
     saveSettings();
@@ -535,6 +704,13 @@
       setPttBus(0, false);
       setPttBus(1, false);
       setPttBus(2, false);
+    } else {
+      // Flush stale audio accumulated while tab was throttled
+      playQueue = new Float32Array(0);
+      // Re-resume AudioContext if suspended by browser while hidden
+      if (audioCtx && audioCtx.state === "suspended") {
+        audioCtx.resume().catch(() => {});
+      }
     }
   });
 
@@ -546,6 +722,7 @@
 
   // --- Init ---
   loadSettings();
+  enumerateDevices();
   setUiConnected(false);
   setStatus("Déconnecté");
   startDiscoveryPolling();

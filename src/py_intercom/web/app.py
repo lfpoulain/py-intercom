@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import secrets
+import socket
 import threading
 from pathlib import Path
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ from flask_socketio import SocketIO, emit
 from loguru import logger
 
 from ..common.audio import float32_to_int16_bytes
-from ..common.constants import AUDIO_UDP_PORT, FRAME_SAMPLES
+from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, FRAME_SAMPLES
 from ..common.discovery import DiscoveryListener
 from .bridge import BridgeConfig, IntercomBridge
 
@@ -150,6 +151,17 @@ def create_app() -> tuple[Flask, SocketIO]:
                 pass
             # Defer stop to avoid calling stop() from within bridge control thread
             threading.Thread(target=_stop_session, args=(sid,), daemon=True).start()
+
+        # Quick TCP probe — fail fast if intercom server is unreachable
+        _ctrl_port = int(AUDIO_UDP_PORT) + int(CONTROL_PORT_OFFSET)
+        try:
+            _probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _probe.settimeout(1.5)
+            _probe.connect((server_ip, _ctrl_port))
+            _probe.close()
+        except Exception:
+            emit("server", {"type": "error", "message": f"Serveur intercom injoignable ({server_ip}:{_ctrl_port})"})
+            return
 
         cfg = BridgeConfig(
             server_ip=server_ip,

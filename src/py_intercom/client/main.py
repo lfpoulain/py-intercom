@@ -1,14 +1,14 @@
 import argparse
 import random
 import uuid
-import zlib
-
 import sounddevice as sd
 from loguru import logger
 
 from .client import ClientConfig, IntercomClient
 from ..common.logging import setup_logging
+from ..common.constants import AUDIO_UDP_PORT
 from ..common.devices import format_devices, list_devices
+from ..common.identity import client_id_from_uuid
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="py-intercom-client")
@@ -46,7 +46,7 @@ def main() -> int:
 
         return run_gui(
             server_ip=server_ip,
-            server_port=5000,
+            server_port=int(AUDIO_UDP_PORT),
             input_device=input_device,
             output_device=output_device,
             minimized=bool(args.minimized),
@@ -65,13 +65,13 @@ def main() -> int:
     client_id = args.client_id
     if client_id is None:
         try:
-            client_id = int(zlib.crc32(client_uuid.encode("utf-8")) & 0xFFFFFFFF)
+            client_id = int(client_id_from_uuid(client_uuid))
         except Exception:
             client_id = random.getrandbits(32)
 
     cfg = ClientConfig(
         server_ip=args.server_ip,
-        server_port=5000,
+        server_port=int(AUDIO_UDP_PORT),
         client_uuid=client_uuid,
         name=str(args.name or ""),
         input_device=args.input_device,

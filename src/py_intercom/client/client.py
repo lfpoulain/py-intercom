@@ -10,7 +10,7 @@ import numpy as np
 import sounddevice as sd
 from loguru import logger
 
-from ..common.audio import apply_gain_db, rms_dbfs
+from ..common.audio import apply_gain_db, limit_peak, rms_dbfs
 from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, FRAME_SAMPLES, SAMPLE_RATE
 from ..common.jitter_buffer import OpusPacketJitterBuffer
 from ..common.opus_codec import OpusDecoder, OpusEncoder
@@ -38,16 +38,6 @@ class ClientConfig:
 
 
 class IntercomClient:
-    @staticmethod
-    def _limit_peak(x: np.ndarray, limit: float = 0.99) -> np.ndarray:
-        try:
-            peak = float(np.max(np.abs(x)))
-        except Exception:
-            return x
-        if peak > 1.0 and peak > 0.0:
-            x = x * (float(limit) / peak)
-        return x
-
     def __init__(self, client_id: int, config: ClientConfig):
         self.client_id = client_id & 0xFFFFFFFF
         self.config = config
@@ -392,10 +382,10 @@ class IntercomClient:
         msg: dict[str, object] = {
             "type": "state",
             "client_id": int(self.client_id),
-            "ptt_buses": dict(self._ptt_buses),
-            "listen_return_bus": bool(self._listen_return_bus),
-            "listen_regie": bool(self._listen_regie),
-            "return_gain_db": float(self._return_gain_db),
+            "ptt_buses": ptt_buses,
+            "listen_return_bus": listen_return_bus,
+            "listen_regie": listen_regie,
+            "return_gain_db": return_gain_db,
         }
         try:
             self._control_send(sock, msg)
@@ -703,7 +693,7 @@ class IntercomClient:
                 mono = np.mean(indata.astype(np.float32, copy=False), axis=1)
 
         mono = apply_gain_db(mono, gain_db)
-        mono = self._limit_peak(mono)
+        mono = limit_peak(mono)
         mono = np.clip(mono.astype(np.float32, copy=False), -1.0, 1.0)
 
         with self._state_lock:

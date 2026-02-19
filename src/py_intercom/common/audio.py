@@ -33,3 +33,13 @@ def int16_bytes_to_float32(pcm: bytes) -> np.ndarray:
     y = np.frombuffer(pcm, dtype=np.int16)
     x = (y.astype(np.float32) / 32768.0).astype(np.float32, copy=False)
     return x
+
+
+def limit_peak(x: np.ndarray, limit: float = 0.99) -> np.ndarray:
+    try:
+        peak = float(np.max(np.abs(x)))
+    except Exception:
+        return x
+    if peak > 1.0 and peak > 0.0:
+        x = x * (float(limit) / peak)
+    return x

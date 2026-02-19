@@ -146,6 +146,36 @@ select option {
 
 .card-header-sm { padding: 10px 16px; }
 
+.card-header-toggle {
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.card-header-toggle:hover { background: var(--surface2); }
+
+.card-chevron {
+  width: 16px;
+  height: 16px;
+  color: var(--text2);
+  margin-left: auto;
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+}
+.card-collapsed .card-chevron { transform: rotate(-90deg); }
+
+.card-body-collapsible {
+  overflow: hidden;
+  transition: max-height 0.25s ease, opacity 0.2s ease, padding 0.2s ease;
+  max-height: 600px;
+  opacity: 1;
+}
+.card-collapsed .card-body-collapsible {
+  max-height: 0;
+  opacity: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
 .card-icon {
   width: 15px;
   height: 15px;
@@ -245,11 +275,21 @@ select option {
 }
 .ip-port-row .input:first-child { flex: 1; }
 
-.field-row {
+.devices-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.device-row {
   display: flex;
   gap: 12px;
+  align-items: flex-start;
 }
-.field-half { flex: 1; }
+.device-row .field-half { flex: 1; min-width: 0; margin-bottom: 0; }
+.device-row .field-half .discovery-select { width: 100%; flex: none; }
+.field-half { flex: 1; min-width: 0; }
 
 .connect-actions {
   display: flex;
@@ -485,14 +525,19 @@ kbd {
   min-height: 40px;
 }
 
+/* ── Tablet ── */
+@media (max-width: 768px) {
+  .btn-ptt { height: 76px; font-size: 19px; }
+}
+
 /* ── Mobile ── */
 @media (max-width: 560px) {
   .app { padding: 0 10px 16px; }
   .card-body { padding: 12px; }
-  .btn-ptt { height: 80px; font-size: 20px; }
-  .ptt-grid { grid-template-columns: 1fr; }
+  .btn-ptt { height: 88px; font-size: 20px; }
   .input { font-size: 16px; } /* prevent iOS zoom on focus */
   .discovery-select { font-size: 16px; }
+  .device-row { flex-direction: column; gap: 0; }
 }
 
 /* ── Scrollbar ── */

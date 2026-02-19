@@ -2,7 +2,11 @@
 <html lang="fr">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#080e1a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="py-intercom" />
     <title>py-intercom — Client Web</title>
     <link rel="icon" type="image/png" href="/img/logo.png" />
     <link rel="stylesheet" href="/static/style.css" />
@@ -28,11 +32,12 @@
       <main class="main">
         <!-- Connection card -->
         <section class="card" id="cardConfig">
-          <div class="card-header">
+          <div class="card-header card-header-toggle" id="cardConfigHeader">
             <svg class="card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
             <span>Connexion</span>
+            <svg id="cardConfigChevron" class="card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
           </div>
-          <div class="card-body">
+          <div class="card-body card-body-collapsible" id="cardConfigBody">
             <div class="field-group">
               <label class="field-label">Serveur</label>
               <div class="server-row">
@@ -50,6 +55,28 @@
             <div class="field-group">
               <label class="field-label">Nom</label>
               <input id="name" class="input" placeholder="Plateau" />
+            </div>
+            <div class="field-group">
+              <div class="devices-header">
+                <span class="field-label" style="margin-bottom:0">Périphériques audio</span>
+                <button id="btnRefreshDevices" class="icon-btn" title="Détecter les périphériques (demande la permission micro)">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                </button>
+              </div>
+              <div class="device-row" id="deviceRow">
+                <div class="field-half">
+                  <label class="field-label">Microphone</label>
+                  <select id="inputDeviceSelect" class="discovery-select">
+                    <option value="">-- Par défaut --</option>
+                  </select>
+                </div>
+                <div class="field-half" id="outputDeviceGroup">
+                  <label class="field-label">Sortie audio</label>
+                  <select id="outputDeviceSelect" class="discovery-select">
+                    <option value="">-- Par défaut --</option>
+                  </select>
+                </div>
+              </div>
             </div>
             <div class="connect-actions">
               <button id="btnConnect" class="btn btn-primary btn-lg">
