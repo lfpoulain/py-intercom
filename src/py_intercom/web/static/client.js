@@ -100,7 +100,11 @@
   let audioRateOk = true;
 
   const pttBuses = new Map([[0, false], [1, false], [2, false]]);
+  const busModes = new Map([[0, "ptt"], [1, "ptt"], [2, "ptt"]]);
+  const busToggleState = new Map([[0, false], [1, false], [2, false]]);
+  const busNames = new Map([[0, "Régie"], [1, "Plateau"], [2, "VMix"]]);
   let outputVolume = 1.0;
+  let lastJoinParams = null;
 
   let playQueue = new Float32Array(0);
   let txMeter = 0;
@@ -249,11 +253,15 @@
     y.set(playQueue, 0);
     y.set(x, playQueue.length);
     playQueue = y;
-    const max = audioCtx ? Math.floor(audioCtx.sampleRate * 3) : (TARGET_SR * 3);
-    if (playQueue.length > max) playQueue = playQueue.subarray(playQueue.length - max);
   };
 
+  const MAX_QUEUE_SAMPLES = FRAME_SAMPLES * 4; // ~40ms max latency
+
   const popPlay = (n) => {
+    // Drain stale audio if queue is too large to avoid latency buildup
+    if (playQueue.length > MAX_QUEUE_SAMPLES) {
+      playQueue = playQueue.subarray(playQueue.length - MAX_QUEUE_SAMPLES);
+    }
     if (playQueue.length >= n) {
       const out = new Float32Array(playQueue.subarray(0, n));
       playQueue = playQueue.subarray(n);
@@ -337,11 +345,16 @@
     setConnState(isConnected);
     if (isConnected) {
       setConfigCollapsed(true);
+      // Apply always_on buses immediately on connect
+      for (const [bid, mode] of busModes.entries()) {
+        if (mode === "always_on") setPttBus(bid, true);
+      }
     } else {
       setConfigCollapsed(false);
       for (const [bid] of pttBuses.entries()) {
         setPttBus(bid, false, { emit: false });
       }
+      for (const [bid] of busToggleState.entries()) busToggleState.set(bid, false);
     }
   };
 
@@ -350,9 +363,69 @@
     pttBuses.set(busId, !!active);
     const btn = busId === 0 ? el.btnBus0 : busId === 1 ? el.btnBus1 : el.btnBus2;
     if (btn) btn.classList.toggle("active", !!active);
+    updateBusStateLabel(busId); // always refresh label
     if (socket && joined && opts.emit !== false) {
       socket.emit("ptt_bus", { bus_id: busId, active: !!active });
     }
+  };
+
+  const updateBusLabel = (busId, name) => {
+    const btn = busId === 0 ? el.btnBus0 : busId === 1 ? el.btnBus1 : el.btnBus2;
+    if (!btn) return;
+    const lbl = btn.querySelector(".ptt-label");
+    if (lbl) lbl.textContent = name;
+  };
+
+  const updateBusStateLabel = (busId) => {
+    const lbl = document.getElementById(`busStateLabel${busId}`);
+    if (!lbl) return;
+    const mode = busModes.get(busId) || "ptt";
+    if (mode === "always_on") {
+      lbl.textContent = "ON"; lbl.className = "bus-state-label on";
+    } else if (mode === "toggle") {
+      const on = !!busToggleState.get(busId);
+      lbl.textContent = on ? "ON" : "OFF"; lbl.className = "bus-state-label " + (on ? "on" : "off");
+    } else {
+      const on = !!pttBuses.get(busId);
+      lbl.textContent = on ? "ON" : "OFF"; lbl.className = "bus-state-label " + (on ? "on" : "off");
+    }
+  };
+
+  const onBusModeChange = (busId, mode) => {
+    busModes.set(busId, mode);
+    saveBusModes();
+    if (mode === "always_on") {
+      busToggleState.set(busId, false);
+      if (joined) setPttBus(busId, true);
+    } else if (mode === "toggle") {
+      if (joined) setPttBus(busId, !!busToggleState.get(busId));
+    } else {
+      busToggleState.set(busId, false);
+      if (joined) setPttBus(busId, false);
+    }
+    updateBusStateLabel(busId);
+  };
+
+  const saveBusModes = () => {
+    try {
+      const modes = {};
+      for (const [bid, m] of busModes.entries()) modes[bid] = m;
+      localStorage.setItem("py-intercom-bus-modes", JSON.stringify(modes));
+    } catch (_) {}
+  };
+
+  const loadBusModes = () => {
+    try {
+      const s = JSON.parse(localStorage.getItem("py-intercom-bus-modes") || "null");
+      if (!s) return;
+      for (const [bid] of busModes.entries()) {
+        if (s[bid]) {
+          busModes.set(bid, s[bid]);
+          const sel = document.getElementById(`busModeSelect${bid}`);
+          if (sel) sel.value = s[bid];
+        }
+      }
+    } catch (_) {}
   };
 
   const anyPttActive = () => Array.from(pttBuses.values()).some(Boolean);
@@ -531,18 +604,29 @@
 
     socket = io({ transports: ["websocket", "polling"] });
 
-    socket.on("connect", () => {
-      setStatus("Backend web");
-      setUiConnected(false);
-      logLine("socket.io connect");
-      socket.emit("join", {
+    const doJoin = () => {
+      lastJoinParams = {
         server_ip: el.serverIp.value.trim(),
         server_port: 5000,
         name: el.name.value.trim() || "Plateau",
         client_uuid: getClientUuid(),
         listen_return_bus: el.listenReturnBus.checked,
         listen_regie: el.listenRegie.checked,
-      });
+      };
+      socket.emit("join", lastJoinParams);
+    };
+
+    socket.on("connect", () => {
+      setStatus("Backend web");
+      setUiConnected(false);
+      logLine("socket.io connect");
+      doJoin();
+    });
+
+    socket.on("reconnect", () => {
+      logLine("socket.io reconnect");
+      joined = false;
+      if (lastJoinParams) socket.emit("join", lastJoinParams);
     });
 
     socket.on("disconnect", () => {
@@ -585,7 +669,15 @@
         const cfg = msg.config || msg;
         if (cfg && Array.isArray(cfg.buses)) {
           for (const b of cfg.buses) {
-            try { pttBuses.set(parseInt(b.bus_id, 10), !!pttBuses.get(parseInt(b.bus_id, 10))); } catch (_) {}
+            try {
+              const bid = parseInt(b.bus_id, 10);
+              if (!pttBuses.has(bid)) pttBuses.set(bid, false);
+              if (!busModes.has(bid)) busModes.set(bid, "ptt");
+              if (!busToggleState.has(bid)) busToggleState.set(bid, false);
+              const name = String(b.name || `Bus ${bid}`);
+              busNames.set(bid, name);
+              updateBusLabel(bid, name);
+            } catch (_) {}
           }
         }
       }
@@ -640,17 +732,52 @@
 
   const bindPttButton = (btn, busId) => {
     if (!btn) return;
-    btn.addEventListener("mousedown", () => setPttBus(busId, true));
-    btn.addEventListener("mouseup", () => setPttBus(busId, false));
-    btn.addEventListener("mouseleave", () => { if (pttBuses.get(busId)) setPttBus(busId, false); });
-    btn.addEventListener("touchstart", (e) => { e.preventDefault(); setPttBus(busId, true); });
-    btn.addEventListener("touchend", () => setPttBus(busId, false));
-    btn.addEventListener("touchcancel", () => setPttBus(busId, false));
+    btn.addEventListener("mousedown", () => {
+      const mode = busModes.get(busId) || "ptt";
+      if (mode === "always_on") return;
+      if (mode === "toggle") {
+        const newState = !busToggleState.get(busId);
+        busToggleState.set(busId, newState);
+        setPttBus(busId, newState);
+      } else {
+        setPttBus(busId, true);
+      }
+    });
+    btn.addEventListener("mouseup", () => {
+      if ((busModes.get(busId) || "ptt") === "ptt") setPttBus(busId, false);
+    });
+    btn.addEventListener("mouseleave", () => {
+      if ((busModes.get(busId) || "ptt") === "ptt" && pttBuses.get(busId)) setPttBus(busId, false);
+    });
+    btn.addEventListener("touchstart", (e) => {
+      e.preventDefault();
+      const mode = busModes.get(busId) || "ptt";
+      if (mode === "always_on") return;
+      if (mode === "toggle") {
+        const newState = !busToggleState.get(busId);
+        busToggleState.set(busId, newState);
+        setPttBus(busId, newState);
+      } else {
+        setPttBus(busId, true);
+      }
+    });
+    btn.addEventListener("touchend", () => {
+      if ((busModes.get(busId) || "ptt") === "ptt") setPttBus(busId, false);
+    });
+    btn.addEventListener("touchcancel", () => {
+      if ((busModes.get(busId) || "ptt") === "ptt") setPttBus(busId, false);
+    });
   };
 
   bindPttButton(el.btnBus0, 0);
   bindPttButton(el.btnBus1, 1);
   bindPttButton(el.btnBus2, 2);
+
+  // Mode selectors
+  for (const busId of [0, 1, 2]) {
+    const sel = document.getElementById(`busModeSelect${busId}`);
+    if (sel) sel.addEventListener("change", () => onBusModeChange(busId, sel.value));
+  }
 
   el.discoverySelect.addEventListener("change", applyDiscoverySelection);
   el.btnRefreshDiscovery.addEventListener("click", fetchDiscovery);
@@ -682,28 +809,45 @@
     saveSettings();
   });
 
+  const keyPressBus = (busId) => {
+    const mode = busModes.get(busId) || "ptt";
+    if (mode === "always_on") return;
+    if (mode === "toggle") {
+      const newState = !busToggleState.get(busId);
+      busToggleState.set(busId, newState);
+      setPttBus(busId, newState);
+    } else {
+      setPttBus(busId, true);
+    }
+  };
+
+  const keyReleaseBus = (busId) => {
+    if ((busModes.get(busId) || "ptt") === "ptt") setPttBus(busId, false);
+  };
+
   document.addEventListener("keydown", (e) => {
     if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
     if (e.repeat) return;
-    if (e.code === "Space") { e.preventDefault(); setPttBus(0, true); }
-    else if (e.code === "Digit1") { e.preventDefault(); setPttBus(0, true); }
-    else if (e.code === "Digit2") { e.preventDefault(); setPttBus(1, true); }
-    else if (e.code === "Digit3") { e.preventDefault(); setPttBus(2, true); }
+    if (e.code === "Space") { e.preventDefault(); keyPressBus(0); }
+    else if (e.code === "Digit1") { e.preventDefault(); keyPressBus(0); }
+    else if (e.code === "Digit2") { e.preventDefault(); keyPressBus(1); }
+    else if (e.code === "Digit3") { e.preventDefault(); keyPressBus(2); }
   });
 
   document.addEventListener("keyup", (e) => {
     if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
-    if (e.code === "Space") { e.preventDefault(); setPttBus(0, false); }
-    else if (e.code === "Digit1") { e.preventDefault(); setPttBus(0, false); }
-    else if (e.code === "Digit2") { e.preventDefault(); setPttBus(1, false); }
-    else if (e.code === "Digit3") { e.preventDefault(); setPttBus(2, false); }
+    if (e.code === "Space") { e.preventDefault(); keyReleaseBus(0); }
+    else if (e.code === "Digit1") { e.preventDefault(); keyReleaseBus(0); }
+    else if (e.code === "Digit2") { e.preventDefault(); keyReleaseBus(1); }
+    else if (e.code === "Digit3") { e.preventDefault(); keyReleaseBus(2); }
   });
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
-      setPttBus(0, false);
-      setPttBus(1, false);
-      setPttBus(2, false);
+      for (const [bid, mode] of busModes.entries()) {
+        if (mode === "ptt") setPttBus(bid, false);
+        // toggle and always_on stay as-is
+      }
     } else {
       // Flush stale audio accumulated while tab was throttled
       playQueue = new Float32Array(0);
@@ -715,13 +859,54 @@
   });
 
   window.addEventListener("blur", () => {
-    setPttBus(0, false);
-    setPttBus(1, false);
-    setPttBus(2, false);
+    for (const [bid, mode] of busModes.entries()) {
+      if (mode === "ptt") setPttBus(bid, false);
+    }
   });
+
+  // --- Restart audio pipeline (apply device changes without reload) ---
+  const restartAudio = async () => {
+    if (!socket || !joined) return;
+    const btnApply = document.getElementById("btnApplyDevices");
+    if (btnApply) btnApply.disabled = true;
+    logLine("audio: redémarrage du pipeline...");
+    try { if (micProc) micProc.disconnect(); } catch (_) {}
+    try { if (micNode) micNode.disconnect(); } catch (_) {}
+    try { if (playProc) playProc.disconnect(); } catch (_) {}
+    try { if (gainNode) gainNode.disconnect(); } catch (_) {}
+    micProc = null; micNode = null; playProc = null; gainNode = null;
+    try { if (micStream) micStream.getTracks().forEach(t => t.stop()); } catch (_) {}
+    micStream = null;
+    try { if (audioCtx) await audioCtx.close(); } catch (_) {}
+    audioCtx = null;
+    playQueue = new Float32Array(0);
+    saveSettings();
+    try {
+      await setupAudio();
+      logLine("audio: pipeline redémarré");
+    } catch (e) {
+      logLine(`audio: erreur redémarrage: ${e && e.message ? e.message : e}`);
+    } finally {
+      if (btnApply) btnApply.disabled = false;
+    }
+  };
+
+  if (el.btnRefreshDevices) {
+    el.btnRefreshDevices.addEventListener("dblclick", () => {
+      restartAudio().catch(() => {});
+    });
+  }
+
+  const btnApplyDevices = document.getElementById("btnApplyDevices");
+  if (btnApplyDevices) {
+    btnApplyDevices.addEventListener("click", () => {
+      restartAudio().catch(() => {});
+    });
+  }
 
   // --- Init ---
   loadSettings();
+  loadBusModes();
   enumerateDevices();
   setUiConnected(false);
   setStatus("Déconnecté");

@@ -77,6 +77,9 @@
                   </select>
                 </div>
               </div>
+              <button id="btnApplyDevices" class="btn btn-ghost btn-sm" style="margin-top:6px" title="Appliquer les périphériques sans recharger (double-clic sur le bouton rafraîchir aussi)">
+                Appliquer les périphériques
+              </button>
             </div>
             <div class="connect-actions">
               <button id="btnConnect" class="btn btn-primary btn-lg">
@@ -98,15 +101,45 @@
           <div class="card-body">
             <!-- PTT buses -->
             <div class="ptt-grid">
-              <button id="btnBus0" class="btn btn-ptt" data-bus-id="0" disabled>
-                <span class="ptt-label">Régie</span>
-              </button>
-              <button id="btnBus1" class="btn btn-ptt" data-bus-id="1" disabled>
-                <span class="ptt-label">Plateau</span>
-              </button>
-              <button id="btnBus2" class="btn btn-ptt" data-bus-id="2" disabled>
-                <span class="ptt-label">VMix</span>
-              </button>
+              <div class="ptt-bus-col">
+                <button id="btnBus0" class="btn btn-ptt" data-bus-id="0" disabled>
+                  <span class="ptt-label">Régie</span>
+                </button>
+                <div class="ptt-bus-controls">
+                  <select id="busModeSelect0" class="bus-mode-select">
+                    <option value="ptt">PTT</option>
+                    <option value="toggle">Toggle</option>
+                    <option value="always_on">Always On</option>
+                  </select>
+                  <span id="busStateLabel0" class="bus-state-label off">OFF</span>
+                </div>
+              </div>
+              <div class="ptt-bus-col">
+                <button id="btnBus1" class="btn btn-ptt" data-bus-id="1" disabled>
+                  <span class="ptt-label">Plateau</span>
+                </button>
+                <div class="ptt-bus-controls">
+                  <select id="busModeSelect1" class="bus-mode-select">
+                    <option value="ptt">PTT</option>
+                    <option value="toggle">Toggle</option>
+                    <option value="always_on">Always On</option>
+                  </select>
+                  <span id="busStateLabel1" class="bus-state-label off">OFF</span>
+                </div>
+              </div>
+              <div class="ptt-bus-col">
+                <button id="btnBus2" class="btn btn-ptt" data-bus-id="2" disabled>
+                  <span class="ptt-label">VMix</span>
+                </button>
+                <div class="ptt-bus-controls">
+                  <select id="busModeSelect2" class="bus-mode-select">
+                    <option value="ptt">PTT</option>
+                    <option value="toggle">Toggle</option>
+                    <option value="always_on">Always On</option>
+                  </select>
+                  <span id="busStateLabel2" class="bus-state-label off">OFF</span>
+                </div>
+              </div>
             </div>
             <div class="shortcuts-hint">
               <kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> PTT &nbsp;&middot;&nbsp; <kbd>Espace</kbd> Régie

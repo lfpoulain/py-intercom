@@ -363,6 +363,61 @@ select option {
   margin-bottom: 10px;
 }
 
+.ptt-bus-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ptt-bus-col .btn-ptt {
+  flex: none;
+  width: 100%;
+}
+
+.ptt-bus-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.bus-mode-select {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  padding: 3px 4px;
+  font-size: 11px;
+  color: var(--text2);
+  cursor: pointer;
+}
+
+.bus-state-label {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 5px;
+  border-radius: 4px;
+  min-width: 28px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.bus-state-label.on {
+  background: rgba(34, 211, 167, 0.15);
+  color: var(--accent);
+}
+
+.bus-state-label.off {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text2);
+}
+
+.btn-sm {
+  padding: 5px 10px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+}
+
 .shortcuts-hint {
   text-align: center;
   font-size: 11px;
