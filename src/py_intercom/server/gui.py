@@ -130,7 +130,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         vu_lay.addWidget(lbl_ret)
         vu_lay.addWidget(self._return_vu, 1)
         lbl_regie = QtWidgets.QLabel("Régie")
-        lbl_regie.setFixedWidth(40)
+        lbl_regie.setFixedWidth(50)
         vu_lay.addWidget(lbl_regie)
         vu_lay.addWidget(self._regie_vu, 1)
         return_lay.addLayout(vu_lay)
@@ -156,8 +156,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)   # Name
         hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Status
         self._clients.setColumnWidth(3, 30)
-        hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)   # VU
-        self._clients.setColumnWidth(4, 180)
+        hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Stretch)   # VU
         self._clients.verticalHeader().setDefaultSectionSize(26)
         self._clients.verticalHeader().setVisible(False)
         self._clients.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -222,8 +221,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         out_hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
         out_hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
         self._outputs.setColumnWidth(2, 75)
-        out_hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        self._outputs.setColumnWidth(3, 180)
+        out_hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
         self._outputs.verticalHeader().setDefaultSectionSize(26)
         self._outputs.verticalHeader().setVisible(False)
         self._outputs.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
