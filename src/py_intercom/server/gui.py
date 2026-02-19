@@ -157,7 +157,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Status
         self._clients.setColumnWidth(3, 30)
         hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Stretch)   # VU
-        self._clients.verticalHeader().setDefaultSectionSize(26)
+        self._clients.verticalHeader().setDefaultSectionSize(32)
         self._clients.verticalHeader().setVisible(False)
         self._clients.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self._clients.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
@@ -195,7 +195,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._buses = QtWidgets.QTableWidget(0, 3)
         self._buses.setHorizontalHeaderLabels(["ID", "Name", "Retour Regie"])
         self._buses.verticalHeader().setVisible(False)
-        self._buses.verticalHeader().setDefaultSectionSize(24)
+        self._buses.verticalHeader().setDefaultSectionSize(32)
         self._buses.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self._buses.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self._buses.setAlternatingRowColors(True)
@@ -222,7 +222,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         out_hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
         self._outputs.setColumnWidth(2, 75)
         out_hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self._outputs.verticalHeader().setDefaultSectionSize(26)
+        self._outputs.verticalHeader().setDefaultSectionSize(32)
         self._outputs.verticalHeader().setVisible(False)
         self._outputs.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self._outputs.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
