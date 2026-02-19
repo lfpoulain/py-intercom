@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  web:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - .:/app
+    ports:
+      - "8443:8443"
+      - "5002:5002/udp"
+    environment:
+      PYTHONUNBUFFERED: "1"
+    command: >
+      /bin/sh -c "pip install -r requirements.txt && python run_web.py --host 0.0.0.0 --port 8443 --ssl-adhoc"
