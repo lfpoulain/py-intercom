@@ -393,6 +393,7 @@
 
   const onBusModeChange = (busId, mode) => {
     busModes.set(busId, mode);
+    setSegActive(busId, mode);
     saveBusModes();
     if (mode === "always_on") {
       busToggleState.set(busId, false);
@@ -404,6 +405,14 @@
       if (joined) setPttBus(busId, false);
     }
     updateBusStateLabel(busId);
+  };
+
+  const setSegActive = (busId, val) => {
+    const seg = document.getElementById(`busModeSelect${busId}`);
+    if (!seg) return;
+    seg.querySelectorAll(".mode-seg-btn").forEach(b => {
+      b.classList.toggle("active", b.dataset.val === val);
+    });
   };
 
   const saveBusModes = () => {
@@ -421,8 +430,7 @@
       for (const [bid] of busModes.entries()) {
         if (s[bid]) {
           busModes.set(bid, s[bid]);
-          const sel = document.getElementById(`busModeSelect${bid}`);
-          if (sel) sel.value = s[bid];
+          setSegActive(bid, s[bid]);
         }
       }
     } catch (_) {}
@@ -773,10 +781,13 @@
   bindPttButton(el.btnBus1, 1);
   bindPttButton(el.btnBus2, 2);
 
-  // Mode selectors
+  // Mode segmented buttons
   for (const busId of [0, 1, 2]) {
-    const sel = document.getElementById(`busModeSelect${busId}`);
-    if (sel) sel.addEventListener("change", () => onBusModeChange(busId, sel.value));
+    const seg = document.getElementById(`busModeSelect${busId}`);
+    if (!seg) continue;
+    seg.querySelectorAll(".mode-seg-btn").forEach(btn => {
+      btn.addEventListener("click", () => onBusModeChange(busId, btn.dataset.val));
+    });
   }
 
   el.discoverySelect.addEventListener("change", applyDiscoverySelection);
@@ -807,39 +818,6 @@
     outputVolume = pct / 100;
     if (gainNode) gainNode.gain.value = outputVolume;
     saveSettings();
-  });
-
-  const keyPressBus = (busId) => {
-    const mode = busModes.get(busId) || "ptt";
-    if (mode === "always_on") return;
-    if (mode === "toggle") {
-      const newState = !busToggleState.get(busId);
-      busToggleState.set(busId, newState);
-      setPttBus(busId, newState);
-    } else {
-      setPttBus(busId, true);
-    }
-  };
-
-  const keyReleaseBus = (busId) => {
-    if ((busModes.get(busId) || "ptt") === "ptt") setPttBus(busId, false);
-  };
-
-  document.addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
-    if (e.repeat) return;
-    if (e.code === "Space") { e.preventDefault(); keyPressBus(0); }
-    else if (e.code === "Digit1") { e.preventDefault(); keyPressBus(0); }
-    else if (e.code === "Digit2") { e.preventDefault(); keyPressBus(1); }
-    else if (e.code === "Digit3") { e.preventDefault(); keyPressBus(2); }
-  });
-
-  document.addEventListener("keyup", (e) => {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
-    if (e.code === "Space") { e.preventDefault(); keyReleaseBus(0); }
-    else if (e.code === "Digit1") { e.preventDefault(); keyReleaseBus(0); }
-    else if (e.code === "Digit2") { e.preventDefault(); keyReleaseBus(1); }
-    else if (e.code === "Digit3") { e.preventDefault(); keyReleaseBus(2); }
   });
 
   document.addEventListener("visibilitychange", () => {

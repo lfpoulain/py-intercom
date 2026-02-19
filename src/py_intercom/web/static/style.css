@@ -341,9 +341,10 @@ select option {
   background: var(--surface2);
   color: var(--text);
   border: 2px solid var(--border2);
-  gap: 10px;
+  gap: 4px;
   user-select: none;
   -webkit-user-select: none;
+  flex-direction: column;
 }
 .btn-ptt svg { width: 22px; height: 22px; }
 .btn-ptt:not(:disabled):hover { border-color: var(--accent); }
@@ -374,42 +375,55 @@ select option {
   width: 100%;
 }
 
-.ptt-bus-controls {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.bus-mode-select {
-  flex: 1;
-  min-width: 0;
-  background: var(--surface2);
-  border: 1px solid var(--border2);
-  border-radius: 6px;
-  padding: 3px 4px;
-  font-size: 11px;
-  color: var(--text2);
-  cursor: pointer;
-}
-
 .bus-state-label {
+  display: block;
   font-size: 10px;
   font-weight: 700;
-  padding: 2px 5px;
-  border-radius: 4px;
-  min-width: 28px;
-  text-align: center;
-  flex-shrink: 0;
+  letter-spacing: 0.04em;
+  margin-top: 2px;
+  line-height: 1;
 }
 
-.bus-state-label.on {
-  background: rgba(34, 211, 167, 0.15);
-  color: var(--accent);
+.bus-state-label.on  { color: var(--accent); }
+.bus-state-label.off { color: rgba(255,255,255,0.3); }
+
+/* Segmented mode selector */
+.mode-seg {
+  display: flex;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border2);
+  background: var(--surface);
 }
 
-.bus-state-label.off {
-  background: rgba(255, 255, 255, 0.05);
+.mode-seg-btn {
+  flex: 1;
+  border: none;
+  background: transparent;
   color: var(--text2);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 5px 2px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+.mode-seg-btn:not(:last-child) {
+  border-right: 1px solid var(--border2);
+}
+
+.mode-seg-btn:hover:not(.active) {
+  background: rgba(255,255,255,0.06);
+  color: var(--text);
+}
+
+.mode-seg-btn.active {
+  background: var(--accent-dim);
+  color: var(--accent);
 }
 
 .btn-sm {
@@ -418,13 +432,6 @@ select option {
   border-radius: var(--radius-sm);
 }
 
-.shortcuts-hint {
-  text-align: center;
-  font-size: 11px;
-  color: var(--text2);
-  margin-bottom: 14px;
-  opacity: 0.7;
-}
 
 .listen-row {
   display: flex;

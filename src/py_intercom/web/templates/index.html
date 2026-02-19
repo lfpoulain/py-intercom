@@ -104,45 +104,36 @@
               <div class="ptt-bus-col">
                 <button id="btnBus0" class="btn btn-ptt" data-bus-id="0" disabled>
                   <span class="ptt-label">Régie</span>
-                </button>
-                <div class="ptt-bus-controls">
-                  <select id="busModeSelect0" class="bus-mode-select">
-                    <option value="ptt">PTT</option>
-                    <option value="toggle">Toggle</option>
-                    <option value="always_on">Always On</option>
-                  </select>
                   <span id="busStateLabel0" class="bus-state-label off">OFF</span>
+                </button>
+                <div class="mode-seg" id="busModeSelect0" data-bus="0">
+                  <button class="mode-seg-btn active" data-val="ptt">PTT</button>
+                  <button class="mode-seg-btn" data-val="toggle">Toggle</button>
+                  <button class="mode-seg-btn" data-val="always_on">Always On</button>
                 </div>
               </div>
               <div class="ptt-bus-col">
                 <button id="btnBus1" class="btn btn-ptt" data-bus-id="1" disabled>
                   <span class="ptt-label">Plateau</span>
-                </button>
-                <div class="ptt-bus-controls">
-                  <select id="busModeSelect1" class="bus-mode-select">
-                    <option value="ptt">PTT</option>
-                    <option value="toggle">Toggle</option>
-                    <option value="always_on">Always On</option>
-                  </select>
                   <span id="busStateLabel1" class="bus-state-label off">OFF</span>
+                </button>
+                <div class="mode-seg" id="busModeSelect1" data-bus="1">
+                  <button class="mode-seg-btn active" data-val="ptt">PTT</button>
+                  <button class="mode-seg-btn" data-val="toggle">Toggle</button>
+                  <button class="mode-seg-btn" data-val="always_on">Always On</button>
                 </div>
               </div>
               <div class="ptt-bus-col">
                 <button id="btnBus2" class="btn btn-ptt" data-bus-id="2" disabled>
                   <span class="ptt-label">VMix</span>
-                </button>
-                <div class="ptt-bus-controls">
-                  <select id="busModeSelect2" class="bus-mode-select">
-                    <option value="ptt">PTT</option>
-                    <option value="toggle">Toggle</option>
-                    <option value="always_on">Always On</option>
-                  </select>
                   <span id="busStateLabel2" class="bus-state-label off">OFF</span>
+                </button>
+                <div class="mode-seg" id="busModeSelect2" data-bus="2">
+                  <button class="mode-seg-btn active" data-val="ptt">PTT</button>
+                  <button class="mode-seg-btn" data-val="toggle">Toggle</button>
+                  <button class="mode-seg-btn" data-val="always_on">Always On</button>
                 </div>
               </div>
-            </div>
-            <div class="shortcuts-hint">
-              <kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> PTT &nbsp;&middot;&nbsp; <kbd>Espace</kbd> Régie
             </div>
 
             <div class="listen-row">
