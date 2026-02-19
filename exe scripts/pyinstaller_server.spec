@@ -29,6 +29,8 @@ try:
 except Exception:
     pass
 
+_logo = os.path.join(_project_root, "src", "py_intercom", "img", "logo.ico")
+
 _datas = []
 
 _hiddenimports = []
@@ -70,4 +72,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=_logo,
 )
