@@ -13,7 +13,7 @@ from ..common.gui_utils import DeviceWorker, is_checked
 from ..common.identity import client_id_from_uuid
 from ..common.jsonio import atomic_write_json, read_json_file
 from ..common.constants import AUDIO_UDP_PORT
-from ..common.theme import VuMeter, StatusIndicator, apply_theme, patch_combo, centered_checkbox
+from ..common.theme import VuMeter, StatusIndicator, apply_theme, patch_combo, centered_checkbox, cell_vu
 
 
 
@@ -694,7 +694,7 @@ class ServerWindow(QtWidgets.QMainWindow):
 
             if rebuild:
                 vu = VuMeter()
-                self._outputs.setCellWidget(row, 3, vu)
+                self._outputs.setCellWidget(row, 3, cell_vu(vu))
                 self._output_vu_widgets[int(oid)] = vu
             vu = self._output_vu_widgets.get(int(oid))
             if vu is not None:
@@ -1182,7 +1182,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             # col 4 — VU meter
             if rebuild:
                 vu = VuMeter()
-                self._clients.setCellWidget(row, 4, vu)
+                self._clients.setCellWidget(row, 4, cell_vu(vu))
                 self._vu_widgets[int(client_id)] = vu
             vu = self._vu_widgets.get(int(client_id))
             if vu is not None:

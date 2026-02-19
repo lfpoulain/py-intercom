@@ -293,6 +293,15 @@ def patch_combo(combo: QtWidgets.QComboBox, item_height: int = 22) -> None:
     combo.setItemDelegate(_CompactItemDelegate(item_height, combo))
 
 
+def cell_vu(vu: "VuMeter", h_margin: int = 4) -> QtWidgets.QWidget:
+    """Wrap a VuMeter in a full-width container for use in QTableWidget cells."""
+    w = QtWidgets.QWidget()
+    lay = QtWidgets.QHBoxLayout(w)
+    lay.setContentsMargins(h_margin, 0, h_margin, 0)
+    lay.addWidget(vu)
+    return w
+
+
 def centered_checkbox(cb: QtWidgets.QCheckBox) -> QtWidgets.QWidget:
     """Wrap a QCheckBox in a container that centers it horizontally."""
     w = QtWidgets.QWidget()
