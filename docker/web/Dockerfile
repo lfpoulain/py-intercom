@@ -17,4 +17,4 @@ COPY src /app/src
 
 EXPOSE 8443
 
-CMD ["python", "-m", "py_intercom.web.main", "--host", "0.0.0.0", "--port", "8443", "--ssl-adhoc"]
+CMD ["python", "-m", "py_intercom.web.main", "--host", "0.0.0.0", "--port", "8443", "--ssl-adhoc", "--debug"]

@@ -87,6 +87,7 @@ class IntercomClient:
         self._in_vu_dbfs = -60.0
         self._out_vu_dbfs = -60.0
         self._return_vu_dbfs = -60.0
+        self._bus_vu_dbfs: dict[int, float] = {}
 
         self._in_channels = 1
         self._out_channels = 1
@@ -175,6 +176,7 @@ class IntercomClient:
                 "control_age_s": ctrl_age_s,
                 "control_tx_age_s": ctrl_tx_age_s,
                 "ptt_buses": dict(self._ptt_buses),
+                "bus_vu_dbfs": dict(self._bus_vu_dbfs),
                 "listen_return_bus": bool(self._listen_return_bus),
                 "listen_regie": bool(self._listen_regie),
                 "buses": {
@@ -675,6 +677,8 @@ class IntercomClient:
         if not self._can_transmit_audio():
             with self._state_lock:
                 self._in_vu_dbfs = -60.0
+                for bid in list(self._bus_vu_dbfs.keys()):
+                    self._bus_vu_dbfs[int(bid)] = max(-60.0, float(self._bus_vu_dbfs[int(bid)]) - 3.0)
             return
 
         if int(frames) != int(FRAME_SAMPLES):
@@ -697,8 +701,16 @@ class IntercomClient:
         mono = np.clip(mono.astype(np.float32, copy=False), -1.0, 1.0)
 
         with self._state_lock:
+            vu = rms_dbfs(mono)
             self._capture_buf = mono
-            self._in_vu_dbfs = rms_dbfs(mono)
+            self._in_vu_dbfs = vu
+            ptt_buses = dict(self._ptt_buses)
+        for bid, active in ptt_buses.items():
+            with self._state_lock:
+                if active:
+                    self._bus_vu_dbfs[int(bid)] = vu
+                else:
+                    self._bus_vu_dbfs[int(bid)] = max(-60.0, float(self._bus_vu_dbfs.get(int(bid), -60.0)) - 3.0)
 
         try:
             payload = self._enc.encode(mono.astype(np.float32, copy=False))

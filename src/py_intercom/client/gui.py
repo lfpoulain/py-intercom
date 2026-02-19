@@ -225,8 +225,9 @@ class _GlobalPttHotkeys:
     def _on_press(self, key) -> None:
         k = _norm_key(key)
         if k:
+            is_new = k not in self._pressed
             self._pressed.add(k)
-            self._update(_press_key=k)
+            self._update(_press_key=k if is_new else None)
 
     def _on_release(self, key) -> None:
         k = _norm_key(key)
@@ -294,6 +295,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._ptt_bus_modes: dict[int, str] = {}
         self._ptt_bus_toggle_state: dict[int, bool] = {}
         self._ptt_bus_state_labels: dict[int, QtWidgets.QLabel] = {}
+        self._ptt_bus_vu: dict[int, VuMeter] = {}
         self._shortcut_widgets: list[QtWidgets.QWidget] = []
         self._known_buses: dict[int, dict] = {
             0: {"bus_id": 0, "name": "Regie", "feed_to_regie": False},
@@ -607,7 +609,8 @@ class ClientWindow(QtWidgets.QMainWindow):
             lbl.setText("ON" if on else "OFF")
             lbl.setStyleSheet("color: #4caf50; font-weight: bold;" if on else "color: #f44336; font-weight: bold;")
         elif mode == "ptt":
-            active_buses = self._global_ptt._active_buses if self._global_ptt is not None else {}
+            gp = getattr(self, "_global_ptt", None)
+            active_buses = gp._active_buses if gp is not None else {}
             on = bool(active_buses.get(int(bus_id), False))
             if self._connected:
                 lbl.setText("ON" if on else "OFF")
@@ -704,8 +707,9 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._ptt_bus_mode_widgets = {}
         self._ptt_bus_modes = {}
         self._ptt_bus_state_labels = {}
+        self._ptt_bus_vu = {}
 
-        headers = ["Bus", "Mode", "État", "PTT key"]
+        headers = ["Bus", "Mode", "État", "VU", "PTT key"]
         for col, title in enumerate(headers):
             lbl = QtWidgets.QLabel(str(title))
             f = lbl.font()
@@ -756,15 +760,21 @@ class ClientWindow(QtWidgets.QMainWindow):
                 pass
             edit.keySequenceChanged.connect(lambda _seq, bid=int(bus_id): self._on_ptt_bus_key_changed(bid))
 
+            vu_meter = VuMeter()
+            vu_meter.setMinimumWidth(60)
+            vu_meter.set_level(-60.0)
+
             self._bus_rows_layout.addWidget(lbl, row, 0)
             self._bus_rows_layout.addWidget(mode_cb, row, 1)
             self._bus_rows_layout.addWidget(state_lbl, row, 2)
-            self._bus_rows_layout.addWidget(self._make_shortcut_widget(edit, clear_btn), row, 3)
+            self._bus_rows_layout.addWidget(vu_meter, row, 3)
+            self._bus_rows_layout.addWidget(self._make_shortcut_widget(edit, clear_btn), row, 4)
 
             self._ptt_bus_keys[int(bus_id)] = edit
             self._ptt_bus_clear[int(bus_id)] = clear_btn
             self._ptt_bus_mode_widgets[int(bus_id)] = mode_cb
             self._ptt_bus_state_labels[int(bus_id)] = state_lbl
+            self._ptt_bus_vu[int(bus_id)] = vu_meter
             row += 1
 
         self._known_buses = dict(parsed)
@@ -1412,6 +1422,11 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._in_vu.set_level(-60.0)
             self._out_vu.set_level(-60.0)
             self._return_vu.set_level(-60.0)
+            for vu_w in self._ptt_bus_vu.values():
+                try:
+                    vu_w.set_level(-60.0)
+                except Exception:
+                    pass
 
             try:
                 for bid in self._ptt_bus_keys.keys():
@@ -1555,6 +1570,14 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         if parsed_buses:
             self._sync_bus_widgets(parsed_buses)
+
+        bus_vu = st.get("bus_vu_dbfs")
+        if isinstance(bus_vu, dict):
+            for bid, vu_widget in self._ptt_bus_vu.items():
+                try:
+                    vu_widget.set_level(float(bus_vu.get(int(bid), -60.0)))
+                except Exception:
+                    pass
 
         try:
             self._refresh_state_labels()
