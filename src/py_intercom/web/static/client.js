@@ -1,6 +1,6 @@
 (() => {
-  const FRAME_SAMPLES = 480;
-  const TARGET_SR = 48000;
+  const FRAME_SAMPLES = (window.PY_INTERCOM_CONFIG && window.PY_INTERCOM_CONFIG.FRAME_SAMPLES) || 480;
+  const TARGET_SR = (window.PY_INTERCOM_CONFIG && window.PY_INTERCOM_CONFIG.SAMPLE_RATE) || 48000;
   const MAX_LOG_LINES = 80;
   const SETTINGS_KEY = "py-intercom-web-settings";
   const DISCOVERY_POLL_MS = 3000;
@@ -255,18 +255,21 @@
     playQueue = y;
   };
 
-  const MAX_QUEUE_SAMPLES = FRAME_SAMPLES * 4; // ~40ms max latency
+  const MAX_QUEUE_SAMPLES = FRAME_SAMPLES * 20; // ~200ms — enough buffer to absorb jitter
+  const DRAIN_TARGET_SAMPLES = FRAME_SAMPLES * 6; // ~60ms target when draining
 
   const popPlay = (n) => {
-    // Drain stale audio if queue is too large to avoid latency buildup
+    // If queue is too large, skip ahead gradually (one extra frame per callback)
+    // to avoid a hard cut that causes a click
     if (playQueue.length > MAX_QUEUE_SAMPLES) {
-      playQueue = playQueue.subarray(playQueue.length - MAX_QUEUE_SAMPLES);
+      playQueue = playQueue.subarray(FRAME_SAMPLES); // skip one frame silently
     }
     if (playQueue.length >= n) {
       const out = new Float32Array(playQueue.subarray(0, n));
       playQueue = playQueue.subarray(n);
       return out;
     }
+    // Underrun: return what we have + silence (no click, just fade to silence)
     const out = new Float32Array(n);
     if (playQueue.length > 0) { out.set(playQueue, 0); playQueue = new Float32Array(0); }
     return out;
@@ -827,8 +830,6 @@
         // toggle and always_on stay as-is
       }
     } else {
-      // Flush stale audio accumulated while tab was throttled
-      playQueue = new Float32Array(0);
       // Re-resume AudioContext if suspended by browser while hidden
       if (audioCtx && audioCtx.state === "suspended") {
         audioCtx.resume().catch(() => {});

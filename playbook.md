@@ -1,6 +1,6 @@
 # Playbook — py-intercom
 
-> **Dernière mise à jour** : 19 février 2026 (rev 2)
+> **Dernière mise à jour** : 19 février 2026 (rev 3)
 >
 > Ce document décrit l'état **réel** de l'application telle qu'elle est implémentée.
 > Ce qui n'est pas implémenté est listé dans la section **Roadmap**.
@@ -392,18 +392,22 @@ Par défaut, `run_web.py` lance en HTTPS adhoc sur le port 8443 avec détection 
 
 ### Fonctionnalités
 
-- **PTT** : 3 boutons (Régie/Plateau/VMix) + raccourcis `1`/`2`/`3` + `Espace` pour Régie
+- **PTT** : 3 boutons (Régie/Plateau/VMix), sans raccourcis clavier
+- **Modes PTT par bus** : `PTT` (maintien), `Toggle` (appui pour basculer), `Always On` (toujours actif). Sélecteur en groupe de boutons segmentés sous chaque bouton PTT. Mode persisté en `localStorage`. Activation immédiate de `always_on` à la connexion. Désactivation `ptt` uniquement sur `visibilitychange`/`blur` (toggle et always_on non affectés).
+- **Label ON/OFF** : affiché à l'intérieur du bouton PTT, mis à jour en temps réel.
+- **Noms de bus dynamiques** : mis à jour depuis les messages `welcome`/`update` du serveur TCP.
 - **Écoute** : toggles Régie / Return bus
 - **Volume** : slider 0-150% via `GainNode`
 - **VU mètres** : TX (vert) et RX (bleu) avec peak decay
 - **Auto-discovery** : dropdown serveurs détectés + bouton rafraîchir + polling 3s
 - **Sélection périphériques** : micro (`enumerateDevices` + `getUserMedia` pour débloquer les labels) et sortie (`setSinkId`, masqué si non supporté). Bouton rafraîchir dédié. Persistance `localStorage`. Sélects côte à côte sur desktop/tablette, empilés sur mobile.
+- **Changement de périphérique sans rechargement** : bouton « Appliquer les périphériques » qui recrée le pipeline WebAudio (`AudioContext` + streams) sans déconnecter Socket.IO. Bouton désactivé pendant le redémarrage.
+- **Reconnexion Socket.IO** : re-émet automatiquement le `join` sur reconnect.
 - **Connexion collapsible** : section Connexion repliable manuellement ou automatiquement à la connexion / dépliée à la déconnexion.
 - **Fail-fast serveur down** : probe TCP 1.5s sur le port de contrôle avant de démarrer le bridge — erreur immédiate si le serveur intercom est injoignable.
 - **Persistance** : UUID client + settings en `localStorage`
 - **Mobile** : `AudioContext.resume()`, `onstatechange` pour reprendre après interruption (appel, notification), détection contexte non sécurisé, responsive CSS, boutons tactiles
 - **iOS Safari** : resampling TX 44100→48000 Hz en JS si `AudioContext.sampleRate` ≠ 48000 (hint ignoré par iOS)
-- **Retour au premier plan** : `playQueue` vidée au `visibilitychange` pour éviter le burst audio accumulé pendant le throttling JS
 - **PWA** : meta `theme-color`, `apple-mobile-web-app-capable`, `viewport-fit=cover` pour ajout à l'écran d'accueil iOS/Android
 
 ### Interface
@@ -415,8 +419,18 @@ Par défaut, `run_web.py` lance en HTTPS adhoc sur le port 8443 avec détection 
 
 ### Pipeline audio
 
-- **TX** : micro → `ScriptProcessor` (48 kHz) → découpe 480 samples → float32 → int16 LE → Socket.IO `audio_in` → bridge encode Opus → UDP serveur
+- **TX** : micro → `ScriptProcessor` (48 kHz) → découpe `FRAME_SAMPLES` → float32 → int16 LE → Socket.IO `audio_in` → bridge encode Opus → UDP serveur
 - **RX** : serveur → UDP mix-minus → bridge `OpusPacketJitterBuffer` → playout thread (tick 10 ms) → décode Opus → float32 → int16 LE → Socket.IO `audio_out` → frontend int16→float32 → `playQueue` → `ScriptProcessor` → `GainNode` → haut-parleur
+
+### Anti-clipping / jitter buffer RX
+
+- **Silence gate** (`bridge.py`) : quand le jitter buffer est vide, le playout thread envoie des frames de silence pendant 8 ticks max (~80 ms) avant de s'arrêter. Évite les trous dans le flux qui causaient des clics.
+- **Queue max** : `MAX_QUEUE_SAMPLES = FRAME_SAMPLES × 20` (~200 ms) pour absorber le jitter réseau + Socket.IO.
+- **Drain progressif** : si la queue dépasse `MAX_QUEUE_SAMPLES`, on saute une frame à la fois (480 samples par callback) au lieu d'un saut brutal → pas de clic.
+
+### Constantes injectées depuis le serveur
+
+`FRAME_SAMPLES` et `SAMPLE_RATE` sont injectés dans le HTML via Jinja2 (`window.PY_INTERCOM_CONFIG`) depuis `common/constants.py` au moment du rendu de la page. Le JS lit ces valeurs avec fallback sur les défauts (480 / 48000). Modifier `constants.py` suffit — pas besoin de toucher le JS.
 
 ## 14) Dépannage rapide
 
@@ -453,6 +467,7 @@ Par défaut, `run_web.py` lance en HTTPS adhoc sur le port 8443 avec détection 
 - Pas de chiffrement/authentification (usage LAN uniquement).
 - WASAPI exclusive mode non supporté (causait echo/glitch).
 - Client web : `ScriptProcessor` est déprécié mais maintenu dans tous les navigateurs. La migration vers AudioWorklet est reportée : le buffer 128 samples d'AudioWorklet cause des crackles massifs sur mobile (bug spec WebAudio #2632, avril 2025).
+- Client web : pas de raccourcis clavier (supprimés volontairement — conflits avec les applications hôtes sur plateau).
 - iOS Safari peut ignorer le hint `sampleRate: 48000` (retourne 44100 Hz) : le TX est rééchantillonné en JS (interpolation linéaire) avant envoi.
 
 ## 16) UI / Thème

@@ -362,6 +362,9 @@ class IntercomBridge:
     def _playout_loop(self) -> None:
         tick_s = float(FRAME_SAMPLES) / float(SAMPLE_RATE)
         next_t = time.monotonic()
+        _silence = np.zeros(int(FRAME_SAMPLES), dtype=np.float32)
+        _consecutive_silence = 0
+        _SILENCE_GATE = 8  # stop sending after 8 consecutive silent frames (~80ms)
         while not self._stop.is_set():
             now = time.monotonic()
             if now < next_t:
@@ -378,8 +381,16 @@ class IntercomBridge:
                 payload = None
 
             if payload is None:
+                _consecutive_silence += 1
+                if _consecutive_silence <= _SILENCE_GATE:
+                    # Send silence to keep the JS queue fed and avoid underrun clicks
+                    try:
+                        self._on_audio_frame(_silence)
+                    except Exception:
+                        pass
                 continue
 
+            _consecutive_silence = 0
             try:
                 frame = self._dec.decode(payload)
             except Exception:
