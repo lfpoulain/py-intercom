@@ -261,10 +261,10 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         self._connect_btn = QtWidgets.QPushButton("▶  Connect")
         self._connect_btn.setProperty("class", "success")
-        self._connect_btn.setMinimumWidth(120)
+        self._connect_btn.setFixedWidth(130)
         self._disconnect_btn = QtWidgets.QPushButton("■  Disconnect")
         self._disconnect_btn.setProperty("class", "danger")
-        self._disconnect_btn.setMinimumWidth(120)
+        self._disconnect_btn.setFixedWidth(130)
         self._disconnect_btn.setEnabled(False)
 
         self._start_minimized = QtWidgets.QCheckBox("Start minimized")
@@ -434,7 +434,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         meters_lay.setContentsMargins(10, 8, 10, 8)
         meters_lay.setSpacing(12)
         lbl_in = QtWidgets.QLabel("Input")
-        lbl_in.setFixedWidth(40)
+        lbl_in.setFixedWidth(44)
         meters_lay.addWidget(lbl_in)
         meters_lay.addWidget(self._in_vu, 1)
         lbl_out = QtWidgets.QLabel("Output")
