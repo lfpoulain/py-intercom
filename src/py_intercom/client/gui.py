@@ -42,7 +42,14 @@ def _norm_key(k) -> Optional[str]:
             if k.char:
                 return f"char:{str(k.char).lower()}"
             if k.vk is not None:
-                return f"vk:{int(k.vk)}"
+                vk = int(k.vk)
+                # Map A-Z VK codes (65-90) to char: so Shift+letter matches on all layouts
+                if 65 <= vk <= 90:
+                    return f"char:{chr(vk).lower()}"
+                # Map 0-9 VK codes (48-57)
+                if 48 <= vk <= 57:
+                    return f"char:{chr(vk)}"
+                return f"vk:{vk}"
     except Exception:
         return None
     return None
@@ -133,7 +140,20 @@ class _GlobalPttHotkeys:
         except Exception:
             pass
         self._listener = None
+        self.release_all()
+
+    def release_all(self) -> None:
+        """Force-release all pressed keys and deactivate all PTT buses."""
         self._pressed.clear()
+        cli = self._window._client
+        for bid, was_active in list(self._active_buses.items()):
+            if was_active:
+                self._active_buses[int(bid)] = False
+                if cli is not None:
+                    try:
+                        cli.set_ptt_bus(int(bid), False)
+                    except Exception:
+                        pass
         self._active_buses = {}
 
     def _combo_active(self, groups: list[set[str]]) -> bool:
@@ -173,11 +193,11 @@ class _GlobalPttHotkeys:
 
     def _on_release(self, key) -> None:
         k = _norm_key(key)
-        if k and k in self._pressed:
-            try:
-                self._pressed.remove(k)
-            except KeyError:
-                pass
+        if k:
+            self._pressed.discard(k)
+            # Also discard the uppercase variant in case layout produced a different char
+            if k.startswith("char:") and len(k) == 6:
+                self._pressed.discard("char:" + k[5].upper())
             self._update()
 
 
@@ -1406,6 +1426,15 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         if parsed_buses:
             self._sync_bus_widgets(parsed_buses)
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        try:
+            if event.type() == QtCore.QEvent.Type.WindowDeactivate:
+                if self._global_ptt is not None:
+                    self._global_ptt.release_all()
+        except Exception:
+            pass
 
     def _set_app_icon(self) -> None:
         try:
