@@ -22,6 +22,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("Py-Intercom Server")
         self.setMinimumSize(700, 500)
+        self._set_app_icon()
 
         self._server: Optional[IntercomServer] = None
         self._settings = QtCore.QSettings("py-intercom", "server-gui")
@@ -303,6 +304,34 @@ class ServerWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self._start_device_refresh)
         QtCore.QTimer.singleShot(0, self._load_preset_preview)
         QtCore.QTimer.singleShot(0, self._maybe_autostart)
+
+    def _set_app_icon(self) -> None:
+        try:
+            import sys as _sys
+            _base = getattr(_sys, "_MEIPASS", None)
+            if _base:
+                icon_path = Path(_base) / "py_intercom" / "img" / "logo.ico"
+                if not icon_path.is_file():
+                    icon_path = Path(_base) / "img" / "logo.ico"
+                if not icon_path.is_file():
+                    icon_path = Path(_base) / "logo.ico"
+            else:
+                icon_path = Path(__file__).resolve().parents[1] / "img" / "logo.ico"
+                if not icon_path.is_file():
+                    icon_path = Path(__file__).resolve().parents[1] / "img" / "logo.png"
+            if icon_path.is_file():
+                icon = QtGui.QIcon(str(icon_path))
+                self.setWindowIcon(icon)
+                app = QtWidgets.QApplication.instance()
+                if app is not None:
+                    app.setWindowIcon(icon)
+            try:
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("py-intercom.server")
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _update_controls_for_server_state(self) -> None:
         running = self._server is not None

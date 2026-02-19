@@ -1,0 +1,20 @@
+services:
+  py-intercom-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        GITEA_URL: ${GITEA_URL:-http://10.0.0.4:3000/lfpoulain/py-intercom.git}
+        GITEA_BRANCH: ${GITEA_BRANCH:-main}
+    image: py-intercom-web
+    container_name: py-intercom-web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8443}:${WEB_PORT:-8443}"
+    environment:
+      WEB_HOST: "0.0.0.0"
+      WEB_PORT: "${WEB_PORT:-8443}"
+      SSL_ADHOC: "${SSL_ADHOC:-1}"
+      SSL_CERT: "${SSL_CERT:-}"
+      SSL_KEY: "${SSL_KEY:-}"
+    network_mode: host

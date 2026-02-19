@@ -1409,9 +1409,29 @@ class ClientWindow(QtWidgets.QMainWindow):
 
     def _set_app_icon(self) -> None:
         try:
-            icon_path = Path(__file__).resolve().parents[1] / "img" / "logo.png"
+            import sys as _sys
+            _base = getattr(_sys, "_MEIPASS", None)
+            if _base:
+                icon_path = Path(_base) / "py_intercom" / "img" / "logo.ico"
+                if not icon_path.is_file():
+                    icon_path = Path(_base) / "img" / "logo.ico"
+                if not icon_path.is_file():
+                    icon_path = Path(_base) / "logo.ico"
+            else:
+                icon_path = Path(__file__).resolve().parents[1] / "img" / "logo.ico"
+                if not icon_path.is_file():
+                    icon_path = Path(__file__).resolve().parents[1] / "img" / "logo.png"
             if icon_path.is_file():
-                self.setWindowIcon(QtGui.QIcon(str(icon_path)))
+                icon = QtGui.QIcon(str(icon_path))
+                self.setWindowIcon(icon)
+                app = QtWidgets.QApplication.instance()
+                if app is not None:
+                    app.setWindowIcon(icon)
+            try:
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("py-intercom.client")
+            except Exception:
+                pass
         except Exception:
             pass
 

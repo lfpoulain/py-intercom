@@ -31,7 +31,9 @@ except Exception:
 
 _logo = os.path.join(_project_root, "src", "py_intercom", "img", "logo.ico")
 
-_datas = []
+_datas = [
+    (_logo, "img"),
+]
 
 _hiddenimports = []
 _hiddenimports += collect_submodules("py_intercom.client")
