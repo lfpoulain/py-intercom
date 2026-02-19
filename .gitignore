@@ -20,3 +20,4 @@ dist/*
 !dist/**/*.exe
 
 *.log
+.env

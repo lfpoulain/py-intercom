@@ -82,6 +82,29 @@ def list_devices(
     return out
 
 
+def resolve_device(
+    saved_name: str,
+    saved_hostapi: str,
+    fallback_idx: Optional[int],
+    devices: List[DeviceInfo],
+) -> Optional[int]:
+    if saved_name and devices:
+        for d in devices:
+            if str(d.name) == saved_name and (not saved_hostapi or str(d.hostapi) == saved_hostapi):
+                return int(d.index)
+    if fallback_idx is not None:
+        try:
+            fallback_idx = int(fallback_idx)
+        except Exception:
+            return None
+        if not devices:
+            return int(fallback_idx)
+        for d in devices:
+            if int(d.index) == int(fallback_idx):
+                return int(d.index)
+    return None
+
+
 def format_devices(devices: Iterable[DeviceInfo]) -> str:
     lines = []
     for d in devices:

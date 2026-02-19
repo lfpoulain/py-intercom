@@ -1,19 +1,18 @@
 import argparse
 import random
 import uuid
-import zlib
-
 import sounddevice as sd
 from loguru import logger
 
 from .client import ClientConfig, IntercomClient
 from ..common.logging import setup_logging
+from ..common.constants import AUDIO_UDP_PORT
 from ..common.devices import format_devices, list_devices
+from ..common.identity import client_id_from_uuid
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="py-intercom-client")
     parser.add_argument("--server-ip", default=None)
-    parser.add_argument("--server-port", type=int, default=5000)
     parser.add_argument("--client-id", type=int, default=None)
     parser.add_argument("--client-uuid", default=None)
     parser.add_argument("--name", default="")
@@ -21,11 +20,10 @@ def main() -> int:
     parser.add_argument("--output-device", type=int, default=None)
     parser.add_argument("--input-gain-db", type=float, default=0.0)
     parser.add_argument("--output-gain-db", type=float, default=0.0)
-    parser.add_argument("--sidetone", action="store_true")
-    parser.add_argument("--sidetone-gain-db", type=float, default=-12.0)
     parser.add_argument("--list-devices", action="store_true")
     parser.add_argument("--all-devices", action="store_true")
     parser.add_argument("--gui", action="store_true")
+    parser.add_argument("--minimized", action="store_true")
     parser.add_argument("--debug", action="store_true")
 
     args = parser.parse_args()
@@ -48,9 +46,10 @@ def main() -> int:
 
         return run_gui(
             server_ip=server_ip,
-            server_port=args.server_port,
+            server_port=int(AUDIO_UDP_PORT),
             input_device=input_device,
             output_device=output_device,
+            minimized=bool(args.minimized),
         )
 
     if args.server_ip is None:
@@ -66,21 +65,19 @@ def main() -> int:
     client_id = args.client_id
     if client_id is None:
         try:
-            client_id = int(zlib.crc32(client_uuid.encode("utf-8")) & 0xFFFFFFFF)
+            client_id = int(client_id_from_uuid(client_uuid))
         except Exception:
             client_id = random.getrandbits(32)
 
     cfg = ClientConfig(
         server_ip=args.server_ip,
-        server_port=args.server_port,
+        server_port=int(AUDIO_UDP_PORT),
         client_uuid=client_uuid,
         name=str(args.name or ""),
         input_device=args.input_device,
         output_device=args.output_device,
         input_gain_db=args.input_gain_db,
         output_gain_db=args.output_gain_db,
-        sidetone_enabled=bool(args.sidetone),
-        sidetone_gain_db=float(args.sidetone_gain_db),
     )
 
     if args.debug:

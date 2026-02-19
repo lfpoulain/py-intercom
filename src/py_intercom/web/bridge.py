@@ -4,7 +4,6 @@ import json
 import socket
 import threading
 import time
-import zlib
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -12,6 +11,7 @@ import numpy as np
 from loguru import logger
 
 from ..common.audio import int16_bytes_to_float32
+from ..common.identity import client_id_from_uuid
 from ..common.constants import CONTROL_PORT_OFFSET, FRAME_SAMPLES, SAMPLE_RATE
 from ..common.jitter_buffer import OpusPacketJitterBuffer
 from ..common.opus_codec import OpusDecoder, OpusEncoder
@@ -23,17 +23,11 @@ class BridgeConfig:
     server_ip: str
     server_port: int
     name: str
-    mode: str = "ptt"
+    listen_return_bus: bool = False
+    listen_regie: bool = True
 
 
 class IntercomBridge:
-    @staticmethod
-    def client_id_from_uuid(client_uuid: str) -> int:
-        try:
-            return int(zlib.crc32(str(client_uuid).encode("utf-8")) & 0xFFFFFFFF)
-        except Exception:
-            return 0
-
     def __init__(
         self,
         *,
@@ -44,7 +38,7 @@ class IntercomBridge:
         on_kick: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.client_uuid = str(client_uuid)
-        self.client_id = int(self.client_id_from_uuid(self.client_uuid))
+        self.client_id = int(client_id_from_uuid(self.client_uuid))
         self.config = config
 
         self._enc = OpusEncoder()
@@ -78,19 +72,14 @@ class IntercomBridge:
         self._ctrl_connected = False
 
         self._state_lock = threading.Lock()
-        self._muted = False
         self._ptt_buses: dict[int, bool] = {}
-        self._mute_buses: dict[int, bool] = {}
-        self._known_bus_ids: set[int] = {0}
+        self._known_bus_ids: set[int] = {0, 1, 2}
+        self._listen_return_bus = bool(self.config.listen_return_bus)
+        self._listen_regie = bool(self.config.listen_regie)
 
     def _can_transmit_audio(self) -> bool:
         with self._state_lock:
-            if bool(self._muted):
-                return False
-            mode = str(self.config.mode or "always_on")
             ptt_buses = dict(self._ptt_buses)
-        if mode != "ptt":
-            return True
         return any(bool(v) for v in ptt_buses.values())
 
     def start(self) -> None:
@@ -139,10 +128,7 @@ class IntercomBridge:
 
     def _send_udp_frame_f32(self, frame_f32: np.ndarray) -> None:
         if frame_f32.shape[0] != int(FRAME_SAMPLES):
-            if frame_f32.shape[0] < int(FRAME_SAMPLES):
-                frame_f32 = np.pad(frame_f32, (0, int(FRAME_SAMPLES) - int(frame_f32.shape[0])))
-            else:
-                frame_f32 = frame_f32[: int(FRAME_SAMPLES)]
+            return
 
         payload = self._enc.encode(frame_f32.astype(np.float32, copy=False))
 
@@ -162,44 +148,44 @@ class IntercomBridge:
         if self._stop.is_set():
             return
 
-        if not self._can_transmit_audio():
-            return
-
         try:
             frame = int16_bytes_to_float32(pcm_i16_bytes)
         except Exception:
             return
 
         if frame.shape[0] != int(FRAME_SAMPLES):
-            if frame.shape[0] < int(FRAME_SAMPLES):
-                frame = np.pad(frame, (0, int(FRAME_SAMPLES) - int(frame.shape[0])))
-            else:
-                frame = frame[: int(FRAME_SAMPLES)]
+            return
 
         try:
             self._send_udp_frame_f32(frame)
         except Exception:
             return
 
-    def set_state(self, *, muted: Optional[bool] = None, ptt_active: Optional[bool] = None) -> None:
+    def set_ptt_bus(self, bus_id: int, active: bool) -> None:
+        try:
+            bid = int(bus_id)
+        except Exception:
+            return
         with self._state_lock:
-            if muted is not None:
-                self._muted = bool(muted)
-            if ptt_active is not None:
-                active = bool(ptt_active)
-                target_buses = set(self._known_bus_ids) | set(self._ptt_buses.keys())
-                if len(target_buses) == 0:
-                    target_buses = {0}
-                for bid in target_buses:
-                    self._ptt_buses[int(bid)] = bool(active)
-        self._control_send_state(muted=muted)
+            self._ptt_buses[bid] = bool(active)
+        self._control_send_state()
+
+    def set_listen_return_bus(self, enabled: bool) -> None:
+        with self._state_lock:
+            self._listen_return_bus = bool(enabled)
+        self._control_send_state()
+
+    def set_listen_regie(self, enabled: bool) -> None:
+        with self._state_lock:
+            self._listen_regie = bool(enabled)
+        self._control_send_state()
 
     def _control_send(self, sock: socket.socket, msg: dict[str, Any]) -> None:
         data = (json.dumps(msg, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
         with self._ctrl_send_lock:
             sock.sendall(data)
 
-    def _control_send_state(self, *, muted: Optional[bool] = None) -> None:
+    def _control_send_state(self) -> None:
         sock = self._ctrl_sock
         if sock is None or not self._ctrl_connected:
             return
@@ -209,10 +195,9 @@ class IntercomBridge:
                 "type": "state",
                 "client_id": int(self.client_id),
                 "ptt_buses": dict(self._ptt_buses),
-                "mute_buses": dict(self._mute_buses),
+                "listen_return_bus": bool(self._listen_return_bus),
+                "listen_regie": bool(self._listen_regie),
             }
-            if muted is not None:
-                msg["muted"] = bool(muted)
 
         try:
             self._control_send(sock, msg)
@@ -235,9 +220,6 @@ class IntercomBridge:
             if cfg is None and mtype == "update":
                 cfg = msg
             if isinstance(cfg, dict):
-                if "muted" in cfg:
-                    with self._state_lock:
-                        self._muted = bool(cfg.get("muted"))
                 if "buses" in cfg:
                     buses = cfg.get("buses")
                     parsed_bus_ids: set[int] = set()
@@ -294,14 +276,14 @@ class IntercomBridge:
                     "client_id": int(self.client_id),
                     "client_uuid": str(self.client_uuid),
                     "name": str(self.config.name or ""),
-                    "mode": str(self.config.mode or "ptt"),
                     "udp_port": int(self._udp_sock.getsockname()[1]),
                 }
                 self._control_send(sock, hello)
-                self._control_send_state(muted=bool(self._muted))
+                self._control_send_state()
 
                 buf = b""
                 last_ping = 0.0
+                ping_interval_s = 0.05
                 last_rx = time.monotonic()
 
                 while not self._stop.is_set() and not self._kick_pending:
@@ -309,7 +291,7 @@ class IntercomBridge:
                     if now - float(last_rx) >= float(liveness_timeout_s):
                         logger.debug("web bridge control liveness timeout (no rx for {:.1f}s)", float(liveness_timeout_s))
                         break
-                    if now - last_ping >= 2.0:
+                    if now - last_ping >= float(ping_interval_s):
                         try:
                             self._control_send(sock, {"type": "ping", "t": int(time.time() * 1000)})
                             last_ping = now
