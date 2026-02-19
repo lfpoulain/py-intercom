@@ -14,7 +14,7 @@ import sounddevice as sd
 from loguru import logger
 
 from ..common.audio import apply_gain_db, limit_peak, rms_dbfs
-from ..common.constants import AUDIO_UDP_PORT, CHANNELS, CONTROL_PORT_OFFSET, FRAME_SAMPLES, SAMPLE_RATE
+from ..common.constants import AUDIO_UDP_PORT, CHANNELS, CONTROL_PORT_OFFSET, FRAME_SAMPLES, JB_MAX_FRAMES, JB_START_FRAMES, SAMPLE_RATE
 from ..common.discovery import DiscoveryBeacon
 from ..common.devices import list_devices, resolve_device
 from ..common.identity import client_id_from_uuid
@@ -31,7 +31,7 @@ class ClientState:
     decoder: OpusDecoder = field(default_factory=OpusDecoder, repr=False)
     encoder: OpusEncoder = field(default_factory=OpusEncoder, repr=False)
     jb: OpusPacketJitterBuffer = field(
-        default_factory=lambda: OpusPacketJitterBuffer(start_frames=3, max_frames=60),
+        default_factory=lambda: OpusPacketJitterBuffer(start_frames=JB_START_FRAMES, max_frames=JB_MAX_FRAMES),
         repr=False,
     )
     vu_dbfs: float = -60.0
@@ -1016,7 +1016,7 @@ class IntercomServer:
                             st.decoder = OpusDecoder()
                         except Exception:
                             pass
-                        st.jb = OpusPacketJitterBuffer(start_frames=3, max_frames=60)
+                        st.jb = OpusPacketJitterBuffer(start_frames=JB_START_FRAMES, max_frames=JB_MAX_FRAMES)
                         st.last_timestamp_ms = 0
                         st.last_sequence_number = 0
                         st.name = name

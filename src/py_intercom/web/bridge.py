@@ -12,7 +12,7 @@ from loguru import logger
 
 from ..common.audio import int16_bytes_to_float32
 from ..common.identity import client_id_from_uuid
-from ..common.constants import CONTROL_PORT_OFFSET, FRAME_SAMPLES, SAMPLE_RATE
+from ..common.constants import CONTROL_PORT_OFFSET, CTRL_LIVENESS_TIMEOUT_S, CTRL_PING_INTERVAL_S, FRAME_SAMPLES, JB_MAX_FRAMES, JB_SILENCE_GATE_FRAMES, JB_START_FRAMES, SAMPLE_RATE
 from ..common.jitter_buffer import OpusPacketJitterBuffer
 from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import pack_audio_packet, unpack_audio_packet
@@ -43,7 +43,7 @@ class IntercomBridge:
 
         self._enc = OpusEncoder()
         self._dec = OpusDecoder()
-        self._jb = OpusPacketJitterBuffer(start_frames=3, max_frames=60)
+        self._jb = OpusPacketJitterBuffer(start_frames=JB_START_FRAMES, max_frames=JB_MAX_FRAMES)
 
         self._on_audio_frame = on_audio_frame
         self._on_control_msg = on_control_msg
@@ -258,7 +258,7 @@ class IntercomBridge:
 
     def _control_loop(self) -> None:
         backoff_s = 1.0
-        liveness_timeout_s = 6.0
+        liveness_timeout_s = CTRL_LIVENESS_TIMEOUT_S
         while not self._stop.is_set():
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -283,7 +283,7 @@ class IntercomBridge:
 
                 buf = b""
                 last_ping = 0.0
-                ping_interval_s = 0.05
+                ping_interval_s = CTRL_PING_INTERVAL_S
                 last_rx = time.monotonic()
 
                 while not self._stop.is_set() and not self._kick_pending:
@@ -364,7 +364,7 @@ class IntercomBridge:
         next_t = time.monotonic()
         _silence = np.zeros(int(FRAME_SAMPLES), dtype=np.float32)
         _consecutive_silence = 0
-        _SILENCE_GATE = 8  # stop sending after 8 consecutive silent frames (~80ms)
+        _SILENCE_GATE = JB_SILENCE_GATE_FRAMES
         while not self._stop.is_set():
             now = time.monotonic()
             if now < next_t:

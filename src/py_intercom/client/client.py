@@ -11,7 +11,7 @@ import sounddevice as sd
 from loguru import logger
 
 from ..common.audio import apply_gain_db, limit_peak, rms_dbfs
-from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, FRAME_SAMPLES, SAMPLE_RATE
+from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, CTRL_LIVENESS_TIMEOUT_S, CTRL_PING_INTERVAL_S, FRAME_SAMPLES, JB_MAX_FRAMES, JB_START_FRAMES, SAMPLE_RATE
 from ..common.jitter_buffer import OpusPacketJitterBuffer
 from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import pack_audio_packet, unpack_audio_packet
@@ -58,7 +58,7 @@ class IntercomClient:
         self._enc = OpusEncoder()
         self._dec = OpusDecoder()
 
-        self._jb = OpusPacketJitterBuffer(start_frames=3, max_frames=60)
+        self._jb = OpusPacketJitterBuffer(start_frames=JB_START_FRAMES, max_frames=JB_MAX_FRAMES)
 
         self._opus_ok: bool = True
         self._opus_err: str = ""
@@ -481,8 +481,8 @@ class IntercomClient:
 
     def _control_loop(self) -> None:
         backoff_s = 1.0
-        liveness_timeout_s = 6.0
-        ping_interval_s = 0.05
+        liveness_timeout_s = CTRL_LIVENESS_TIMEOUT_S
+        ping_interval_s = CTRL_PING_INTERVAL_S
 
         while not self._stop.is_set():
             try:
