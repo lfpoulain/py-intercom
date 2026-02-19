@@ -155,6 +155,23 @@ class _GlobalPttHotkeys:
                     except Exception:
                         pass
         self._active_buses = {}
+        # Reset toggle states and deactivate toggle buses (except always_on)
+        changed = False
+        for bid, state in list(self._window._ptt_bus_toggle_state.items()):
+            if state:
+                self._window._ptt_bus_toggle_state[int(bid)] = False
+                changed = True
+                mode = str(self._window._ptt_bus_modes.get(int(bid), "ptt"))
+                if mode == "toggle" and cli is not None:
+                    try:
+                        cli.set_ptt_bus(int(bid), False)
+                    except Exception:
+                        pass
+        if changed:
+            try:
+                self._window._refresh_state_labels()
+            except Exception:
+                pass
 
     def _combo_active(self, groups: list[set[str]]) -> bool:
         if not groups:
@@ -164,7 +181,7 @@ class _GlobalPttHotkeys:
                 return False
         return True
 
-    def _update(self) -> None:
+    def _update(self, *, _press_key: Optional[str] = None) -> None:
         cli = self._window._client
         if cli is None:
             return
@@ -175,21 +192,41 @@ class _GlobalPttHotkeys:
             bus_items = []
 
         for bid, edit in bus_items:
+            mode = str(self._window._ptt_bus_modes.get(int(bid), "ptt"))
+
+            if mode == "always_on":
+                continue
+
             groups = _parse_qt_shortcut(edit.keySequence().toString())
-            active = self._combo_active(groups)
-            prev = bool(self._active_buses.get(int(bid), False))
-            if bool(active) != prev:
-                self._active_buses[int(bid)] = bool(active)
-                try:
-                    cli.set_ptt_bus(int(bid), bool(active))
-                except Exception:
-                    pass
+
+            if mode == "toggle":
+                if _press_key is not None and groups and self._combo_active(groups):
+                    cur = bool(self._window._ptt_bus_toggle_state.get(int(bid), False))
+                    new_state = not cur
+                    self._window._ptt_bus_toggle_state[int(bid)] = new_state
+                    try:
+                        cli.set_ptt_bus(int(bid), new_state)
+                    except Exception:
+                        pass
+                    try:
+                        self._window._refresh_state_labels()
+                    except Exception:
+                        pass
+            else:
+                active = self._combo_active(groups)
+                prev = bool(self._active_buses.get(int(bid), False))
+                if bool(active) != prev:
+                    self._active_buses[int(bid)] = bool(active)
+                    try:
+                        cli.set_ptt_bus(int(bid), bool(active))
+                    except Exception:
+                        pass
 
     def _on_press(self, key) -> None:
         k = _norm_key(key)
         if k:
             self._pressed.add(k)
-            self._update()
+            self._update(_press_key=k)
 
     def _on_release(self, key) -> None:
         k = _norm_key(key)
@@ -253,6 +290,10 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._name = QtWidgets.QLineEdit(str(self._preset_get("name", "")))
         self._ptt_bus_keys: dict[int, QtWidgets.QKeySequenceEdit] = {}
         self._ptt_bus_clear: dict[int, QtWidgets.QToolButton] = {}
+        self._ptt_bus_mode_widgets: dict[int, QtWidgets.QComboBox] = {}
+        self._ptt_bus_modes: dict[int, str] = {}
+        self._ptt_bus_toggle_state: dict[int, bool] = {}
+        self._ptt_bus_state_labels: dict[int, QtWidgets.QLabel] = {}
         self._shortcut_widgets: list[QtWidgets.QWidget] = []
         self._known_buses: dict[int, dict] = {
             0: {"bus_id": 0, "name": "Regie", "feed_to_regie": False},
@@ -545,11 +586,62 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         active_buses = self._global_ptt._active_buses if self._global_ptt is not None else {}
         for bid in list(self._ptt_bus_keys.keys()):
-            active = bool(active_buses.get(int(bid), False))
+            mode = str(self._ptt_bus_modes.get(int(bid), "ptt"))
+            if mode == "always_on":
+                active = True
+            elif mode == "toggle":
+                active = bool(self._ptt_bus_toggle_state.get(int(bid), False))
+            else:
+                active = bool(active_buses.get(int(bid), False))
             try:
                 cli.set_ptt_bus(int(bid), bool(active))
             except Exception:
                 pass
+
+    def _update_toggle_state_label(self, lbl: QtWidgets.QLabel, bus_id: int, mode: str) -> None:
+        if mode == "always_on":
+            lbl.setText("ON")
+            lbl.setStyleSheet("color: #4caf50; font-weight: bold;")
+        elif mode == "toggle":
+            on = bool(self._ptt_bus_toggle_state.get(int(bus_id), False))
+            lbl.setText("ON" if on else "OFF")
+            lbl.setStyleSheet("color: #4caf50; font-weight: bold;" if on else "color: #f44336; font-weight: bold;")
+        elif mode == "ptt":
+            active_buses = self._global_ptt._active_buses if self._global_ptt is not None else {}
+            on = bool(active_buses.get(int(bus_id), False))
+            if self._connected:
+                lbl.setText("ON" if on else "OFF")
+                lbl.setStyleSheet("color: #4caf50; font-weight: bold;" if on else "color: #f44336; font-weight: bold;")
+            else:
+                lbl.setText("")
+                lbl.setStyleSheet("")
+        else:
+            lbl.setText("")
+            lbl.setStyleSheet("")
+
+    def _refresh_state_labels(self) -> None:
+        for bid, lbl in self._ptt_bus_state_labels.items():
+            mode = str(self._ptt_bus_modes.get(int(bid), "ptt"))
+            self._update_toggle_state_label(lbl, int(bid), mode)
+
+    def _on_ptt_bus_mode_changed(self, bus_id: int) -> None:
+        cb = self._ptt_bus_mode_widgets.get(int(bus_id))
+        if cb is None:
+            return
+        mode = str(cb.currentData() or "ptt")
+        self._ptt_bus_modes[int(bus_id)] = mode
+        if mode != "toggle":
+            self._ptt_bus_toggle_state.pop(int(bus_id), None)
+        if mode == "always_on" and self._global_ptt is not None:
+            self._global_ptt._active_buses.pop(int(bus_id), None)
+        lbl = self._ptt_bus_state_labels.get(int(bus_id))
+        if lbl is not None:
+            self._update_toggle_state_label(lbl, int(bus_id), mode)
+        saved = {str(k): v for k, v in self._ptt_bus_modes.items()}
+        self._preset_set("ptt_bus_modes", saved)
+        self._preset_save()
+        if self._connected:
+            self._apply_ptt_modes_to_client()
 
     def _sync_bus_widgets(self, buses: dict[int, dict], *, apply_saved: bool = False) -> None:
         parsed: dict[int, dict] = {}
@@ -581,6 +673,8 @@ class ClientWindow(QtWidgets.QMainWindow):
             except Exception:
                 old_keys[int(bid)] = ""
 
+        old_modes: dict[int, str] = dict(self._ptt_bus_modes)
+
         if apply_saved:
             try:
                 saved_keys = self._preset_get("ptt_bus_keys", {})
@@ -592,13 +686,26 @@ class ClientWindow(QtWidgets.QMainWindow):
                             pass
             except Exception:
                 pass
+            try:
+                saved_modes = self._preset_get("ptt_bus_modes", {})
+                if isinstance(saved_modes, dict):
+                    for k, v in saved_modes.items():
+                        try:
+                            old_modes[int(k)] = str(v or "ptt")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
         self._clear_layout(self._bus_rows_layout)
         self._shortcut_widgets = []
         self._ptt_bus_keys = {}
         self._ptt_bus_clear = {}
+        self._ptt_bus_mode_widgets = {}
+        self._ptt_bus_modes = {}
+        self._ptt_bus_state_labels = {}
 
-        headers = ["Bus", "PTT key"]
+        headers = ["Bus", "Mode", "État", "PTT key"]
         for col, title in enumerate(headers):
             lbl = QtWidgets.QLabel(str(title))
             f = lbl.font()
@@ -612,6 +719,24 @@ class ClientWindow(QtWidgets.QMainWindow):
             bus_name = str(b.get("name") or f"Bus {int(bus_id)}")
 
             lbl = QtWidgets.QLabel(str(bus_name))
+
+            mode_cb = QtWidgets.QComboBox()
+            patch_combo(mode_cb)
+            mode_cb.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+            mode_cb.addItem("PTT", "ptt")
+            mode_cb.addItem("Always On", "always_on")
+            mode_cb.addItem("Toggle", "toggle")
+            saved_mode = str(old_modes.get(int(bus_id), "ptt"))
+            idx = mode_cb.findData(saved_mode)
+            if idx >= 0:
+                mode_cb.setCurrentIndex(idx)
+            self._ptt_bus_modes[int(bus_id)] = str(mode_cb.currentData() or "ptt")
+            mode_cb.currentIndexChanged.connect(lambda _i, bid=int(bus_id): self._on_ptt_bus_mode_changed(bid))
+
+            state_lbl = QtWidgets.QLabel("")
+            state_lbl.setFixedWidth(36)
+            state_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self._update_toggle_state_label(state_lbl, int(bus_id), str(mode_cb.currentData() or "ptt"))
 
             edit = _ShortcutKeySequenceEdit()
             edit.setToolTip("Click then press shortcut. Esc cancels. Del clears.")
@@ -632,10 +757,14 @@ class ClientWindow(QtWidgets.QMainWindow):
             edit.keySequenceChanged.connect(lambda _seq, bid=int(bus_id): self._on_ptt_bus_key_changed(bid))
 
             self._bus_rows_layout.addWidget(lbl, row, 0)
-            self._bus_rows_layout.addWidget(self._make_shortcut_widget(edit, clear_btn), row, 1)
+            self._bus_rows_layout.addWidget(mode_cb, row, 1)
+            self._bus_rows_layout.addWidget(state_lbl, row, 2)
+            self._bus_rows_layout.addWidget(self._make_shortcut_widget(edit, clear_btn), row, 3)
 
             self._ptt_bus_keys[int(bus_id)] = edit
             self._ptt_bus_clear[int(bus_id)] = clear_btn
+            self._ptt_bus_mode_widgets[int(bus_id)] = mode_cb
+            self._ptt_bus_state_labels[int(bus_id)] = state_lbl
             row += 1
 
         self._known_buses = dict(parsed)
@@ -1426,6 +1555,11 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         if parsed_buses:
             self._sync_bus_widgets(parsed_buses)
+
+        try:
+            self._refresh_state_labels()
+        except Exception:
+            pass
 
     def changeEvent(self, event: QtCore.QEvent) -> None:  # noqa: N802
         super().changeEvent(event)
