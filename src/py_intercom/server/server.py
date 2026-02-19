@@ -972,6 +972,7 @@ class IntercomServer:
                             self._clients[int(client_id)] = st
                         st.name = name
                         st.client_uuid = client_uuid
+                        st.ptt_buses = {}
                         try:
                             st.jb.reset()
                         except Exception:
@@ -1200,6 +1201,8 @@ class IntercomServer:
                     ptt_buses, ctrl_ok, _last_ctrl = meta
                     # If control is disconnected, rely on client-side gating and do not block.
                     if not bool(ctrl_ok):
+                        return True
+                    if not ptt_buses:
                         return True
                     return bool(ptt_buses.get(int(bus_id), False))
 

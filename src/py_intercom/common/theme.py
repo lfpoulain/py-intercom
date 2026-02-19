@@ -63,18 +63,36 @@ def apply_theme(app: QtWidgets.QApplication) -> None:
             color: {text};
             background: {surface_alt};
         }}
+        QLineEdit {{
+            border: 1px solid {border};
+            background: {surface};
+            padding: 3px 6px;
+            min-height: 24px;
+            border-radius: 3px;
+        }}
+        QLineEdit:focus {{
+            border: 1px solid {accent};
+        }}
+        QLineEdit:disabled {{
+            color: {disabled_fg};
+            background: {surface_alt};
+        }}
         QComboBox {{
             border: 1px solid {border};
             background: {surface_alt};
-            padding: 2px 4px;
-            max-height: 22px;
+            padding: 3px 6px;
+            min-height: 24px;
+            border-radius: 3px;
         }}
         QComboBox::drop-down {{
             border: none;
-            width: 18px;
+            width: 20px;
         }}
         QComboBox:hover {{
             border: 1px solid {accent_hover};
+        }}
+        QComboBox:focus {{
+            border: 1px solid {accent};
         }}
         QComboBox QAbstractItemView {{
             color: {text};
@@ -83,63 +101,112 @@ def apply_theme(app: QtWidgets.QApplication) -> None:
             selection-color: {accent_text};
             outline: none;
         }}
-        QPushButton, QToolButton {{
+        QPushButton {{
             border: 1px solid {border};
             background: {surface_alt};
-            padding: 3px 10px;
+            padding: 5px 16px;
+            min-height: 28px;
+            border-radius: 4px;
+            font-weight: 500;
+        }}
+        QToolButton {{
+            border: 1px solid {border};
+            background: {surface_alt};
+            padding: 3px 8px;
             border-radius: 4px;
         }}
-        QPushButton:hover, QToolButton:hover {{
+        QPushButton:hover {{
             background-color: {accent};
             color: {accent_text};
             border: 1px solid {accent_hover};
         }}
-        QPushButton[class="warning"], QToolButton[class="warning"] {{
+        QToolButton:hover {{
+            background-color: {accent};
+            color: {accent_text};
+            border: 1px solid {accent_hover};
+        }}
+        QPushButton[class="warning"] {{
             border: 1px solid {warning};
             background-color: {warning};
             color: #111111;
+            font-weight: 600;
         }}
-        QPushButton[class="warning"]:hover, QToolButton[class="warning"]:hover {{
+        QPushButton[class="warning"]:hover {{
             background-color: #e0a800;
             border: 1px solid #e0a800;
             color: #111111;
         }}
-        QPushButton[class="success"], QToolButton[class="success"] {{
+        QToolButton[class="warning"] {{
+            border: 1px solid {warning};
+            background-color: {warning};
+            color: #111111;
+        }}
+        QToolButton[class="warning"]:hover {{
+            background-color: #e0a800;
+            border: 1px solid #e0a800;
+            color: #111111;
+        }}
+        QPushButton[class="success"] {{
+            border: 1px solid {success};
+            background-color: {success};
+            color: #ffffff;
+            font-weight: 600;
+        }}
+        QPushButton[class="success"]:hover {{
+            background-color: #25a06e;
+            border: 1px solid #25a06e;
+            color: #ffffff;
+        }}
+        QToolButton[class="success"] {{
             border: 1px solid {success};
             background-color: {success};
             color: #ffffff;
         }}
-        QPushButton[class="success"]:hover, QToolButton[class="success"]:hover {{
-            background-color: #138496;
-            border: 1px solid #138496;
+        QToolButton[class="success"]:hover {{
+            background-color: #25a06e;
+            border: 1px solid #25a06e;
             color: #ffffff;
         }}
-        QPushButton[class="danger"], QToolButton[class="danger"] {{
+        QPushButton[class="danger"] {{
+            border: 1px solid {danger};
+            background-color: {danger};
+            color: #ffffff;
+            font-weight: 600;
+        }}
+        QPushButton[class="danger"]:hover {{
+            background-color: #c94040;
+            border: 1px solid #c94040;
+            color: #ffffff;
+        }}
+        QToolButton[class="danger"] {{
             border: 1px solid {danger};
             background-color: {danger};
             color: #ffffff;
         }}
-        QPushButton[class="danger"]:hover, QToolButton[class="danger"]:hover {{
-            background-color: #bd2130;
-            border: 1px solid #bd2130;
+        QToolButton[class="danger"]:hover {{
+            background-color: #c94040;
+            border: 1px solid #c94040;
             color: #ffffff;
         }}
         QPushButton:disabled, QToolButton:disabled {{
             border: 1px solid {border};
             color: {disabled_fg};
             background-color: {surface};
+            font-weight: normal;
         }}
         QGroupBox {{
             border: 1px solid {border};
             border-radius: 6px;
-            padding-top: 14px;
-            margin-top: 6px;
+            padding-top: 18px;
+            margin-top: 8px;
         }}
         QGroupBox::title {{
             subcontrol-origin: margin;
             subcontrol-position: top left;
             background-color: {bg};
-            padding: 0 6px;
+            padding: 0 8px;
+            font-weight: 600;
+            color: {accent_hover};
         }}
 
         /* --- Slider --- */
@@ -188,6 +255,17 @@ def apply_theme(app: QtWidgets.QApplication) -> None:
         }}
         QStatusBar QLabel {{
             padding: 0 6px;
+        }}
+
+        /* --- Splitter --- */
+        QSplitter::handle {{
+            background: {border};
+        }}
+        QSplitter::handle:horizontal {{
+            width: 2px;
+        }}
+        QSplitter::handle:vertical {{
+            height: 2px;
         }}
     """
     app.setStyleSheet(patch)

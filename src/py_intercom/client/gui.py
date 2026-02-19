@@ -3,7 +3,6 @@ from __future__ import annotations
 import sys
 import socket
 import uuid
-import zlib
 from pathlib import Path
 from typing import Optional
 
@@ -11,46 +10,13 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from pynput import keyboard
 
 from ..common.constants import AUDIO_UDP_PORT
-from ..common.devices import list_devices
+from ..common.devices import list_devices, resolve_device
+from ..common.gui_utils import DeviceWorker, is_checked
+from ..common.identity import client_id_from_uuid
 from ..common.discovery import DiscoveryListener
 from ..common.jsonio import atomic_write_json, read_json_file
 from ..common.theme import VuMeter, apply_theme, patch_combo
 from .client import ClientConfig, IntercomClient
-
-
-class _DeviceWorker(QtCore.QObject):
-    finished = QtCore.Signal(object, str)
-
-    def __init__(self, hostapi_filter: Optional[str]):
-        super().__init__()
-        self._hostapi_filter = hostapi_filter
-
-    @QtCore.Slot()
-    def run(self) -> None:
-        try:
-            devs = list_devices(hostapi_substring=self._hostapi_filter, hard_refresh=True, validate=True)
-            self.finished.emit(devs, "")
-        except Exception as e:
-            self.finished.emit([], str(e))
-
-
-def _is_checked(state) -> bool:
-    try:
-        state_val = int(state.value) if hasattr(state, "value") else int(state)
-    except Exception:
-        return False
-
-    try:
-        checked_val = int(QtCore.Qt.CheckState.Checked.value)
-    except Exception:
-        checked_val = 2
-
-    return int(state_val) == int(checked_val)
-
-
-def _db_to_progress(db: float) -> int:
-    db = max(-60.0, min(0.0, float(db)))
-    return int(round((db + 60.0) / 60.0 * 100.0))
 
 
 class _ShortcutKeySequenceEdit(QtWidgets.QKeySequenceEdit):
@@ -257,7 +223,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         if not client_uuid:
             client_uuid = str(uuid.uuid4())
             self._preset_set("client_uuid", client_uuid)
-        stable_id = int(zlib.crc32(client_uuid.encode("utf-8")) & 0xFFFFFFFF)
+        stable_id = int(client_id_from_uuid(client_uuid))
         self._client_id_label = QtWidgets.QLabel("Client ID")
         self._client_id = QtWidgets.QLineEdit(str(stable_id))
         self._client_id.setReadOnly(True)
@@ -293,10 +259,12 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._refresh_devices_btn.setProperty("class", "warning")
         self._device_status = QtWidgets.QLabel("")
 
-        self._connect_btn = QtWidgets.QPushButton("Connect")
+        self._connect_btn = QtWidgets.QPushButton("▶  Connect")
         self._connect_btn.setProperty("class", "success")
-        self._disconnect_btn = QtWidgets.QPushButton("Disconnect")
+        self._connect_btn.setMinimumWidth(120)
+        self._disconnect_btn = QtWidgets.QPushButton("■  Disconnect")
         self._disconnect_btn.setProperty("class", "danger")
+        self._disconnect_btn.setMinimumWidth(120)
         self._disconnect_btn.setEnabled(False)
 
         self._start_minimized = QtWidgets.QCheckBox("Start minimized")
@@ -305,6 +273,14 @@ class ClientWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         self._start_minimized.stateChanged.connect(self._on_start_minimized_changed)
+
+        self._autoconnect_cb = QtWidgets.QCheckBox("Auto-connect")
+        self._autoconnect_cb.setToolTip("Connect automatically on startup")
+        try:
+            self._autoconnect_cb.setChecked(bool(self._preset_get("autoconnect", False)))
+        except Exception:
+            pass
+        self._autoconnect_cb.stateChanged.connect(self._on_autoconnect_changed)
 
         self._listen_regie = QtWidgets.QCheckBox("Listen Regie")
         self._listen_regie.setEnabled(False)
@@ -372,24 +348,53 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         # -- Connection group --
         conn_box = QtWidgets.QGroupBox("Connection")
-        conn_lay = QtWidgets.QGridLayout(conn_box)
-        conn_lay.setContentsMargins(6, 4, 6, 4)
-        conn_lay.setVerticalSpacing(2)
-        conn_lay.addWidget(QtWidgets.QLabel("Discovered"), 0, 0)
-        conn_lay.addWidget(self._discovered_servers, 0, 1, 1, 3)
-        conn_lay.addWidget(QtWidgets.QLabel("Server IP"), 1, 0)
-        conn_lay.addWidget(self._server_ip, 1, 1)
-        conn_lay.addWidget(self._client_id_label, 2, 0)
-        conn_lay.addWidget(self._client_id, 2, 1, 1, 3)
-        conn_lay.addWidget(QtWidgets.QLabel("Name"), 3, 0)
-        conn_lay.addWidget(self._name, 3, 1, 1, 3)
-        conn_lay.addWidget(self._start_minimized, 4, 0, 1, 2)
+        conn_box_lay = QtWidgets.QVBoxLayout(conn_box)
+        conn_box_lay.setContentsMargins(10, 8, 10, 8)
+        conn_box_lay.setSpacing(0)
+
+        # Inner: left fields | mid buttons | right options
+        conn_inner = QtWidgets.QHBoxLayout()
+        conn_inner.setSpacing(16)
+
+        # Left: form fields
+        conn_left = QtWidgets.QGridLayout()
+        conn_left.setVerticalSpacing(6)
+        conn_left.setHorizontalSpacing(8)
+        conn_left.addWidget(QtWidgets.QLabel("Discovered"), 0, 0)
+        conn_left.addWidget(self._discovered_servers, 0, 1)
+        conn_left.addWidget(QtWidgets.QLabel("Server IP"), 1, 0)
+        conn_left.addWidget(self._server_ip, 1, 1)
+        conn_left.addWidget(self._client_id_label, 2, 0)
+        conn_left.addWidget(self._client_id, 2, 1)
+        conn_left.addWidget(QtWidgets.QLabel("Name"), 3, 0)
+        conn_left.addWidget(self._name, 3, 1)
+        conn_left.setColumnStretch(1, 1)
+
+        # Middle: Connect / Disconnect stacked
+        conn_mid = QtWidgets.QVBoxLayout()
+        conn_mid.setSpacing(6)
+        conn_mid.addWidget(self._connect_btn)
+        conn_mid.addWidget(self._disconnect_btn)
+        conn_mid.addStretch(1)
+
+        # Right: options stacked
+        conn_right = QtWidgets.QVBoxLayout()
+        conn_right.setSpacing(4)
+        conn_right.addWidget(self._autoconnect_cb)
+        conn_right.addWidget(self._start_minimized)
+        conn_right.addStretch(1)
+
+        conn_inner.addLayout(conn_left, 1)
+        conn_inner.addLayout(conn_mid, 0)
+        conn_inner.addLayout(conn_right, 0)
+        conn_box_lay.addLayout(conn_inner)
 
         # -- Audio devices group --
         dev_box = QtWidgets.QGroupBox("Audio Devices")
         dev_lay = QtWidgets.QGridLayout(dev_box)
-        dev_lay.setContentsMargins(6, 4, 6, 4)
-        dev_lay.setVerticalSpacing(2)
+        dev_lay.setContentsMargins(10, 8, 10, 8)
+        dev_lay.setVerticalSpacing(6)
+        dev_lay.setHorizontalSpacing(8)
         dev_lay.addWidget(QtWidgets.QLabel("Microphone"), 0, 0)
         dev_lay.addWidget(self._input_device, 0, 1, 1, 3)
         dev_lay.addWidget(QtWidgets.QLabel("Headphones"), 1, 0)
@@ -397,14 +402,13 @@ class ClientWindow(QtWidgets.QMainWindow):
         dev_lay.addWidget(self._show_all_devices, 2, 0)
         dev_lay.addWidget(self._refresh_devices_btn, 2, 1)
         dev_lay.addWidget(self._device_status, 2, 2, 1, 2)
-        dev_lay.addWidget(self._connect_btn, 3, 0, 1, 2)
-        dev_lay.addWidget(self._disconnect_btn, 3, 2, 1, 2)
 
         # -- Audio controls group --
         ctrl_box = QtWidgets.QGroupBox("Audio Controls")
         ctrl_lay = QtWidgets.QGridLayout(ctrl_box)
-        ctrl_lay.setContentsMargins(6, 4, 6, 4)
-        ctrl_lay.setVerticalSpacing(2)
+        ctrl_lay.setContentsMargins(10, 8, 10, 8)
+        ctrl_lay.setVerticalSpacing(6)
+        ctrl_lay.setHorizontalSpacing(8)
         ctrl_lay.addWidget(self._listen_regie, 0, 0)
         ctrl_lay.addWidget(self._listen_return_bus, 0, 1)
         ctrl_lay.addWidget(QtWidgets.QLabel("Mic gain"), 1, 0)
@@ -420,21 +424,27 @@ class ClientWindow(QtWidgets.QMainWindow):
         # -- PTT / Routing group --
         ptt_box = QtWidgets.QGroupBox("PTT / Routing")
         ptt_lay = QtWidgets.QGridLayout(ptt_box)
-        ptt_lay.setContentsMargins(6, 4, 6, 4)
-        ptt_lay.setVerticalSpacing(2)
+        ptt_lay.setContentsMargins(10, 8, 10, 8)
+        ptt_lay.setVerticalSpacing(6)
         ptt_lay.addWidget(self._bus_rows_widget, 0, 0, 1, 1)
 
         # -- Meters group --
         meters_box = QtWidgets.QGroupBox("Meters")
-        meters_lay = QtWidgets.QGridLayout(meters_box)
-        meters_lay.setContentsMargins(6, 4, 6, 4)
-        meters_lay.setVerticalSpacing(2)
-        meters_lay.addWidget(QtWidgets.QLabel("Input VU"), 0, 0)
-        meters_lay.addWidget(self._in_vu, 0, 1)
-        meters_lay.addWidget(QtWidgets.QLabel("Output VU"), 1, 0)
-        meters_lay.addWidget(self._out_vu, 1, 1)
-        meters_lay.addWidget(QtWidgets.QLabel("Return bus VU"), 2, 0)
-        meters_lay.addWidget(self._return_vu, 2, 1)
+        meters_lay = QtWidgets.QHBoxLayout(meters_box)
+        meters_lay.setContentsMargins(10, 8, 10, 8)
+        meters_lay.setSpacing(12)
+        lbl_in = QtWidgets.QLabel("Input")
+        lbl_in.setFixedWidth(40)
+        meters_lay.addWidget(lbl_in)
+        meters_lay.addWidget(self._in_vu, 1)
+        lbl_out = QtWidgets.QLabel("Output")
+        lbl_out.setFixedWidth(44)
+        meters_lay.addWidget(lbl_out)
+        meters_lay.addWidget(self._out_vu, 1)
+        lbl_ret = QtWidgets.QLabel("Return")
+        lbl_ret.setFixedWidth(44)
+        meters_lay.addWidget(lbl_ret)
+        meters_lay.addWidget(self._return_vu, 1)
 
         self._info_btn = QtWidgets.QToolButton()
         self._info_btn.setText("ℹ")
@@ -447,8 +457,8 @@ class ClientWindow(QtWidgets.QMainWindow):
         bottom.addWidget(self._info_btn)
 
         layout = QtWidgets.QVBoxLayout(central)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
         layout.addWidget(conn_box)
         layout.addWidget(dev_box)
         layout.addWidget(ctrl_box)
@@ -472,7 +482,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._timer.timeout.connect(self._refresh_stats)
 
         self._device_thread: Optional[QtCore.QThread] = None
-        self._device_worker: Optional[_DeviceWorker] = None
+        self._device_worker: Optional[DeviceWorker] = None
         self._device_timeout: Optional[QtCore.QTimer] = None
         self._last_device_error: str = ""
         self._last_device_count: int = 0
@@ -715,7 +725,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._preset["listen_return_bus"] = False
         self._preset["input_gain_db"] = 0.0
         self._preset["output_gain_db"] = 0.0
-        stable_id = int(zlib.crc32(client_uuid.encode("utf-8")) & 0xFFFFFFFF)
+        stable_id = int(client_id_from_uuid(client_uuid))
 
         self._preset_save()
 
@@ -855,7 +865,7 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         client_uuid = str(uuid.uuid4())
         self._preset_set("client_uuid", client_uuid)
-        stable_id = int(zlib.crc32(client_uuid.encode("utf-8")) & 0xFFFFFFFF)
+        stable_id = int(client_id_from_uuid(client_uuid))
         self._client_id.setText(str(stable_id))
 
     def _show_geek_info(self) -> None:
@@ -960,7 +970,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._last_device_count = 0
 
         self._device_thread = QtCore.QThread(self)
-        self._device_worker = _DeviceWorker(hostapi_filter=hostapi_filter)
+        self._device_worker = DeviceWorker(hostapi_filter=hostapi_filter)
         self._device_worker.moveToThread(self._device_thread)
         self._device_thread.started.connect(self._device_worker.run)
         self._device_worker.finished.connect(self._on_devices_refreshed)
@@ -1042,17 +1052,6 @@ class ClientWindow(QtWidgets.QMainWindow):
         saved_out_name = str(self._preset_get("output_device_name", "") or "")
         saved_out_hostapi = str(self._preset_get("output_device_hostapi", "") or "")
 
-        def _resolve_device(saved_name: str, saved_hostapi: str, fallback_idx: Optional[int]) -> Optional[int]:
-            if saved_name:
-                for d in devs:
-                    if str(d.name) == saved_name and (not saved_hostapi or str(d.hostapi) == saved_hostapi):
-                        return int(d.index)
-            if fallback_idx is not None and int(fallback_idx) >= 0:
-                for d in devs:
-                    if int(d.index) == int(fallback_idx):
-                        return int(d.index)
-            return None
-
         self._input_device.blockSignals(True)
         self._output_device.blockSignals(True)
         try:
@@ -1065,9 +1064,9 @@ class ClientWindow(QtWidgets.QMainWindow):
                 if d.max_output_channels > 0:
                     self._output_device.addItem(f"{d.index}-{d.name}", d.index)
 
-            resolved_in = _resolve_device(saved_in_name, saved_in_hostapi, int(saved_in) if int(saved_in) >= 0 else None)
+            resolved_in = resolve_device(saved_in_name, saved_in_hostapi, int(saved_in) if int(saved_in) >= 0 else None, devs)
             if resolved_in is None and cur_in is not None:
-                resolved_in = _resolve_device("", "", int(cur_in))
+                resolved_in = resolve_device("", "", int(cur_in), devs)
             if resolved_in is not None:
                 i = self._input_device.findData(int(resolved_in))
                 if i >= 0:
@@ -1078,9 +1077,9 @@ class ClientWindow(QtWidgets.QMainWindow):
                     self._preset_set("input_device_name", str(getattr(info, "name", "")))
                     self._preset_set("input_device_hostapi", str(getattr(info, "hostapi", "")))
 
-            resolved_out = _resolve_device(saved_out_name, saved_out_hostapi, int(saved_out) if int(saved_out) >= 0 else None)
+            resolved_out = resolve_device(saved_out_name, saved_out_hostapi, int(saved_out) if int(saved_out) >= 0 else None, devs)
             if resolved_out is None and cur_out is not None:
-                resolved_out = _resolve_device("", "", int(cur_out))
+                resolved_out = resolve_device("", "", int(cur_out), devs)
             if resolved_out is not None:
                 i = self._output_device.findData(int(resolved_out))
                 if i >= 0:
@@ -1093,6 +1092,8 @@ class ClientWindow(QtWidgets.QMainWindow):
         finally:
             self._input_device.blockSignals(False)
             self._output_device.blockSignals(False)
+
+        self._maybe_autoconnect()
 
     def _connect(self) -> None:
         if self._connected:
@@ -1275,7 +1276,7 @@ class ClientWindow(QtWidgets.QMainWindow):
                 pass
 
     def _on_listen_regie_changed(self, state: int) -> None:
-        enabled = _is_checked(state)
+        enabled = is_checked(state)
         try:
             self._preset_set("listen_regie", bool(enabled))
         except Exception:
@@ -1285,7 +1286,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._client.set_listen_regie(bool(enabled))
 
     def _on_listen_return_bus_changed(self, state: int) -> None:
-        enabled = _is_checked(state)
+        enabled = is_checked(state)
         try:
             self._preset_set("listen_return_bus", bool(enabled))
         except Exception:
@@ -1332,9 +1333,19 @@ class ClientWindow(QtWidgets.QMainWindow):
 
     def _on_start_minimized_changed(self, state: int) -> None:
         try:
-            self._preset_set("start_minimized", bool(_is_checked(state)))
+            self._preset_set("start_minimized", bool(is_checked(state)))
         except Exception:
             pass
+
+    def _on_autoconnect_changed(self, state: int) -> None:
+        try:
+            self._preset_set("autoconnect", bool(is_checked(state)))
+        except Exception:
+            pass
+
+    def _maybe_autoconnect(self) -> None:
+        if not self._connected and bool(self._autoconnect_cb.isChecked()):
+            self._connect()
 
     def _refresh_stats(self) -> None:
         if self._client is None:
