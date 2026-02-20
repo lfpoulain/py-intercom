@@ -574,6 +574,14 @@ class ServerWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def _reopen_return_after_start(self) -> None:
+        if self._server is None:
+            return
+        try:
+            self._server.reopen_return_input()
+        except Exception:
+            pass
+
     def _refresh_bus_selectors(self, buses: Dict[int, dict]) -> None:
         sorted_buses = [
             (int(bid), b)
@@ -1032,6 +1040,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._timer.start()
         self._status_label.setText(f"Running on port {int(AUDIO_UDP_PORT)}")
         QtCore.QTimer.singleShot(1200, self._reopen_outputs_after_start)
+        QtCore.QTimer.singleShot(2500, self._reopen_return_after_start)
 
     def _stop_server(self) -> None:
         if self._server is None:

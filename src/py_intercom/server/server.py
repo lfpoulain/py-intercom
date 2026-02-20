@@ -251,6 +251,7 @@ class IntercomServer:
                     continue
                 feed_by_id[int(bid)] = bool(b.get("feed_to_regie", False))
 
+        logger.debug("load_preset: return_enabled={} return_input_device={}", bool(return_enabled), return_input_device)
         with self._lock:
             self._buses = {
                 0: AudioBus(bus_id=0, name="Regie", gain_db=0.0, feed_to_regie=False),
@@ -531,6 +532,18 @@ class IntercomServer:
             except Exception as e:
                 logger.warning("output {} reopen failed: {}", int(out.output_id), e)
 
+    def reopen_return_input(self) -> None:
+        if not bool(self._running) or self._stop.is_set():
+            return
+        if not bool(self._return_enabled) or self._return_input_device is None:
+            return
+        self._close_return_input_stream()
+        try:
+            self._open_return_input_stream(int(self._return_input_device))
+            logger.debug("reopen_return_input: stream reopened on device {}", self._return_input_device)
+        except Exception as e:
+            logger.warning("reopen_return_input failed: {}", e)
+
     def set_return_enabled(self, enabled: bool) -> None:
         self._return_enabled = bool(enabled)
         try:
@@ -659,10 +672,14 @@ class IntercomServer:
             self._retry_thread.start()
 
         try:
+            logger.info("start: return_enabled={} return_input_device={}", bool(self._return_enabled), self._return_input_device)
             if self._return_enabled and self._return_input_device is not None:
                 self._open_return_input_stream(int(self._return_input_device))
+                logger.info("start: return input stream opened on device {}", self._return_input_device)
+            else:
+                logger.info("start: return input stream NOT opened (enabled={} device={})", bool(self._return_enabled), self._return_input_device)
         except Exception as e:
-            logger.warning("return input failed to start: {}", e)
+            logger.error("return input failed to start: {}", e)
 
     def stop(self) -> None:
         self._stop.set()
@@ -782,6 +799,9 @@ class IntercomServer:
         self._return_stream = st
 
     def _return_in_callback(self, indata, frames, time_info, status) -> None:
+        if not getattr(self, "_return_cb_logged", False):
+            self._return_cb_logged = True
+            logger.info("return_in_callback: first call frames={} return_enabled={}", int(frames), bool(self._return_enabled))
         if status:
             logger.debug("return in status: {}", status)
 
@@ -955,6 +975,7 @@ class IntercomServer:
                         listen_return_bus = msg.get("listen_return_bus")
                         listen_regie = msg.get("listen_regie")
                         return_gain_db = msg.get("return_gain_db")
+                        logger.debug("state from cid={}: listen_return_bus={} listen_regie={}", cid, listen_return_bus, listen_regie)
                         with self._lock:
                             st = self._clients.get(int(cid))
                             if st is not None:
