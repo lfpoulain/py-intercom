@@ -29,6 +29,17 @@ body {
   background: var(--bg);
   color: var(--text);
   min-height: 100vh;
+  /* Prevent pull-to-refresh and selection on mobile */
+  overscroll-behavior-y: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Allow text selection in inputs and logs */
+input, select, textarea, .log-body {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 input, select, button, textarea {
@@ -48,7 +59,10 @@ select option {
 .app {
   max-width: 520px;
   margin: 0 auto;
-  padding: 0 16px 24px;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-bottom: max(24px, env(safe-area-inset-bottom, 0px));
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
 }
 
 /* ── Topbar ── */
@@ -98,7 +112,50 @@ select option {
   border-radius: 6px;
 }
 
-.topbar-right { display: flex; align-items: center; }
+.topbar-right { display: flex; align-items: center; gap: 12px; }
+
+/* Audio Suspended Banner */
+.audio-suspended-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: var(--danger);
+  color: #fff;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  margin-bottom: 16px;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  box-shadow: 0 4px 12px var(--danger-dim);
+  animation: pulse-danger 2s infinite;
+}
+
+@keyframes pulse-danger {
+  0% { box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.4); }
+  70% { box-shadow: 0 0 0 10px rgba(248, 113, 113, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(248, 113, 113, 0); }
+}
+
+.audio-suspended-banner svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+/* Network Health indicator */
+.net-health {
+  display: flex;
+  align-items: center;
+  color: var(--text2);
+  transition: color 0.3s;
+}
+.net-health svg { width: 16px; height: 16px; }
+.net-health.good { color: var(--accent); }
+.net-health.fair { color: var(--warn); }
+.net-health.poor { color: var(--danger); }
+.net-health.offline { color: #444; }
 
 /* Connection indicator */
 .conn-indicator {
@@ -345,14 +402,17 @@ select option {
   user-select: none;
   -webkit-user-select: none;
   flex-direction: column;
+  transition: all 0.15s, transform 0.1s;
 }
 .btn-ptt svg { width: 22px; height: 22px; }
 .btn-ptt:not(:disabled):hover { border-color: var(--accent); }
+.btn-ptt:active:not(:disabled) { transform: scale(0.96); }
 .btn-ptt.active {
   background: var(--danger);
   border-color: var(--danger);
   color: #fff;
   box-shadow: 0 0 20px var(--danger-dim), inset 0 0 20px rgba(0,0,0,0.1);
+  transform: scale(0.96);
 }
 .btn-ptt.active svg { color: #fff; }
 
@@ -392,8 +452,9 @@ select option {
   display: flex;
   border-radius: 8px;
   overflow: hidden;
-  border: 1px solid var(--border2);
-  background: var(--surface);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 3px;
+  gap: 2px;
 }
 
 .mode-seg-btn {
@@ -401,29 +462,27 @@ select option {
   border: none;
   background: transparent;
   color: var(--text2);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
-  padding: 5px 2px;
+  padding: 6px 4px;
+  border-radius: 6px;
   cursor: pointer;
-  transition: background 0.12s, color 0.12s;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   white-space: nowrap;
   user-select: none;
   -webkit-user-select: none;
   touch-action: manipulation;
 }
 
-.mode-seg-btn:not(:last-child) {
-  border-right: 1px solid var(--border2);
-}
-
 .mode-seg-btn:hover:not(.active) {
-  background: rgba(255,255,255,0.06);
+  background: rgba(255, 255, 255, 0.08);
   color: var(--text);
 }
 
 .mode-seg-btn.active {
-  background: var(--accent-dim);
+  background: var(--surface2);
   color: var(--accent);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(34, 211, 167, 0.4);
 }
 
 .btn-sm {

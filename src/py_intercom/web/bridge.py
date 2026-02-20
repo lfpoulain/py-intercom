@@ -132,10 +132,16 @@ class IntercomBridge:
 
         payload = self._enc.encode(frame_f32.astype(np.float32, copy=False))
 
-        self._seq = (self._seq + 1) & 0xFFFFFFFF
         ts_ms = int(time.time() * 1000) & 0xFFFFFFFF
+        self._seq = (self._seq + 1) & 0xFFFFFFFF
         pkt = pack_audio_packet(self.client_id, ts_ms, self._seq, payload)
-        self._udp_sock.sendto(pkt, self._server_addr)
+        
+        try:
+            self._udp_sock.sendto(pkt, self._server_addr)
+        except OSError as e:
+            err_code = getattr(e, 'winerror', None) or getattr(e, 'errno', None)
+            if err_code != 10054:
+                raise
 
     def _send_silence_probe(self) -> None:
         try:
@@ -264,8 +270,8 @@ class IntercomBridge:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(1.0)
                 sock.connect((self.config.server_ip, int(self.config.server_port) + int(CONTROL_PORT_OFFSET)))
-                sock.settimeout(0.5)
-
+                sock.settimeout(0.02)
+                
                 self._ctrl_sock = sock
                 self._ctrl_connected = True
                 backoff_s = 1.0
@@ -344,7 +350,10 @@ class IntercomBridge:
                 data = self._udp_sock.recv(2048)
             except socket.timeout:
                 continue
-            except OSError:
+            except OSError as e:
+                err_code = getattr(e, 'winerror', None) or getattr(e, 'errno', None)
+                if err_code == 10054:
+                    continue
                 return
 
             try:

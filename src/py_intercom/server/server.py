@@ -1481,6 +1481,7 @@ class IntercomServer:
                 )
 
     def _broadcast_loop(self) -> None:
+        _zero_frame = np.zeros((FRAME_SAMPLES,), dtype=np.float32)
         while not self._stop.is_set():
             try:
                 item = self._mix_queue.get(timeout=0.5)
@@ -1519,7 +1520,7 @@ class IntercomServer:
                     return_frame = None
 
             if return_frame is None or not isinstance(return_frame, np.ndarray) or int(getattr(return_frame, "shape", [0])[0]) != int(FRAME_SAMPLES):
-                return_frame = np.zeros((FRAME_SAMPLES,), dtype=np.float32)
+                return_frame = _zero_frame
             else:
                 return_frame = return_frame.astype(np.float32, copy=False)
 
@@ -1537,7 +1538,7 @@ class IntercomServer:
                         else:
                             mix_minus = raw_mix - c
                     else:
-                        mix_minus = np.zeros((FRAME_SAMPLES,), dtype=np.float32)
+                        mix_minus = _zero_frame
 
                     if bool(listen_return):
                         mix_minus = mix_minus + apply_gain_db(return_frame, float(return_gain_db))

@@ -10,7 +10,7 @@ JB_MAX_FRAMES = 60           # Jitter buffer max size (~600 ms) — drops older 
 JB_SILENCE_GATE_FRAMES = 8   # Silence frames sent when JB empty before stopping (~80 ms)
 
 CTRL_LIVENESS_TIMEOUT_S = 6.0   # TCP control: disconnect if no rx for this duration
-CTRL_PING_INTERVAL_S = 0.05     # TCP control: ping interval
+CTRL_PING_INTERVAL_S = 0.05      # TCP control: ping interval
 
 MAX_UDP_PAYLOAD_BYTES = 1200
 AUDIO_UDP_PORT = 5000

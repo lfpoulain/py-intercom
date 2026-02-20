@@ -489,7 +489,7 @@ class IntercomClient:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(1.0)
                 sock.connect((self.config.server_ip, int(self.config.control_port or 0)))
-                sock.settimeout(0.5)
+                sock.settimeout(0.02)
                 self._ctrl_sock = sock
                 self._ctrl_connected = True
                 self._ctrl_last_rx_monotonic = time.monotonic()
@@ -738,8 +738,11 @@ class IntercomClient:
                 data = self._sock.recv(2048)
             except socket.timeout:
                 continue
-            except OSError:
+            except OSError as e:
                 self._rx_socket_errors += 1
+                err_code = getattr(e, 'winerror', None) or getattr(e, 'errno', None)
+                if err_code == 10054:
+                    continue
                 if self._stop.is_set():
                     return
                 time.sleep(0.1)

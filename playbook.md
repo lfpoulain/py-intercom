@@ -369,64 +369,48 @@ Conseil : garder un device de sortie "VMix" séparé (VB-Cable) en output serveu
 
 ## 13) Client web (plateau)
 
-Client léger **WebAudio + Socket.IO** pour les personnes sur plateau sans client Python. Fonctionne sur PC, tablette Android et iPad.
+Client léger **WebRTC + Socket.IO** pour les personnes sur plateau sans client Python. Fonctionne sur PC, tablette Android et iPad.
 
-### Architecture
+### Architecture (WebRTC Gateway)
 
 ```
-Navigateur  <-Socket.IO (wss)->  Flask/SocketIO (bridge)  <-UDP/TCP->  IntercomServer
+Navigateur  <-- WebRTC (UDP audio Opus) & DataChannel -->  Flask/aiortc (bridge)  <-UDP/TCP->  IntercomServer
 ```
 
-- **`IntercomBridge`** (`web/bridge.py`) : client headless (UDP audio Opus + TCP control).
-- **`app.py`** : Flask + Socket.IO, relaie audio PCM int16 LE et messages de contrôle. Intègre un `DiscoveryListener`.
-- **Frontend** (`client.js`) : capture micro via `ScriptProcessor`, playback via `ScriptProcessor` + `GainNode`, Socket.IO.
+- **`app.py`** : Lance le serveur Flask + Socket.IO et démarre une boucle `asyncio` dédiée pour gérer `aiortc`.
+- **`IntercomBridge`** (`web/bridge.py`) : Passerelle WebRTC ↔ UDP. Reçoit les trames audio Opus depuis WebRTC (via `aiortc`), ajoute l'en-tête UDP personnalisé (12 bytes), et transfère au serveur. Reçoit l'audio mixé du serveur et le pousse dans WebRTC.
+- **Frontend** (`client.js`) : Capture micro et playback via `RTCPeerConnection`. Les messages de contrôle passent prioritairement par un `RTCDataChannel`, avec `Socket.IO` utilisé pour la signalisation (SDP) et comme fallback. L'annulation d'écho (AEC), la suppression de bruit et l'AGC sont gérés nativement par le navigateur.
 
 ### HTTPS (obligatoire pour mobile)
 
-Les navigateurs mobiles bloquent `getUserMedia` en HTTP non sécurisé.
+Les navigateurs bloquent l'accès au micro (`getUserMedia`) en HTTP non sécurisé.
 
 - `--ssl-adhoc` : certificat auto-signé (nécessite `cryptography`). Avertissement navigateur à accepter une fois.
 - `--ssl-cert` + `--ssl-key` : certificat fourni (ex: `mkcert`).
 
 Par défaut, `run_web.py` lance en HTTPS adhoc sur le port 8443 avec détection automatique de l'IP LAN.
 
-### Fonctionnalités
+### Fonctionnalités & UX Plateau
 
-- **PTT** : 3 boutons (Régie/Plateau/VMix), sans raccourcis clavier
-- **Modes PTT par bus** : `PTT` (maintien), `Toggle` (appui pour basculer), `Always On` (toujours actif). Sélecteur en groupe de boutons segmentés sous chaque bouton PTT. Mode persisté en `localStorage`. Activation immédiate de `always_on` à la connexion. Désactivation `ptt` uniquement sur `visibilitychange`/`blur` (toggle et always_on non affectés).
-- **Label ON/OFF** : affiché à l'intérieur du bouton PTT, mis à jour en temps réel.
-- **Noms de bus dynamiques** : mis à jour depuis les messages `welcome`/`update` du serveur TCP.
-- **Écoute** : toggles Régie / Return bus
-- **Volume** : slider 0-150% via `GainNode`
-- **VU mètres** : TX (vert) et RX (bleu) avec peak decay
-- **Auto-discovery** : dropdown serveurs détectés + bouton rafraîchir + polling 3s
-- **Sélection périphériques** : micro (`enumerateDevices` + `getUserMedia` pour débloquer les labels) et sortie (`setSinkId`, masqué si non supporté). Bouton rafraîchir dédié. Persistance `localStorage`. Sélects côte à côte sur desktop/tablette, empilés sur mobile.
-- **Changement de périphérique sans rechargement** : bouton « Appliquer les périphériques » qui recrée le pipeline WebAudio (`AudioContext` + streams) sans déconnecter Socket.IO. Bouton désactivé pendant le redémarrage.
-- **Reconnexion Socket.IO** : re-émet automatiquement le `join` sur reconnect.
-- **Connexion collapsible** : section Connexion repliable manuellement ou automatiquement à la connexion / dépliée à la déconnexion.
-- **Fail-fast serveur down** : probe TCP 1.5s sur le port de contrôle avant de démarrer le bridge — erreur immédiate si le serveur intercom est injoignable.
-- **Persistance** : UUID client + settings en `localStorage`
-- **Mobile** : `AudioContext.resume()`, `onstatechange` pour reprendre après interruption (appel, notification), détection contexte non sécurisé, responsive CSS, boutons tactiles
-- **iOS Safari** : resampling TX 44100→48000 Hz en JS si `AudioContext.sampleRate` ≠ 48000 (hint ignoré par iOS)
-- **PWA** : meta `theme-color`, `apple-mobile-web-app-capable`, `viewport-fit=cover` pour ajout à l'écran d'accueil iOS/Android
+- **PTT** : 3 boutons (Régie/Plateau/VMix). **Retour haptique** activé sur les appuis (via `navigator.vibrate`) pour confirmer l'ouverture du micro sans regarder l'écran.
+- **Modes PTT par bus** : `PTT` (maintien), `Toggle` (appui pour basculer), `Always On` (toujours actif). Sélecteur en groupe de boutons segmentés.
+- **Wake Lock API** : Maintien forcé de l'écran allumé (`navigator.wakeLock`) pendant la connexion, indispensable sur plateau pour éviter la mise en veille de la tablette.
+- **Bannière "Audio Suspendu"** : Si l'OS mobile (particulièrement iOS) suspend le contexte audio en arrière-plan, une large bannière rouge cliquable apparaît pour le relancer.
+- **Indicateur de Santé Réseau** : Une icône en haut à droite change de couleur (vert, orange, rouge) selon le RTT (Round Trip Time) WebRTC, permettant de diagnostiquer facilement les instabilités Wi-Fi sur le plateau.
+- **Auto-discovery** : dropdown serveurs détectés + bouton rafraîchir + polling 3s.
+- **Sélection périphériques** : micro et sortie modifiables sans rechargement de page. Le pipeline WebRTC est redémarré proprement à l'application.
 
-### Interface
+### Pipeline audio (Zéro CPU sur le Bridge)
 
-- Design dark, tokens CSS (surfaces, bordures, accents)
-- Layout card-based : Connexion (collapsible), Audio, Journal
-- Icônes SVG inline, font Inter (Google Fonts)
-- Media queries : tablette (`max-width: 768px`), mobile (`max-width: 560px`)
+- **TX** : Micro → navigateur encodage Opus (avec AEC) → WebRTC UDP → `bridge.py` (extrait Opus brut + ajoute header) → UDP serveur.
+- **RX** : Serveur → UDP mix-minus → `bridge.py` (`OpusPacketJitterBuffer` + extrait Opus brut) → WebRTC UDP → navigateur (décodage Opus) → `GainNode` (volume) → Haut-parleur.
 
-### Pipeline audio
+Le bridge Python ne décode et ne ré-encode plus l'audio : il fait un transfert mémoire direct (Zéro CPU), permettant à un seul serveur Flask de supporter de nombreux clients.
 
-- **TX** : micro → `ScriptProcessor` (48 kHz) → découpe `FRAME_SAMPLES` → float32 → int16 LE → Socket.IO `audio_in` → bridge encode Opus → UDP serveur
-- **RX** : serveur → UDP mix-minus → bridge `OpusPacketJitterBuffer` → playout thread (tick 10 ms) → décode Opus → float32 → int16 LE → Socket.IO `audio_out` → frontend int16→float32 → `playQueue` → `ScriptProcessor` → `GainNode` → haut-parleur
+### Anti-clipping / jitter buffer RX (Côté Serveur)
 
-### Anti-clipping / jitter buffer RX
-
-- **Silence gate** (`bridge.py`) : quand le jitter buffer est vide, le playout thread envoie des frames de silence pendant 8 ticks max (~80 ms) avant de s'arrêter. Évite les trous dans le flux qui causaient des clics.
-- **Queue max** : `MAX_QUEUE_SAMPLES = FRAME_SAMPLES × 20` (~200 ms) pour absorber le jitter réseau + Socket.IO.
-- **Drain progressif** : si la queue dépasse `MAX_QUEUE_SAMPLES`, on saute une frame à la fois (480 samples par callback) au lieu d'un saut brutal → pas de clic.
+- **Silence gate** (`bridge.py`) : quand le jitter buffer est vide, le playout coroutine envoie des frames de silence pendant `JB_SILENCE_GATE_FRAMES` (~80 ms) avant de s'arrêter. Évite les trous dans le flux qui causaient des clics.
+- L'essentiel de l'absorption de Jitter se fait nativement dans le navigateur grâce à WebRTC.
 
 ### Constantes injectées depuis le serveur
 

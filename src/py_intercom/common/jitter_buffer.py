@@ -147,12 +147,13 @@ class OpusPacketJitterBuffer:
                 self.stats.missing += int(nearest_dist)
                 return out
 
-            # Small gap: advance expected seq without PLC (no concealment)
+            # Small gap: advance expected seq WITH PLC (Packet Loss Concealment)
             max_ahead = max(_seq_distance(int(k), exp) for k in self._buf.keys())
             if int(max_ahead) >= int(self.start_frames):
                 self._expected_seq = (exp + 1) & 0xFFFFFFFF
                 self.stats.played += 1
                 self.stats.missing += 1
-                return None
+                self.stats.concealed += 1
+                return b""
 
             return None

@@ -991,6 +991,17 @@ class ServerWindow(QtWidgets.QMainWindow):
 
         try:
             self._server.load_preset()
+            # Sync GUI back from the preset-loaded server state so the checkbox
+            # reflects reality before start() opens the return stream.
+            self._return_enabled.blockSignals(True)
+            self._return_enabled.setChecked(bool(self._server._return_enabled))
+            self._return_enabled.blockSignals(False)
+            if self._server._return_input_device is not None:
+                idx = self._return_input_device.findData(int(self._server._return_input_device))
+                if idx >= 0:
+                    self._return_input_device.blockSignals(True)
+                    self._return_input_device.setCurrentIndex(idx)
+                    self._return_input_device.blockSignals(False)
             self._server.save_preset()
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Preset", f"Preset load failed: {e}")

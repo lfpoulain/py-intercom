@@ -29,6 +29,7 @@
     outputDeviceSelect: document.getElementById("outputDeviceSelect"),
     outputDeviceGroup: document.getElementById("outputDeviceGroup"),
     btnRefreshDevices: document.getElementById("btnRefreshDevices"),
+    audioSuspendedBanner: document.getElementById("audioSuspendedBanner"),
   };
 
   // --- Persistence ---
@@ -98,6 +99,28 @@
   let gainNode = null;
   let discoveryTimer = null;
   let audioRateOk = true;
+  let wakeLock = null;
+
+  const requestWakeLock = async () => {
+    if ("wakeLock" in navigator) {
+      try {
+        wakeLock = await navigator.wakeLock.request("screen");
+        wakeLock.addEventListener("release", () => {
+          logLine("wake lock relâché");
+        });
+        logLine("wake lock actif");
+      } catch (err) {
+        logLine(`wake lock erreur: ${err.name}, ${err.message}`);
+      }
+    }
+  };
+
+  const releaseWakeLock = async () => {
+    if (wakeLock !== null) {
+      await wakeLock.release();
+      wakeLock = null;
+    }
+  };
 
   const pttBuses = new Map([[0, false], [1, false], [2, false]]);
   const busModes = new Map([[0, "ptt"], [1, "ptt"], [2, "ptt"]]);
@@ -471,10 +494,20 @@
 
     // Resume AudioContext after interruptions (phone calls, notifications on mobile)
     audioCtx.onstatechange = () => {
-      if (audioCtx && audioCtx.state === "suspended") {
-        audioCtx.resume().catch(() => {});
+      if (audioCtx) {
+        if (audioCtx.state === "suspended") {
+          if (el.audioSuspendedBanner) el.audioSuspendedBanner.style.display = "flex";
+        } else {
+          if (el.audioSuspendedBanner) el.audioSuspendedBanner.style.display = "none";
+        }
       }
     };
+
+    if (el.audioSuspendedBanner) {
+      el.audioSuspendedBanner.onclick = () => {
+        if (audioCtx && audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+      };
+    }
 
     if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
       try { await audioCtx.close(); } catch (_) {}
@@ -612,6 +645,7 @@
     if (socket) return;
     saveSettings();
     await setupAudio();
+    await requestWakeLock();
 
     socket = io({ transports: ["websocket", "polling"] });
 
@@ -640,12 +674,12 @@
       if (lastJoinParams) socket.emit("join", lastJoinParams);
     });
 
-    socket.on("disconnect", () => {
+    socket.on("disconnect", (reason) => {
       setStatus("Déconnecté");
       setUiConnected(false);
       joined = false;
       intercomAlive = false;
-      logLine("socket.io disconnect");
+      logLine(`socket.io disconnect: ${reason}`);
     });
 
     socket.on("server", (msg) => {
@@ -743,9 +777,17 @@
 
   const bindPttButton = (btn, busId) => {
     if (!btn) return;
+
+    const vibrateFeedback = () => {
+      try {
+        if (navigator.vibrate) navigator.vibrate(40);
+      } catch (_) {}
+    };
+
     btn.addEventListener("mousedown", () => {
       const mode = busModes.get(busId) || "ptt";
       if (mode === "always_on") return;
+      vibrateFeedback();
       if (mode === "toggle") {
         const newState = !busToggleState.get(busId);
         busToggleState.set(busId, newState);
@@ -764,6 +806,7 @@
       e.preventDefault();
       const mode = busModes.get(busId) || "ptt";
       if (mode === "always_on") return;
+      vibrateFeedback();
       if (mode === "toggle") {
         const newState = !busToggleState.get(busId);
         busToggleState.set(busId, newState);
@@ -834,6 +877,10 @@
       if (audioCtx && audioCtx.state === "suspended") {
         audioCtx.resume().catch(() => {});
       }
+      // Re-acquire wake lock if we are still connected
+      if (joined) {
+        requestWakeLock().catch(() => {});
+      }
     }
   });
 
@@ -891,4 +938,13 @@
   setStatus("Déconnecté");
   startDiscoveryPolling();
   requestAnimationFrame(monitorIntercom);
+
+  // Resume AudioContext on any user interaction (critical for iOS/Mobile)
+  const resumeAudioOnInteraction = () => {
+    if (audioCtx && audioCtx.state === "suspended") {
+      audioCtx.resume().catch(() => {});
+    }
+  };
+  document.body.addEventListener("touchstart", resumeAudioOnInteraction, { passive: true });
+  document.body.addEventListener("click", resumeAudioOnInteraction, { passive: true });
 })();
