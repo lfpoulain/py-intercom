@@ -15,8 +15,25 @@ Intercom audio temps réel sur LAN (architecture client/serveur).
 - Raccourcis clavier globaux OS disponibles uniquement sur le client Python.
 - Écoute : toggle séparé pour **Régie** et **Return bus**.
 - Return bus configurable à chaud (activation + device d'entrée) pendant que le serveur tourne.
-- Routage et gains côté serveur volontairement simplifiés pour l'UX.
+- Modèle de gains cohérent entre client desktop et serveur : talk gain partagé, gain master par bus, gain par sortie physique serveur, gain de retour par client, volume casque local côté client desktop.
+- Outputs serveur configurables à chaud avec `device`, `bus`, `gain` et `VU` par sortie physique.
 - Ports audio/contrôle **fixes** (5000/5001).
+
+## Modèle de gains
+
+| Niveau | Portée | Rôle |
+|---|---|---|
+| `input_gain_db` | Client desktop + serveur | **Talk gain** partagé par client. Si le client desktop l'applique localement, le serveur le synchronise ; sinon le serveur l'applique lui-même. |
+| `AudioBus.gain_db` | Serveur | Gain master d'un bus (`Régie`, `Plateau`, `VMix`). |
+| `OutputState.gain_db` | Serveur | Gain master d'une sortie physique serveur. |
+| `return_gain_db` | Serveur, par client | Réglage d'écoute personnel du return bus reçu par ce client. |
+| `output_gain_db` | Client desktop | Volume casque local du client Python. |
+
+Dans la GUI serveur :
+
+- slider **Talk** par client
+- slider **Gain** par bus
+- slider **Gain** + **VU** par output physique
 
 ## Prérequis
 
@@ -128,7 +145,12 @@ Options : `--host`, `--port`, `--debug`, `--ssl-adhoc`, `--ssl-cert`, `--ssl-key
 ## Presets
 
 - Serveur: `~\py-intercom\server_preset.json`
+  - `buses` : `gain_db`, `feed_to_regie`
+  - `outputs` : `device`, `bus_id`, `gain_db`
+  - `clients` : `input_gain_db` persisté par `client_uuid`
 - Client: `~\py-intercom\client_preset.json`
+  - gains locaux : `input_gain_db`, `output_gain_db`
+  - écoute retour : `return_gain_db`, `listen_return_bus`, `listen_regie`
 
 ## Aide
 
@@ -141,4 +163,4 @@ Lister les devices audio:
 
 ## Documentation
 
-Voir `playbook.md` pour le détail protocole, presets, modèle bus et workflow.
+Voir `playbook.md` pour le détail du protocole, des presets, du modèle de gains, des VU mètres et du workflow.

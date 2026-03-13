@@ -1,6 +1,6 @@
 # Playbook — py-intercom
  
-> **Dernière mise à jour** : 13 mars 2026 (rev 5)
+> **Dernière mise à jour** : 13 mars 2026 (rev 6)
 >
 > Ce document décrit l'état **réel** de l'application telle qu'elle est implémentée.
 > Ce qui n'est pas implémenté est listé dans la section **Roadmap**.
@@ -29,25 +29,25 @@ run_web.py      → client web (Flask + HTTPS)
 
 - Un serveur unique sur le LAN.
 - Clients Python (GUI PySide6) et/ou clients web (navigateur).
-- **3 bus fixes** : Régie (0), Plateau (1), VMix (2).
-- **PTT par bus** sur tous les clients ; côté Python : raccourcis clavier globaux OS (`pynput`) + modes `PTT` / `Toggle` / `Always On`, côté web : modes `PTT` / `Toggle` / `Always On` sans raccourcis clavier.
-- **Écoute** : toggles séparés Régie / Return bus côté client.
-- **Return bus** : capture audio locale côté serveur, mixée pour les clients abonnés.
-- Gains serveur simplifiés (0 dB / unity).
-- Presets JSON (écriture atomique) pour persister config serveur et client.
-- Canal de contrôle TCP (keepalive, push config, kick).
-- Auto-discovery LAN (UDP broadcast).
+ - **3 bus fixes** : Régie (0), Plateau (1), VMix (2).
+ - **PTT par bus** sur tous les clients ; côté Python : raccourcis clavier globaux OS (`pynput`) + modes `PTT` / `Toggle` / `Always On`, côté web : modes `PTT` / `Toggle` / `Always On` sans raccourcis clavier.
+ - **Écoute** : toggles séparés Régie / Return bus côté client.
+ - **Return bus** : capture audio locale côté serveur, mixée pour les clients abonnés.
+- Modèle de gains complet : `input_gain_db` partagé en talk gain, `gain_db` master par bus, `gain_db` par sortie physique serveur, `return_gain_db` par client, `output_gain_db` local côté client desktop.
+ - Presets JSON (écriture atomique) pour persister config serveur et client.
+ - Canal de contrôle TCP (keepalive, push config, kick).
+ - Auto-discovery LAN (UDP broadcast).
 
 ### Flux end-to-end
 
 1. **Client** capture micro via `sounddevice` (callback input).
-2. Applique le gain d'entrée, encode en **Opus**.
+2. Applique le `input_gain_db` si le client desktop gère localement le talk gain, puis encode en **Opus**.
 3. Envoie des paquets **UDP** au serveur (port `AUDIO_UDP_PORT`).
 4. **Serveur** reçoit, décode Opus, met à jour l'état du client (VU, dernière activité).
-5. Mixe périodiquement : mix global + **mix-minus** par client.
+5. Mixe périodiquement : application éventuelle du talk gain côté serveur, application du `gain_db` de chaque bus, fabrication du mix global + **mix-minus** par client.
 6. Si **return bus** activé : capture entrée audio locale → resample 48 kHz → mixe pour les clients ayant `listen_return_bus = true`.
 7. Envoie le mix-minus (+ return bus si abonné) en **UDP** à chaque client.
-8. **Client** décode Opus, bufferise (jitter buffer), joue dans le casque.
+8. **Client** décode Opus, bufferise (jitter buffer), applique son `output_gain_db`, puis joue dans le casque.
 9. En parallèle, le canal **TCP control** synchronise PTT, flags d'écoute, états.
 
 ## 3) Concepts
@@ -80,13 +80,30 @@ Le serveur capture une entrée audio locale (ex: sortie programme VMix via VB-Ca
 
 ### Outputs
 
-Un output = un `device` (index sounddevice) + un `bus_id`. Configurables depuis l'UI serveur.
+Un output = un `device` (index sounddevice) + un `bus_id` + un `gain_db`. Configurable à chaud depuis l'UI serveur avec un VU mètre par sortie physique.
+
+### Modèle de gains
+
+| Paramètre | Portée | Rôle |
+|---|---|---|
+| `input_gain_db` | Client desktop + serveur | **Talk gain** partagé par client. Le serveur est la source de vérité et le client desktop se resynchronise dessus. |
+| `AudioBus.gain_db` | Serveur | Gain master global d'un bus (`Régie`, `Plateau`, `VMix`). |
+| `OutputState.gain_db` | Serveur | Gain master d'une sortie physique serveur. |
+| `return_gain_db` | Serveur, par client | Réglage personnel du niveau de return injecté dans le mix reçu par ce client. |
+| `output_gain_db` | Client desktop | Volume casque local du client Python. |
+
+Règle de responsabilité :
+
+- un client trop fort/faible pour tout le monde → `input_gain_db`
+- un bus entier trop fort/faible → `AudioBus.gain_db`
+- une sortie physique locale trop forte/faible → `OutputState.gain_db`
+- un retour trop fort/faible pour une seule personne → `return_gain_db`
 
 ### Attributs gérés
 
 | Côté | Attributs |
 |---|---|
-| **Serveur** | Outputs (device + bus), `feed_to_regie` par bus, état TCP (connecté / âge), return bus |
+| **Serveur** | Outputs (device + bus + gain + VU), `feed_to_regie` et `gain_db` par bus, `input_gain_db` partagé par client, état TCP (connecté / âge), return bus |
 | **Client Python** | PTT par bus, modes `PTT` / `Toggle` / `Always On`, raccourcis globaux OS, `listen_regie`, `listen_return_bus`, gains (micro/casque/return), `autoconnect`, `start_minimized` |
 | **Client Web** | PTT par bus, modes `PTT` / `Toggle` / `Always On`, `listen_regie`, `listen_return_bus`, persistance `localStorage`, sélection des devices à chaud |
 
@@ -113,10 +130,10 @@ Format : JSON par ligne (`\n`-delimited).
 
 | Message | Direction | Contenu |
 |---|---|---|
-| `hello` | client → serveur | `client_id`, `client_uuid`, `name`, `udp_port` |
-| `welcome` | serveur → client | Config initiale (buses) |
-| `update` | serveur → client | Push config (buses + `return_vu_dbfs`) |
-| `state` | client → serveur | `ptt_buses`, `listen_return_bus`, `listen_regie`, `return_gain_db` |
+| `hello` | client → serveur | `client_id`, `client_uuid`, `name`, `udp_port`, `applies_input_gain_locally` |
+| `welcome` | serveur → client | Config initiale (`input_gain_db`, `buses`, `return_vu_dbfs`) |
+| `update` | serveur → client | Push config (`input_gain_db`, `buses`, `return_vu_dbfs`) |
+| `state` | client → serveur | `ptt_buses`, `listen_return_bus`, `listen_regie`, `return_gain_db`, `input_gain_db`, `applies_input_gain_locally` |
 | `ping` / `pong` | bidirectionnel | Keepalive (`pong` inclut `return_vu_dbfs`) |
 | `kick` | serveur → client | Déconnexion forcée |
 
@@ -180,7 +197,7 @@ Chaque `ClientState` possède son propre `OpusEncoder` pour le mix-minus (évite
 ### Preset serveur
 
 - Chemin : `~/py-intercom/server_preset.json`
-- Contenu : `outputs` (liste), `buses` (mapping), `clients` (mapping), `return_enabled`, `return_input_device`, `return_input_device_name`, `return_input_device_hostapi`
+- Contenu : `outputs` (liste avec `device`, `bus_id`, `gain_db`), `buses` (mapping avec `gain_db`, `feed_to_regie`), `clients` (mapping avec `input_gain_db` par `client_uuid`), `return_enabled`, `return_input_device`, `return_input_device_name`, `return_input_device_hostapi`
 
 ### Preset client
 
@@ -340,8 +357,9 @@ Crash logs : `~/py-intercom/client_crash.txt` / `~/py-intercom/server_crash.txt`
 3. Lancer un client (GUI), renseigner l'IP du serveur (ou auto-discovery), sélectionner devices, connecter.
 4. Sur l'UI serveur :
    - Table clients : indicateur de statut (pastille verte/rouge), clients déconnectés grisés.
-   - Ajuster les routes (colonnes Régie/Plateau/VMix).
-   - Régler "Renvoyer dans Régie" pour Plateau/VMix si besoin.
+   - Ajuster le **Talk** par client si besoin.
+   - Régler le **Gain** de chaque bus et "Renvoyer dans Régie" pour Plateau/VMix si besoin.
+   - Régler le **Gain** de chaque output physique et surveiller son **VU**.
 5. Bouton **i** (client/serveur) pour diagnostiquer (ports, stats, buffers, underflows, control age).
 
 Conseil : garder un device de sortie "VMix" séparé (VB-Cable) en output serveur si besoin d'intégration VMix.
@@ -377,6 +395,8 @@ Conseil : garder un device de sortie "VMix" séparé (VB-Cable) en output serveu
 |---|---|---|
 | Serveur — table clients | VU par client | RMS frames décodées |
 | Serveur — panneau | Return VU | RMS frames return bus |
+| Serveur — panneau | Régie VU | RMS mix régie |
+| Serveur — table outputs | VU par output | RMS signal réellement envoyé à la sortie physique (post `OutputState.gain_db`) |
 | Client — panneau | Input VU | RMS micro capturé |
 | Client — panneau | Output VU | RMS mix casque |
 | Client — panneau | Return bus VU | Via TCP control (`pong` / `update`) |
