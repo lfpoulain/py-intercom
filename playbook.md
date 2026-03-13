@@ -1,6 +1,6 @@
 # Playbook — py-intercom
-
-> **Dernière mise à jour** : 19 février 2026 (rev 3)
+ 
+> **Dernière mise à jour** : 13 mars 2026 (rev 5)
 >
 > Ce document décrit l'état **réel** de l'application telle qu'elle est implémentée.
 > Ce qui n'est pas implémenté est listé dans la section **Roadmap**.
@@ -30,7 +30,7 @@ run_web.py      → client web (Flask + HTTPS)
 - Un serveur unique sur le LAN.
 - Clients Python (GUI PySide6) et/ou clients web (navigateur).
 - **3 bus fixes** : Régie (0), Plateau (1), VMix (2).
-- **PTT par bus** avec raccourcis clavier globaux OS (`pynput`).
+- **PTT par bus** sur tous les clients ; côté Python : raccourcis clavier globaux OS (`pynput`) + modes `PTT` / `Toggle` / `Always On`, côté web : modes `PTT` / `Toggle` / `Always On` sans raccourcis clavier.
 - **Écoute** : toggles séparés Régie / Return bus côté client.
 - **Return bus** : capture audio locale côté serveur, mixée pour les clients abonnés.
 - Gains serveur simplifiés (0 dB / unity).
@@ -68,7 +68,8 @@ run_web.py      → client web (Flask + HTTPS)
 | 1 | **Plateau** | Diffusion |
 | 2 | **VMix** | Diffusion |
 
-Chaque bus maintient : `name`, `feed_to_regie`, liste de `source_uuids` (preset serveur).
+En runtime, chaque bus maintient : `name`, `gain_db`, `feed_to_regie`.
+Le preset serveur peut aussi contenir `source_uuids` pour certaines opérations d'UI/prévisualisation hors runtime.
 
 ### Return bus
 
@@ -85,8 +86,9 @@ Un output = un `device` (index sounddevice) + un `bus_id`. Configurables depuis 
 
 | Côté | Attributs |
 |---|---|
-| **Serveur** | Mute serveur, routage bus, état TCP (connecté / âge) |
-| **Client** | PTT par bus, raccourcis globaux OS, `listen_regie`, `listen_return_bus`, gains (micro/casque/return) |
+| **Serveur** | Outputs (device + bus), `feed_to_regie` par bus, état TCP (connecté / âge), return bus |
+| **Client Python** | PTT par bus, modes `PTT` / `Toggle` / `Always On`, raccourcis globaux OS, `listen_regie`, `listen_return_bus`, gains (micro/casque/return), `autoconnect`, `start_minimized` |
+| **Client Web** | PTT par bus, modes `PTT` / `Toggle` / `Always On`, `listen_regie`, `listen_return_bus`, persistance `localStorage`, sélection des devices à chaud |
 
 ## 4) Protocole réseau
 
@@ -154,7 +156,7 @@ Le resampling serveur (si output != 48 kHz) est volontairement simple (robustess
 
 - Classe : `OpusPacketJitterBuffer` (`common/jitter_buffer.py`)
 - Bufferise les **payloads Opus bruts** (pas les PCM décodés) → PLC Opus natif.
-- `start_frames` = 3 (30 ms de buffering initial).
+- `start_frames` = 6 (60 ms de buffering initial).
 - `max_frames` = 60.
 - Thread-safe (lock interne).
 - **Fast-forward** : quand `expected_seq` est loin derrière le buffer, saute directement au frame le plus proche.
@@ -183,7 +185,7 @@ Chaque `ClientState` possède son propre `OpusEncoder` pour le mix-minus (évite
 ### Preset client
 
 - Chemin : `~/py-intercom/client_preset.json`
-- Contenu : `server_ip`, `client_uuid`, `name`, `input_device` / `output_device` (+ `_name` / `_hostapi`), gains, `ptt_bus_keys`, `listen_regie`, `listen_return_bus`, `start_minimized`
+- Contenu : `server_ip`, `client_uuid`, `name`, `input_device` / `output_device` (+ `_name` / `_hostapi`), gains, `ptt_bus_keys`, `ptt_bus_modes`, `listen_regie`, `listen_return_bus`, `autoconnect`, `start_minimized`
 
 ## 7) Stack technique
 
@@ -201,6 +203,8 @@ Chaque `ClientState` possède son propre `OpusEncoder` pour le mix-minus (évite
 | **cryptography** | HTTPS adhoc (client web) |
 
 Windows : `bin/opus.dll` est fourni et chargé automatiquement par les scripts `run_*.py`.
+
+Note : `aiortc` est encore présent dans `requirements.txt`, mais n'est plus utilisé par le flux web actif (bridge Socket.IO).
 
 ### Organisation du code
 
@@ -258,23 +262,31 @@ src/py_intercom/
 - Thread bridge TCP control
 - Socket.IO relay (Flask, mode threading)
 
-## 8) Configuration (.env)
+## 8) Configuration
 
-Un fichier `.env` à la racine centralise les variables ajustables comme référence. Il n'est **pas lu automatiquement** par l'app (les valeurs sont dans `common/constants.py` et les arguments CLI).
+À ce jour, l'application **ne lit aucun fichier `.env`** au démarrage et aucun `.env` n'est versionné dans le dépôt.
 
-Variables principales :
+Les valeurs effectives viennent de :
 
-| Variable | Défaut | Description |
+- `common/constants.py` pour l'audio/réseau (`AUDIO_UDP_PORT`, `SAMPLE_RATE`, `FRAME_SAMPLES`, `OPUS_BITRATE`, `OPUS_COMPLEXITY`, `JB_*`, `DISCOVERY_*`, `CTRL_*`)
+- les arguments CLI des entrées `server`, `client` et `web`
+- `run_web.py`, qui force par défaut `--host <IP LAN détectée> --port 8443 --ssl-adhoc` s'il est lancé sans argument
+
+Principales constantes actuellement codées :
+
+| Constante | Défaut | Rôle |
 |---|---|---|
 | `AUDIO_UDP_PORT` | `5000` | Port audio UDP |
+| `CONTROL_PORT_OFFSET` | `1` | Décalage du port TCP de contrôle |
+| `DISCOVERY_PORT_OFFSET` | `2` | Décalage du port UDP discovery |
 | `SAMPLE_RATE` | `48000` | Fréquence d'échantillonnage |
 | `FRAME_SAMPLES` | `480` | Taille de frame (10 ms) |
 | `OPUS_BITRATE` | `64000` | Bitrate Opus |
 | `OPUS_COMPLEXITY` | `5` | Complexité Opus |
+| `JB_START_FRAMES` | `6` | Pré-buffer du jitter buffer |
+| `JB_MAX_FRAMES` | `60` | Taille max du jitter buffer |
 | `DISCOVERY_BEACON_INTERVAL_S` | `2.0` | Intervalle beacon discovery |
 | `DISCOVERY_EXPIRY_S` | `6.0` | Expiration serveur discovery |
-| `WEB_PORT` | `8443` | Port du client web |
-| `DEBUG` | `false` | Mode debug |
 
 ## 9) Lancement
 
@@ -341,20 +353,23 @@ Conseil : garder un device de sortie "VMix" séparé (VB-Cable) en output serveu
 | Composant | Valeur |
 |---|---|
 | Frame Opus | 10 ms |
-| Jitter buffer (3 x 10 ms) | 30 ms |
+| Jitter buffer (`JB_START_FRAMES = 6`) | 60 ms |
 | Driver WASAPI shared | ~10-20 ms |
 | Réseau LAN | ~1-2 ms |
 | Codec Opus (encode+decode) | < 3 ms |
-| **Total estimé** | **~50-60 ms** |
+| **Total estimé** | **~85-95 ms** |
 
-### Client Web (surcoût vs Python)
+### Client Web
 
 | Composant | Valeur estimée |
 |---|---|
-| WebAudio ScriptProcessor buffer | ~42 ms (2048 samples @ 48 kHz) |
-| Socket.IO WebSocket round-trip | ~1-5 ms (LAN) |
-| Bridge jitter buffer | 30 ms (3 x 10 ms) |
-| **Surcoût total estimé** | **~75-80 ms** |
+| Frame Opus | 10 ms |
+| WebAudio `ScriptProcessor` | ~42 ms (2048 samples @ 48 kHz) |
+| Bridge jitter buffer (`JB_START_FRAMES = 6`) | 60 ms |
+| Socket.IO WebSocket | ~1-5 ms (LAN) |
+| Réseau LAN | ~1-2 ms |
+| Codec Opus (encode+decode côté bridge) | < 3 ms |
+| **Total estimé** | **~115-125 ms** |
 
 ## 12) VU mètres
 
@@ -369,17 +384,17 @@ Conseil : garder un device de sortie "VMix" séparé (VB-Cable) en output serveu
 
 ## 13) Client web (plateau)
 
-Client léger **WebRTC + Socket.IO** pour les personnes sur plateau sans client Python. Fonctionne sur PC, tablette Android et iPad.
+Client léger **Socket.IO + WebAudio** pour les personnes sur plateau sans client Python. Fonctionne sur PC, tablette Android et iPad.
 
-### Architecture (WebRTC Gateway)
+### Architecture (Socket.IO Bridge)
 
 ```
-Navigateur  <-- WebRTC (UDP audio Opus) & DataChannel -->  Flask/aiortc (bridge)  <-UDP/TCP->  IntercomServer
+Navigateur  <-- Socket.IO (PCM int16 brut) -->  Flask/bridge.py  <-UDP/TCP->  IntercomServer
 ```
 
-- **`app.py`** : Lance le serveur Flask + Socket.IO et démarre une boucle `asyncio` dédiée pour gérer `aiortc`.
-- **`IntercomBridge`** (`web/bridge.py`) : Passerelle WebRTC ↔ UDP. Reçoit les trames audio Opus depuis WebRTC (via `aiortc`), ajoute l'en-tête UDP personnalisé (12 bytes), et transfère au serveur. Reçoit l'audio mixé du serveur et le pousse dans WebRTC.
-- **Frontend** (`client.js`) : Capture micro et playback via `RTCPeerConnection`. Les messages de contrôle passent prioritairement par un `RTCDataChannel`, avec `Socket.IO` utilisé pour la signalisation (SDP) et comme fallback. L'annulation d'écho (AEC), la suppression de bruit et l'AGC sont gérés nativement par le navigateur.
+- **`app.py`** : Lance le serveur Flask + Socket.IO en mode `threading`. Gère les sessions web (join/leave), relaie les événements `audio_in` / `audio_out` et les messages de contrôle.
+- **`IntercomBridge`** (`web/bridge.py`) : Client headless UDP/TCP. Reçoit le PCM int16 depuis Socket.IO (`audio_in`), encode en Opus, envoie au serveur UDP. Reçoit le mix-minus du serveur, décode, renvoie en PCM int16 via Socket.IO (`audio_out`). Maintient un canal TCP control (ping/pong, config buses, return VU).
+- **Frontend** (`client.js`) : Capture micro via `ScriptProcessor` WebAudio → PCM int16 → Socket.IO. Reçoit PCM int16 → `AudioBuffer` → playback. Pas de WebRTC, pas d'`aiortc`.
 
 ### HTTPS (obligatoire pour mobile)
 
@@ -396,21 +411,20 @@ Par défaut, `run_web.py` lance en HTTPS adhoc sur le port 8443 avec détection 
 - **Modes PTT par bus** : `PTT` (maintien), `Toggle` (appui pour basculer), `Always On` (toujours actif). Sélecteur en groupe de boutons segmentés.
 - **Wake Lock API** : Maintien forcé de l'écran allumé (`navigator.wakeLock`) pendant la connexion, indispensable sur plateau pour éviter la mise en veille de la tablette.
 - **Bannière "Audio Suspendu"** : Si l'OS mobile (particulièrement iOS) suspend le contexte audio en arrière-plan, une large bannière rouge cliquable apparaît pour le relancer.
-- **Indicateur de Santé Réseau** : Une icône en haut à droite change de couleur (vert, orange, rouge) selon le RTT (Round Trip Time) WebRTC, permettant de diagnostiquer facilement les instabilités Wi-Fi sur le plateau.
 - **Auto-discovery** : dropdown serveurs détectés + bouton rafraîchir + polling 3s.
-- **Sélection périphériques** : micro et sortie modifiables sans rechargement de page. Le pipeline WebRTC est redémarré proprement à l'application.
+- **Sélection périphériques** : micro et sortie modifiables sans rechargement de page (`restartAudio()`).
+- **Noms de bus dynamiques** : mis à jour depuis les messages `welcome`/`update` du serveur.
+- **Auto-rejoin** : reconnexion Socket.IO automatique avec rejoin de session.
 
-### Pipeline audio (Zéro CPU sur le Bridge)
+### Pipeline audio
 
-- **TX** : Micro → navigateur encodage Opus (avec AEC) → WebRTC UDP → `bridge.py` (extrait Opus brut + ajoute header) → UDP serveur.
-- **RX** : Serveur → UDP mix-minus → `bridge.py` (`OpusPacketJitterBuffer` + extrait Opus brut) → WebRTC UDP → navigateur (décodage Opus) → `GainNode` (volume) → Haut-parleur.
+- **TX** : Micro → `ScriptProcessor` (2048 samples) → float32 → int16 → Socket.IO `audio_in` → `bridge.py` (encode Opus) → UDP serveur.
+- **RX** : Serveur UDP mix-minus → `bridge.py` (décode Opus → int16) → Socket.IO `audio_out` → `AudioBuffer` → playback navigateur.
 
-Le bridge Python ne décode et ne ré-encode plus l'audio : il fait un transfert mémoire direct (Zéro CPU), permettant à un seul serveur Flask de supporter de nombreux clients.
+### Anti-clipping / jitter buffer RX
 
-### Anti-clipping / jitter buffer RX (Côté Serveur)
-
-- **Silence gate** (`bridge.py`) : quand le jitter buffer est vide, le playout coroutine envoie des frames de silence pendant `JB_SILENCE_GATE_FRAMES` (~80 ms) avant de s'arrêter. Évite les trous dans le flux qui causaient des clics.
-- L'essentiel de l'absorption de Jitter se fait nativement dans le navigateur grâce à WebRTC.
+- **Silence gate** (`bridge.py`) : quand le jitter buffer est vide, le playout thread envoie `JB_SILENCE_GATE_FRAMES` frames de silence (~80 ms) avant de s'arrêter. Évite les trous dans le flux qui causaient des clics.
+- `MAX_QUEUE_SAMPLES = FRAME_SAMPLES * 20` : limite la taille de la queue de playout pour éviter l'accumulation de latence.
 
 ### Constantes injectées depuis le serveur
 
@@ -444,15 +458,17 @@ Le bridge Python ne décode et ne ré-encode plus l'audio : il fait un transfert
 - Vérifier "Return" coché côté serveur + device d'entrée sélectionné
 - Vérifier "Listen return bus" coché côté client
 - Vérifier le VU "Return VU" côté serveur
+- Sur Windows WASAPI avec interface USB (ex: Focusrite) : le stream return est automatiquement rouvert ~2.5s après le démarrage du serveur pour contourner l'interférence WASAPI entre le stream de sortie et le stream d'entrée sur le même device physique. Patienter quelques secondes avant de diagnostiquer.
 
 ## 15) Limitations connues
 
 - Resampling serveur volontairement simple (robustesse > qualité audiophile).
 - Pas de chiffrement/authentification (usage LAN uniquement).
 - WASAPI exclusive mode non supporté (causait echo/glitch).
+- Sur Windows WASAPI avec interface USB multi-stream (ex: Focusrite) : rouvrir un stream de sortie peut perturber les streams d'entrée du même device physique. Contourné par un reopen automatique du stream return à t=2.5s après démarrage.
 - Client web : `ScriptProcessor` est déprécié mais maintenu dans tous les navigateurs. La migration vers AudioWorklet est reportée : le buffer 128 samples d'AudioWorklet cause des crackles massifs sur mobile (bug spec WebAudio #2632, avril 2025).
 - Client web : pas de raccourcis clavier (supprimés volontairement — conflits avec les applications hôtes sur plateau).
-- iOS Safari peut ignorer le hint `sampleRate: 48000` (retourne 44100 Hz) : le TX est rééchantillonné en JS (interpolation linéaire) avant envoi.
+- Client web : latence plus élevée que le client Python (surcoût typique ~30-40 ms), principalement dû au `ScriptProcessor` (buffer 2048 samples = ~42 ms).
 
 ## 16) UI / Thème
 
@@ -474,4 +490,3 @@ Le bridge Python ne décode et ne ré-encode plus l'audio : il fait un transfert
 - EQ / compresseur / gate
 - Contrôle externe (REST / OSC / MIDI)
 - Multicast
-- Lecture du `.env` par l'app au démarrage

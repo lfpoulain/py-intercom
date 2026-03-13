@@ -19,6 +19,7 @@
     log: document.getElementById("log"),
     txBar: document.getElementById("txBar"),
     rxBar: document.getElementById("rxBar"),
+    netHealth: document.getElementById("netHealth"),
     connDot: document.getElementById("connDot"),
     connLabel: document.getElementById("connLabel"),
     volumeSlider: document.getElementById("volumeSlider"),
@@ -91,17 +92,23 @@
   // --- State ---
   let socket = null;
   let joined = false;
+  let connecting = false;
   let audioCtx = null;
   let micStream = null;
   let micNode = null;
   let micProc = null;
   let playProc = null;
   let gainNode = null;
+  let outputDestNode = null;
+  let outputAudioEl = null;
   let discoveryTimer = null;
   let audioRateOk = true;
   let wakeLock = null;
+  let netHealthMode = "";
+  let netHealthTitle = "";
 
   const requestWakeLock = async () => {
+    if (wakeLock !== null) return;
     if ("wakeLock" in navigator) {
       try {
         wakeLock = await navigator.wakeLock.request("screen");
@@ -117,7 +124,9 @@
 
   const releaseWakeLock = async () => {
     if (wakeLock !== null) {
-      await wakeLock.release();
+      try {
+        await wakeLock.release();
+      } catch (_) {}
       wakeLock = null;
     }
   };
@@ -126,10 +135,13 @@
   const busModes = new Map([[0, "ptt"], [1, "ptt"], [2, "ptt"]]);
   const busToggleState = new Map([[0, false], [1, false], [2, false]]);
   const busNames = new Map([[0, "Régie"], [1, "Plateau"], [2, "VMix"]]);
+  const PTT_RELEASE_DELAY_MS = 250;
+  const pttReleaseTimers = new Map();
   let outputVolume = 1.0;
   let lastJoinParams = null;
 
-  let playQueue = new Float32Array(0);
+  let playQueueChunks = [];
+  let playQueueSamples = 0;
   let txMeter = 0;
   let rxMeter = 0;
   let intercomAlive = false;
@@ -270,31 +282,57 @@
   };
 
   // --- Audio helpers ---
+  const clearPlayQueue = () => {
+    playQueueChunks = [];
+    playQueueSamples = 0;
+  };
+
   const appendPlay = (x) => {
-    if (playQueue.length === 0) { playQueue = x; return; }
-    const y = new Float32Array(playQueue.length + x.length);
-    y.set(playQueue, 0);
-    y.set(x, playQueue.length);
-    playQueue = y;
+    if (!x || x.length === 0) return;
+    playQueueChunks.push(x);
+    playQueueSamples += x.length;
   };
 
   const MAX_QUEUE_SAMPLES = FRAME_SAMPLES * 20; // ~200ms — enough buffer to absorb jitter
-  const DRAIN_TARGET_SAMPLES = FRAME_SAMPLES * 6; // ~60ms target when draining
+
+  const dropPlaySamples = (n) => {
+    let remaining = Math.min(Math.max(0, n), playQueueSamples);
+    while (remaining > 0 && playQueueChunks.length > 0) {
+      const head = playQueueChunks[0];
+      if (head.length <= remaining) {
+        remaining -= head.length;
+        playQueueSamples -= head.length;
+        playQueueChunks.shift();
+      } else {
+        playQueueChunks[0] = head.subarray(remaining);
+        playQueueSamples -= remaining;
+        remaining = 0;
+      }
+    }
+  };
 
   const popPlay = (n) => {
     // If queue is too large, skip ahead gradually (one extra frame per callback)
     // to avoid a hard cut that causes a click
-    if (playQueue.length > MAX_QUEUE_SAMPLES) {
-      playQueue = playQueue.subarray(FRAME_SAMPLES); // skip one frame silently
+    if (playQueueSamples > MAX_QUEUE_SAMPLES) {
+      dropPlaySamples(FRAME_SAMPLES);
     }
-    if (playQueue.length >= n) {
-      const out = new Float32Array(playQueue.subarray(0, n));
-      playQueue = playQueue.subarray(n);
-      return out;
-    }
+
     // Underrun: return what we have + silence (no click, just fade to silence)
     const out = new Float32Array(n);
-    if (playQueue.length > 0) { out.set(playQueue, 0); playQueue = new Float32Array(0); }
+    let off = 0;
+    while (off < n && playQueueChunks.length > 0) {
+      const head = playQueueChunks[0];
+      const take = Math.min(head.length, n - off);
+      out.set(head.subarray(0, take), off);
+      off += take;
+      playQueueSamples -= take;
+      if (take >= head.length) {
+        playQueueChunks.shift();
+      } else {
+        playQueueChunks[0] = head.subarray(take);
+      }
+    }
     return out;
   };
 
@@ -360,15 +398,31 @@
     el.connLabel.textContent = on ? "Connecté" : "Déconnecté";
   };
 
+  const refreshActionButtons = () => {
+    const hasSocket = !!socket;
+    el.btnConnect.disabled = (!!joined && intercomAlive) || !!connecting;
+    el.btnDisconnect.disabled = !hasSocket && !connecting;
+  };
+
+  const setNetHealth = (mode, title) => {
+    if (!el.netHealth) return;
+    const nextMode = String(mode || "offline");
+    const nextTitle = String(title || "");
+    if (nextMode === netHealthMode && nextTitle === netHealthTitle) return;
+    netHealthMode = nextMode;
+    netHealthTitle = nextTitle;
+    el.netHealth.className = `net-health ${nextMode}`;
+    el.netHealth.title = nextTitle;
+  };
+
   const setUiConnected = (isConnected) => {
-    el.btnConnect.disabled = isConnected;
-    el.btnDisconnect.disabled = !isConnected;
     el.btnBus0.disabled = !isConnected;
     el.btnBus1.disabled = !isConnected;
     el.btnBus2.disabled = !isConnected;
     el.listenRegie.disabled = !isConnected;
     el.listenReturnBus.disabled = !isConnected;
     setConnState(isConnected);
+    refreshActionButtons();
     if (isConnected) {
       setConfigCollapsed(true);
       // Apply always_on buses immediately on connect
@@ -384,14 +438,36 @@
     }
   };
 
+  const _emitPttBus = (busId, active) => {
+    if (socket && joined) socket.emit("ptt_bus", { bus_id: busId, active: !!active });
+  };
+
   const setPttBus = (busId, active, opts = { emit: true }) => {
     if (!pttBuses.has(busId)) return;
+
+    // Cancel any pending release timer for this bus
+    if (pttReleaseTimers.has(busId)) {
+      clearTimeout(pttReleaseTimers.get(busId));
+      pttReleaseTimers.delete(busId);
+    }
+
     pttBuses.set(busId, !!active);
     const btn = busId === 0 ? el.btnBus0 : busId === 1 ? el.btnBus1 : el.btnBus2;
     if (btn) btn.classList.toggle("active", !!active);
-    updateBusStateLabel(busId); // always refresh label
-    if (socket && joined && opts.emit !== false) {
-      socket.emit("ptt_bus", { bus_id: busId, active: !!active });
+    updateBusStateLabel(busId);
+
+    if (opts.emit === false) return;
+
+    if (active) {
+      // Activate immediately
+      _emitPttBus(busId, true);
+    } else {
+      // Delay the deactivation so in-flight frames reach the jitter buffer
+      const t = setTimeout(() => {
+        pttReleaseTimers.delete(busId);
+        _emitPttBus(busId, false);
+      }, PTT_RELEASE_DELAY_MS);
+      pttReleaseTimers.set(busId, t);
     }
   };
 
@@ -470,6 +546,36 @@
 
   const setListenReturn = (enabled) => {
     if (socket && joined) socket.emit("listen_return_bus", { enabled: !!enabled });
+  };
+
+  const buildJoinParams = () => ({
+    server_ip: el.serverIp.value.trim(),
+    server_port: 5000,
+    name: el.name.value.trim() || "Plateau",
+    client_uuid: getClientUuid(),
+    listen_return_bus: el.listenReturnBus.checked,
+    listen_regie: el.listenRegie.checked,
+  });
+
+  const emitJoin = () => {
+    if (!socket) return false;
+    const params = buildJoinParams();
+    if (!params.server_ip) {
+      connecting = false;
+      setStatus("Serveur manquant");
+      refreshActionButtons();
+      logLine("erreur: IP serveur manquante");
+      return false;
+    }
+    lastJoinParams = params;
+    joined = false;
+    intercomAlive = false;
+    lastControlTs = 0;
+    connecting = true;
+    setUiConnected(false);
+    setStatus("Connexion intercom...");
+    socket.emit("join", lastJoinParams);
+    return true;
   };
 
   // --- Audio ---
@@ -603,18 +709,28 @@
 
     // Output device routing via setSinkId on a hidden Audio element
     const outputDeviceId = el.outputDeviceSelect.value || "";
+    outputDestNode = null;
+    outputAudioEl = null;
     if (sinkIdSupported && outputDeviceId) {
       try {
-        const dest = audioCtx.createMediaStreamDestination();
-        gainNode.connect(dest);
-        const audioEl = new Audio();
-        audioEl.srcObject = dest.stream;
-        audioEl.autoplay = true;
-        await audioEl.setSinkId(outputDeviceId);
-        audioEl.play().catch(() => {});
+        outputDestNode = audioCtx.createMediaStreamDestination();
+        gainNode.connect(outputDestNode);
+        outputAudioEl = new Audio();
+        outputAudioEl.srcObject = outputDestNode.stream;
+        outputAudioEl.autoplay = true;
+        await outputAudioEl.setSinkId(outputDeviceId);
+        outputAudioEl.play().catch(() => {});
         logLine(`sortie: ${el.outputDeviceSelect.options[el.outputDeviceSelect.selectedIndex]?.text || outputDeviceId}`);
       } catch (e) {
         // Fallback to default output
+        try {
+          if (outputAudioEl) {
+            outputAudioEl.pause();
+            outputAudioEl.srcObject = null;
+          }
+        } catch (_) {}
+        outputAudioEl = null;
+        outputDestNode = null;
         gainNode.connect(audioCtx.destination);
         logLine("sortie: périphérique sélectionné indisponible, utilisation du défaut");
       }
@@ -632,49 +748,78 @@
     try { if (micNode) micNode.disconnect(); } catch (_) {}
     try { if (playProc) playProc.disconnect(); } catch (_) {}
     try { if (gainNode) gainNode.disconnect(); } catch (_) {}
+    try {
+      if (outputAudioEl) {
+        outputAudioEl.pause();
+        outputAudioEl.srcObject = null;
+      }
+    } catch (_) {}
     micProc = null; micNode = null; playProc = null; gainNode = null;
+    outputDestNode = null;
+    outputAudioEl = null;
     try { if (micStream) micStream.getTracks().forEach(t => t.stop()); } catch (_) {}
     micStream = null;
+    try { if (audioCtx) audioCtx.onstatechange = null; } catch (_) {}
     try { if (audioCtx) await audioCtx.close(); } catch (_) {}
     audioCtx = null;
-    playQueue = new Float32Array(0);
+    clearPlayQueue();
+    if (el.audioSuspendedBanner) el.audioSuspendedBanner.style.display = "none";
   };
 
   // --- Connect / Disconnect ---
   const connect = async () => {
-    if (socket) return;
+    if (joined || connecting) return;
     saveSettings();
-    await setupAudio();
-    await requestWakeLock();
+    if (!el.serverIp.value.trim()) {
+      setStatus("Serveur manquant");
+      logLine("erreur: IP serveur manquante");
+      return;
+    }
+
+    if (socket) {
+      if (socket.connected) {
+        emitJoin();
+        return;
+      }
+      connecting = true;
+      setStatus("Connexion backend...");
+      refreshActionButtons();
+      socket.connect();
+      return;
+    }
+
+    connecting = true;
+    setStatus("Initialisation audio...");
+    refreshActionButtons();
+
+    try {
+      await setupAudio();
+      await requestWakeLock();
+    } catch (e) {
+      connecting = false;
+      refreshActionButtons();
+      throw e;
+    }
 
     socket = io({ transports: ["websocket", "polling"] });
-
-    const doJoin = () => {
-      lastJoinParams = {
-        server_ip: el.serverIp.value.trim(),
-        server_port: 5000,
-        name: el.name.value.trim() || "Plateau",
-        client_uuid: getClientUuid(),
-        listen_return_bus: el.listenReturnBus.checked,
-        listen_regie: el.listenRegie.checked,
-      };
-      socket.emit("join", lastJoinParams);
-    };
 
     socket.on("connect", () => {
       setStatus("Backend web");
       setUiConnected(false);
       logLine("socket.io connect");
-      doJoin();
+      emitJoin();
     });
 
     socket.on("reconnect", () => {
       logLine("socket.io reconnect");
       joined = false;
-      if (lastJoinParams) socket.emit("join", lastJoinParams);
+      intercomAlive = false;
+      connecting = true;
+      setUiConnected(false);
     });
 
     socket.on("disconnect", (reason) => {
+      connecting = false;
       setStatus("Déconnecté");
       setUiConnected(false);
       joined = false;
@@ -685,6 +830,7 @@
     socket.on("server", (msg) => {
       if (!msg || !msg.type) return;
       if (msg.type === "joined") {
+        connecting = false;
         joined = true;
         intercomAlive = true;
         lastControlTs = Date.now();
@@ -694,11 +840,16 @@
         setListenReturn(el.listenReturnBus.checked);
         setUiConnected(true);
       } else if (msg.type === "kick") {
+        connecting = false;
         logLine(`kick: ${msg.message || ""}`);
         disconnect();
       } else if (msg.type === "error") {
+        connecting = false;
+        setUiConnected(false);
+        setStatus("Erreur intercom");
         logLine(`error: ${msg.message || ""}`);
       } else if (msg.type === "left") {
+        connecting = false;
         logLine("left server");
       }
     });
@@ -743,20 +894,26 @@
     });
 
     socket.on("connect_error", (e) => {
+      connecting = false;
+      setStatus("Backend web indisponible");
+      refreshActionButtons();
       logLine(`connect_error: ${e && e.message ? e.message : e}`);
     });
   };
 
   const disconnect = async () => {
+    connecting = false;
     if (socket) {
-      try { socket.emit("leave"); } catch (_) {}
+      try { if (socket.connected) socket.emit("leave"); } catch (_) {}
       try { socket.disconnect(); } catch (_) {}
       socket = null;
     }
     joined = false;
     intercomAlive = false;
+    lastControlTs = 0;
     setUiConnected(false);
     setStatus("Déconnecté");
+    await releaseWakeLock();
     await teardownAudio();
   };
 
@@ -765,6 +922,22 @@
       intercomAlive = false;
       setUiConnected(false);
       setStatus("Serveur intercom perdu");
+    }
+    if (!socket) {
+      setNetHealth("offline", "Déconnecté");
+    } else if (!socket.connected) {
+      setNetHealth("poor", "Backend web indisponible");
+    } else if (!joined) {
+      setNetHealth("fair", connecting ? "Connexion intercom en cours" : "Backend web connecté");
+    } else {
+      const ctrlAge = Date.now() - lastControlTs;
+      if (!intercomAlive || ctrlAge > CTRL_TIMEOUT_MS) {
+        setNetHealth("poor", "Contrôle intercom perdu");
+      } else if (ctrlAge > 1000 || playQueueSamples > MAX_QUEUE_SAMPLES) {
+        setNetHealth("fair", `Contrôle OK — buffer ${Math.round((playQueueSamples * 1000) / TARGET_SR)} ms`);
+      } else {
+        setNetHealth("good", `Contrôle OK — buffer ${Math.round((playQueueSamples * 1000) / TARGET_SR)} ms`);
+      }
     }
     requestAnimationFrame(monitorIntercom);
   };
@@ -896,18 +1069,9 @@
     const btnApply = document.getElementById("btnApplyDevices");
     if (btnApply) btnApply.disabled = true;
     logLine("audio: redémarrage du pipeline...");
-    try { if (micProc) micProc.disconnect(); } catch (_) {}
-    try { if (micNode) micNode.disconnect(); } catch (_) {}
-    try { if (playProc) playProc.disconnect(); } catch (_) {}
-    try { if (gainNode) gainNode.disconnect(); } catch (_) {}
-    micProc = null; micNode = null; playProc = null; gainNode = null;
-    try { if (micStream) micStream.getTracks().forEach(t => t.stop()); } catch (_) {}
-    micStream = null;
-    try { if (audioCtx) await audioCtx.close(); } catch (_) {}
-    audioCtx = null;
-    playQueue = new Float32Array(0);
     saveSettings();
     try {
+      await teardownAudio();
       await setupAudio();
       logLine("audio: pipeline redémarré");
     } catch (e) {
@@ -936,6 +1100,7 @@
   enumerateDevices();
   setUiConnected(false);
   setStatus("Déconnecté");
+  setNetHealth("offline", "Déconnecté");
   startDiscoveryPolling();
   requestAnimationFrame(monitorIntercom);
 
@@ -947,4 +1112,8 @@
   };
   document.body.addEventListener("touchstart", resumeAudioOnInteraction, { passive: true });
   document.body.addEventListener("click", resumeAudioOnInteraction, { passive: true });
+  window.addEventListener("beforeunload", () => {
+    stopDiscoveryPolling();
+    releaseWakeLock().catch(() => {});
+  });
 })();

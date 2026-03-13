@@ -207,7 +207,8 @@ class IntercomBridge:
 
         try:
             self._control_send(sock, msg)
-        except Exception:
+        except Exception as e:
+            logger.debug("web bridge state send failed for client_id={}: {}", int(self.client_id), e)
             return
 
     def _control_handle_msg(self, msg: dict[str, Any]) -> None:
@@ -217,8 +218,8 @@ class IntercomBridge:
             if self._on_kick is not None:
                 try:
                     self._on_kick(str(msg.get("message") or ""))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("web bridge on_kick callback failed for client_id={}: {}", int(self.client_id), e)
             return
 
         if mtype in ("welcome", "update"):
@@ -259,8 +260,8 @@ class IntercomBridge:
         if self._on_control_msg is not None:
             try:
                 self._on_control_msg(msg)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("web bridge on_control_msg callback failed for client_id={}: {}", int(self.client_id), e)
 
     def _control_loop(self) -> None:
         backoff_s = 1.0

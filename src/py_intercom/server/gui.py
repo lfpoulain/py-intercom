@@ -145,10 +145,10 @@ class ServerWindow(QtWidgets.QMainWindow):
         clients_lay.setContentsMargins(6, 6, 6, 6)
         clients_lay.setSpacing(6)
 
-        # Base columns: 0=ClientID(hidden), 1=Name, 2=Addr(hidden), 3=Status, 4=VU
-        self._clients = QtWidgets.QTableWidget(0, 5)
+        # Base columns: 0=ClientID(hidden), 1=Name, 2=Addr(hidden), 3=Status, 4=Talk gain, 5=VU
+        self._clients = QtWidgets.QTableWidget(0, 6)
         self._clients.setHorizontalHeaderLabels(
-            ["Client ID", "Name", "Addr", "", "VU"]
+            ["Client ID", "Name", "Addr", "", "Talk", "VU"]
         )
         self._clients.setColumnHidden(0, True)
         self._clients.setColumnHidden(2, True)   # Addr hidden, shown in Info dialog
@@ -157,7 +157,9 @@ class ServerWindow(QtWidgets.QMainWindow):
         hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)   # Name
         hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Status
         self._clients.setColumnWidth(3, 30)
-        hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Stretch)   # VU
+        hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Talk gain
+        self._clients.setColumnWidth(4, 190)
+        hdr.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Stretch)   # VU
         self._clients.verticalHeader().setDefaultSectionSize(32)
         self._clients.verticalHeader().setVisible(False)
         self._clients.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -166,6 +168,8 @@ class ServerWindow(QtWidgets.QMainWindow):
 
         self._client_row_ids: list[int] = []
         self._client_uuid_by_id: Dict[int, str] = {}
+        self._input_gain_widgets: Dict[int, QtWidgets.QSlider] = {}
+        self._input_gain_labels: Dict[int, QtWidgets.QLabel] = {}
         self._vu_widgets: Dict[int, VuMeter] = {}
         self._status_widgets: Dict[int, StatusIndicator] = {}
 
@@ -185,16 +189,20 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._output_row_ids: list[int] = []
         self._output_device_widgets: Dict[int, QtWidgets.QComboBox] = {}
         self._output_bus_widgets: Dict[int, QtWidgets.QComboBox] = {}
+        self._output_gain_widgets: Dict[int, QtWidgets.QSlider] = {}
+        self._output_gain_labels: Dict[int, QtWidgets.QLabel] = {}
         self._output_vu_widgets: Dict[int, VuMeter] = {}
         self._output_devices_cache: list[tuple[str, int]] = []
         self._bus_selector = QtWidgets.QComboBox()
         patch_combo(self._bus_selector)
         self._bus_selector_ids: list[int] = []
         self._bus_row_ids: list[int] = []
+        self._bus_gain_widgets: Dict[int, QtWidgets.QSlider] = {}
+        self._bus_gain_labels: Dict[int, QtWidgets.QLabel] = {}
         self._bus_feed_widgets: Dict[int, QtWidgets.QCheckBox] = {}
 
-        self._buses = QtWidgets.QTableWidget(0, 3)
-        self._buses.setHorizontalHeaderLabels(["ID", "Name", "Retour Regie"])
+        self._buses = QtWidgets.QTableWidget(0, 4)
+        self._buses.setHorizontalHeaderLabels(["ID", "Name", "Gain", "Retour Regie"])
         self._buses.verticalHeader().setVisible(False)
         self._buses.verticalHeader().setDefaultSectionSize(32)
         self._buses.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -202,7 +210,9 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._buses.setAlternatingRowColors(True)
         self._buses.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self._buses.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self._buses.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self._buses.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        self._buses.setColumnWidth(2, 190)
+        self._buses.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
 
         self._add_output_device = QtWidgets.QComboBox()
         patch_combo(self._add_output_device)
@@ -214,15 +224,17 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._remove_output_btn.setProperty("class", "danger")
         self._remove_output_btn.setEnabled(False)
 
-        self._outputs = QtWidgets.QTableWidget(0, 4)
-        self._outputs.setHorizontalHeaderLabels(["ID", "Device", "Bus", "VU"])
+        self._outputs = QtWidgets.QTableWidget(0, 5)
+        self._outputs.setHorizontalHeaderLabels(["ID", "Device", "Bus", "Gain", "VU"])
         out_hdr = self._outputs.horizontalHeader()
         out_hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
         self._outputs.setColumnWidth(0, 30)
         out_hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
         out_hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
         self._outputs.setColumnWidth(2, 75)
-        out_hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        out_hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        self._outputs.setColumnWidth(3, 190)
+        out_hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Stretch)
         self._outputs.verticalHeader().setDefaultSectionSize(32)
         self._outputs.verticalHeader().setVisible(False)
         self._outputs.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -340,6 +352,12 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._bus_selector.setEnabled(bool(running))
         can_add_output = bool(running) and self._add_output_device.currentData() is not None and self._bus_selector.currentData() is not None
         self._add_output_btn.setEnabled(bool(can_add_output))
+        for slider in self._bus_gain_widgets.values():
+            slider.setEnabled(bool(running))
+        for slider in self._input_gain_widgets.values():
+            slider.setEnabled(bool(running))
+        for slider in self._output_gain_widgets.values():
+            slider.setEnabled(bool(running))
         self._on_output_selection_changed()
 
     def closeEvent(self, event) -> None:  # noqa: N802
@@ -467,19 +485,26 @@ class ServerWindow(QtWidgets.QMainWindow):
                 continue
 
         feed_by_id = {1: False, 2: False}
+        gain_by_id = {0: 0.0, 1: 0.0, 2: 0.0}
         for bus_id_str, b in buses_raw.items():
             try:
                 bid = int(bus_id_str)
             except Exception:
                 continue
-            if bid not in (1, 2) or not isinstance(b, dict):
+            if not isinstance(b, dict):
                 continue
-            feed_by_id[int(bid)] = bool(b.get("feed_to_regie", False))
+            if bid in (1, 2):
+                feed_by_id[int(bid)] = bool(b.get("feed_to_regie", False))
+            if bid in (0, 1, 2):
+                try:
+                    gain_by_id[int(bid)] = float(b.get("gain_db", 0.0))
+                except Exception:
+                    gain_by_id[int(bid)] = 0.0
 
         buses = {
-            0: {"bus_id": 0, "name": "Regie", "feed_to_regie": False},
-            1: {"bus_id": 1, "name": "Plateau", "feed_to_regie": bool(feed_by_id[1])},
-            2: {"bus_id": 2, "name": "VMix", "feed_to_regie": bool(feed_by_id[2])},
+            0: {"bus_id": 0, "name": "Regie", "gain_db": float(gain_by_id[0]), "feed_to_regie": False},
+            1: {"bus_id": 1, "name": "Plateau", "gain_db": float(gain_by_id[1]), "feed_to_regie": bool(feed_by_id[1])},
+            2: {"bus_id": 2, "name": "VMix", "gain_db": float(gain_by_id[2]), "feed_to_regie": bool(feed_by_id[2])},
         }
 
         snap: Dict[int, dict] = {}
@@ -488,13 +513,18 @@ class ServerWindow(QtWidgets.QMainWindow):
             if cid is None:
                 continue
             name = ""
-            muted = False
+            input_gain_db = 0.0
             if isinstance(c, dict):
                 name = str(c.get("name") or "")
+                try:
+                    input_gain_db = float(c.get("input_gain_db", 0.0))
+                except Exception:
+                    input_gain_db = 0.0
             snap[int(cid)] = {
                 "client_id": int(cid),
                 "name": name,
                 "client_uuid": str(u),
+                "input_gain_db": float(input_gain_db),
                 "addr": None,
                 "age_s": None,
                 "vu_dbfs": -60.0,
@@ -512,6 +542,7 @@ class ServerWindow(QtWidgets.QMainWindow):
                 "output_id": int(oid),
                 "device": o.get("device"),
                 "bus_id": o.get("bus_id", 0),
+                "gain_db": o.get("gain_db", 0.0),
                 "samplerate": "",
                 "queued_ms": "",
                 "underflows": "",
@@ -613,6 +644,8 @@ class ServerWindow(QtWidgets.QMainWindow):
         if rebuild:
             self._buses.setRowCount(len(bus_ids))
             self._bus_row_ids = list(bus_ids)
+            self._bus_gain_widgets.clear()
+            self._bus_gain_labels.clear()
             self._bus_feed_widgets.clear()
 
         for row, bid in enumerate(bus_ids):
@@ -629,9 +662,42 @@ class ServerWindow(QtWidgets.QMainWindow):
             _set_item(0, str(int(bid)))
             _set_item(1, str(b.get("name") or f"Bus {int(bid)}"))
             if rebuild:
+                gain_wrap = QtWidgets.QWidget()
+                gain_lay = QtWidgets.QHBoxLayout(gain_wrap)
+                gain_lay.setContentsMargins(6, 0, 6, 0)
+                gain_lay.setSpacing(6)
+                gain_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+                gain_slider.setMinimum(-60)
+                gain_slider.setMaximum(12)
+                gain_slider.setSingleStep(1)
+                gain_slider.valueChanged.connect(lambda value, bus_id=int(bid): self._on_bus_gain_changed(bus_id, value))
+                gain_lbl = QtWidgets.QLabel("0 dB")
+                gain_lbl.setFixedWidth(42)
+                gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                gain_lay.addWidget(gain_slider, 1)
+                gain_lay.addWidget(gain_lbl)
+                self._buses.setCellWidget(row, 2, gain_wrap)
+                self._bus_gain_widgets[int(bid)] = gain_slider
+                self._bus_gain_labels[int(bid)] = gain_lbl
+            gain_slider = self._bus_gain_widgets.get(int(bid))
+            gain_lbl = self._bus_gain_labels.get(int(bid))
+            try:
+                gain_value = int(round(float(b.get("gain_db", 0.0))))
+            except Exception:
+                gain_value = 0
+            if gain_slider is not None:
+                gain_slider.blockSignals(True)
+                try:
+                    gain_slider.setEnabled(self._server is not None)
+                    gain_slider.setValue(int(gain_value))
+                finally:
+                    gain_slider.blockSignals(False)
+            if gain_lbl is not None:
+                gain_lbl.setText(f"{int(gain_value)} dB")
+            if rebuild:
                 cb = QtWidgets.QCheckBox()
                 cb.stateChanged.connect(lambda state, bus_id=int(bid): self._on_bus_feed_to_regie_changed(bus_id, state))
-                self._buses.setCellWidget(row, 2, centered_checkbox(cb))
+                self._buses.setCellWidget(row, 3, centered_checkbox(cb))
                 self._bus_feed_widgets[int(bid)] = cb
 
             cb = self._bus_feed_widgets.get(int(bid))
@@ -645,10 +711,19 @@ class ServerWindow(QtWidgets.QMainWindow):
                         cb.setChecked(bool(b.get("feed_to_regie", False)) if int(bid) in (1, 2) else False)
                 finally:
                     cb.blockSignals(False)
+
     def _on_bus_feed_to_regie_changed(self, bus_id: int, state: int) -> None:
         if self._server is None:
             return
         self._server.set_bus_feed_to_regie(int(bus_id), is_checked(state))
+
+    def _on_bus_gain_changed(self, bus_id: int, value: int) -> None:
+        label = self._bus_gain_labels.get(int(bus_id))
+        if label is not None:
+            label.setText(f"{int(value)} dB")
+        if self._server is None:
+            return
+        self._server.set_bus_gain(int(bus_id), float(value))
 
     def _refresh_outputs_table(self, outs: Dict[int, dict], buses: Dict[int, dict]) -> None:
         output_ids = [oid for oid in sorted(outs.keys())]
@@ -658,6 +733,8 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._output_row_ids = list(output_ids)
             self._output_device_widgets.clear()
             self._output_bus_widgets.clear()
+            self._output_gain_widgets.clear()
+            self._output_gain_labels.clear()
             self._output_vu_widgets.clear()
 
         bus_names = {
@@ -703,6 +780,24 @@ class ServerWindow(QtWidgets.QMainWindow):
                 self._outputs.setCellWidget(row, 2, bus_cb)
                 self._output_bus_widgets[int(oid)] = bus_cb
 
+                gain_wrap = QtWidgets.QWidget()
+                gain_lay = QtWidgets.QHBoxLayout(gain_wrap)
+                gain_lay.setContentsMargins(6, 0, 6, 0)
+                gain_lay.setSpacing(6)
+                gain_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+                gain_slider.setMinimum(-60)
+                gain_slider.setMaximum(12)
+                gain_slider.setSingleStep(1)
+                gain_slider.valueChanged.connect(lambda value, out_id=int(oid): self._on_output_gain_changed(out_id, value))
+                gain_lbl = QtWidgets.QLabel("0 dB")
+                gain_lbl.setFixedWidth(42)
+                gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                gain_lay.addWidget(gain_slider, 1)
+                gain_lay.addWidget(gain_lbl)
+                self._outputs.setCellWidget(row, 3, gain_wrap)
+                self._output_gain_widgets[int(oid)] = gain_slider
+                self._output_gain_labels[int(oid)] = gain_lbl
+
             dev_cb = self._output_device_widgets.get(int(oid))
             if dev_cb is not None:
                 dev_cb.blockSignals(True)
@@ -729,9 +824,25 @@ class ServerWindow(QtWidgets.QMainWindow):
                 finally:
                     bus_cb.blockSignals(False)
 
+            gain_slider = self._output_gain_widgets.get(int(oid))
+            gain_lbl = self._output_gain_labels.get(int(oid))
+            try:
+                gain_value = int(round(float(st.get("gain_db", 0.0))))
+            except Exception:
+                gain_value = 0
+            if gain_slider is not None:
+                gain_slider.blockSignals(True)
+                try:
+                    gain_slider.setEnabled(self._server is not None)
+                    gain_slider.setValue(int(gain_value))
+                finally:
+                    gain_slider.blockSignals(False)
+            if gain_lbl is not None:
+                gain_lbl.setText(f"{int(gain_value)} dB")
+
             if rebuild:
                 vu = VuMeter()
-                self._outputs.setCellWidget(row, 3, cell_vu(vu))
+                self._outputs.setCellWidget(row, 4, cell_vu(vu))
                 self._output_vu_widgets[int(oid)] = vu
             vu = self._output_vu_widgets.get(int(oid))
             if vu is not None:
@@ -742,6 +853,22 @@ class ServerWindow(QtWidgets.QMainWindow):
 
     def _on_output_selection_changed(self) -> None:
         self._remove_output_btn.setEnabled(self._server is not None and len(self._outputs.selectedItems()) > 0)
+
+    def _on_client_input_gain_changed(self, client_id: int, value: int) -> None:
+        label = self._input_gain_labels.get(int(client_id))
+        if label is not None:
+            label.setText(f"{int(value)} dB")
+        if self._server is None:
+            return
+        self._server.set_client_input_gain(int(client_id), float(value))
+
+    def _on_output_gain_changed(self, output_id: int, value: int) -> None:
+        label = self._output_gain_labels.get(int(output_id))
+        if label is not None:
+            label.setText(f"{int(value)} dB")
+        if self._server is None:
+            return
+        self._server.set_output_gain(int(output_id), float(value))
 
     def _on_add_output(self) -> None:
         if self._server is None:
@@ -977,6 +1104,8 @@ class ServerWindow(QtWidgets.QMainWindow):
 
         # reset cached widgets (they may refer to deleted Qt objects after a previous stop/start)
         self._client_row_ids = []
+        self._input_gain_widgets.clear()
+        self._input_gain_labels.clear()
         self._vu_widgets.clear()
         self._status_widgets.clear()
 
@@ -984,7 +1113,11 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._bus_row_ids = []
         self._output_device_widgets.clear()
         self._output_bus_widgets.clear()
+        self._output_gain_widgets.clear()
+        self._output_gain_labels.clear()
         self._output_vu_widgets.clear()
+        self._bus_gain_widgets.clear()
+        self._bus_gain_labels.clear()
         self._bus_feed_widgets.clear()
 
         self._server = IntercomServer(
@@ -1061,15 +1194,21 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._regie_vu.set_level(-60.0)
 
             self._client_row_ids = []
+            self._input_gain_widgets.clear()
+            self._input_gain_labels.clear()
             self._vu_widgets.clear()
             self._status_widgets.clear()
 
             self._output_row_ids = []
             self._output_device_widgets.clear()
             self._output_bus_widgets.clear()
+            self._output_gain_widgets.clear()
+            self._output_gain_labels.clear()
             self._output_vu_widgets.clear()
             self._buses.setRowCount(0)
             self._bus_row_ids = []
+            self._bus_gain_widgets.clear()
+            self._bus_gain_labels.clear()
             self._bus_feed_widgets.clear()
 
             self._update_controls_for_server_state()
@@ -1195,6 +1334,8 @@ class ServerWindow(QtWidgets.QMainWindow):
         if rebuild:
             self._clients.setRowCount(len(client_ids))
             self._client_row_ids = list(client_ids)
+            self._input_gain_widgets.clear()
+            self._input_gain_labels.clear()
             self._vu_widgets.clear()
             self._status_widgets.clear()
 
@@ -1228,10 +1369,45 @@ class ServerWindow(QtWidgets.QMainWindow):
             if si is not None:
                 si.set_online(not disconnected)
 
-            # col 4 — VU meter
+            # col 4 — Talk gain
+            if rebuild:
+                gain_wrap = QtWidgets.QWidget()
+                gain_lay = QtWidgets.QHBoxLayout(gain_wrap)
+                gain_lay.setContentsMargins(6, 0, 6, 0)
+                gain_lay.setSpacing(6)
+                gain_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+                gain_slider.setMinimum(-60)
+                gain_slider.setMaximum(12)
+                gain_slider.setSingleStep(1)
+                gain_slider.valueChanged.connect(lambda value, cid=int(client_id): self._on_client_input_gain_changed(cid, value))
+                gain_lbl = QtWidgets.QLabel("0 dB")
+                gain_lbl.setFixedWidth(42)
+                gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                gain_lay.addWidget(gain_slider, 1)
+                gain_lay.addWidget(gain_lbl)
+                self._clients.setCellWidget(row, 4, gain_wrap)
+                self._input_gain_widgets[int(client_id)] = gain_slider
+                self._input_gain_labels[int(client_id)] = gain_lbl
+            gain_slider = self._input_gain_widgets.get(int(client_id))
+            gain_lbl = self._input_gain_labels.get(int(client_id))
+            try:
+                gain_value = int(round(float(st.get("input_gain_db", 0.0))))
+            except Exception:
+                gain_value = 0
+            if gain_slider is not None:
+                gain_slider.blockSignals(True)
+                try:
+                    gain_slider.setEnabled(self._server is not None)
+                    gain_slider.setValue(int(gain_value))
+                finally:
+                    gain_slider.blockSignals(False)
+            if gain_lbl is not None:
+                gain_lbl.setText(f"{int(gain_value)} dB")
+
+            # col 5 — VU meter
             if rebuild:
                 vu = VuMeter()
-                self._clients.setCellWidget(row, 4, cell_vu(vu))
+                self._clients.setCellWidget(row, 5, cell_vu(vu))
                 self._vu_widgets[int(client_id)] = vu
             vu = self._vu_widgets.get(int(client_id))
             if vu is not None:

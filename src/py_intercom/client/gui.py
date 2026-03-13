@@ -1320,6 +1320,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             and self._client.config.output_device == cfg.output_device
         )
 
+        new_client: Optional[IntercomClient] = None
         try:
             if can_reuse:
                 # Update config fields that may have changed
@@ -1344,9 +1345,20 @@ class ClientWindow(QtWidgets.QMainWindow):
                         self._client.stop()
                     except Exception:
                         pass
-                self._client = IntercomClient(client_id=client_id, config=cfg)
-                self._client.start()
+                new_client = IntercomClient(client_id=client_id, config=cfg)
+                new_client.start()
+                self._client = new_client
         except Exception as e:
+            if new_client is not None:
+                try:
+                    new_client.stop()
+                except Exception:
+                    pass
+            elif self._client is not None:
+                try:
+                    self._client.stop()
+                except Exception:
+                    pass
             self._client = None
             self._connected = False
             QtWidgets.QMessageBox.critical(self, "Connect failed", str(e))
@@ -1535,6 +1547,22 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._in_vu.set_level(float(st.get("in_vu_dbfs", -60.0)))
         self._out_vu.set_level(float(st.get("out_vu_dbfs", -60.0)))
         self._return_vu.set_level(float(st.get("return_vu_dbfs", -60.0)))
+
+        try:
+            shared_input_gain = int(round(float(st.get("input_gain_db", self._mic_gain.value()))))
+        except Exception:
+            shared_input_gain = int(self._mic_gain.value())
+        if int(self._mic_gain.value()) != int(shared_input_gain):
+            self._mic_gain.blockSignals(True)
+            try:
+                self._mic_gain.setValue(int(shared_input_gain))
+            finally:
+                self._mic_gain.blockSignals(False)
+            self._mic_gain_lbl.setText(f"{int(shared_input_gain)} dB")
+            try:
+                self._preset_set("input_gain_db", float(shared_input_gain))
+            except Exception:
+                pass
 
         buses_raw = st.get("buses")
         parsed_buses: dict[int, dict] = {}

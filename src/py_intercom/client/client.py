@@ -122,6 +122,7 @@ class IntercomClient:
         self._ctrl_last_rx_monotonic: float = 0.0
         self._ctrl_last_tx_monotonic: float = 0.0
         self._ctrl_buses: dict[int, dict] = {}
+        self._ctrl_received_config: bool = False
 
         self._ptt_buses: dict[int, bool] = {}
         self._listen_return_bus: bool = bool(self.config.listen_return_bus)
@@ -208,7 +209,8 @@ class IntercomClient:
 
     def set_input_gain_db(self, gain_db: float) -> None:
         with self._state_lock:
-            self._input_gain_db = float(gain_db)
+            self._input_gain_db = max(-60.0, min(12.0, float(gain_db)))
+        self._control_send_state()
 
     def set_output_gain_db(self, gain_db: float) -> None:
         with self._state_lock:
@@ -246,11 +248,18 @@ class IntercomClient:
         self._ctrl_thread = threading.Thread(target=self._control_loop, name="ctrl", daemon=True)
         self._ctrl_thread.start()
 
-        self._out_stream = self._open_output_stream()
-        self._out_stream.start()
+        try:
+            self._out_stream = self._open_output_stream()
+            self._out_stream.start()
 
-        self._in_stream = self._open_input_stream()
-        self._in_stream.start()
+            self._in_stream = self._open_input_stream()
+            self._in_stream.start()
+        except Exception:
+            try:
+                self.stop()
+            except Exception:
+                pass
+            raise
 
     def _stop_network(self) -> None:
         """Tear down control TCP and network threads. UDP socket is kept alive."""
@@ -377,6 +386,7 @@ class IntercomClient:
         if sock is None or not self._ctrl_connected:
             return
         with self._state_lock:
+            input_gain_db = float(self._input_gain_db)
             ptt_buses = dict(self._ptt_buses)
             listen_return_bus = bool(self._listen_return_bus)
             listen_regie = bool(self._listen_regie)
@@ -384,6 +394,8 @@ class IntercomClient:
         msg: dict[str, object] = {
             "type": "state",
             "client_id": int(self.client_id),
+            "input_gain_db": input_gain_db,
+            "applies_input_gain_locally": True,
             "ptt_buses": ptt_buses,
             "listen_return_bus": listen_return_bus,
             "listen_regie": listen_regie,
@@ -431,6 +443,12 @@ class IntercomClient:
                 cfg = msg
 
             if isinstance(cfg, dict):
+                if "input_gain_db" in cfg:
+                    try:
+                        with self._state_lock:
+                            self._input_gain_db = max(-60.0, min(12.0, float(cfg.get("input_gain_db"))))
+                    except Exception:
+                        pass
                 if "buses" in cfg:
                     buses = cfg.get("buses")
                     try:
@@ -470,6 +488,9 @@ class IntercomClient:
                             self._return_vu_dbfs = float(cfg.get("return_vu_dbfs"))
                     except Exception:
                         pass
+                if not bool(self._ctrl_received_config):
+                    self._ctrl_received_config = True
+                    self._control_send_state()
         elif mtype == "pong":
             if "return_vu_dbfs" in msg:
                 try:
@@ -492,6 +513,7 @@ class IntercomClient:
                 sock.settimeout(0.02)
                 self._ctrl_sock = sock
                 self._ctrl_connected = True
+                self._ctrl_received_config = False
                 self._ctrl_last_rx_monotonic = time.monotonic()
                 self._ctrl_last_tx_monotonic = time.monotonic()
                 backoff_s = 1.0
@@ -502,11 +524,11 @@ class IntercomClient:
                     "client_id": int(self.client_id),
                     "client_uuid": str(self.config.client_uuid or ""),
                     "name": str(self.config.name or ""),
+                    "applies_input_gain_locally": True,
                     "udp_port": int(self._sock.getsockname()[1]),
                 }
                 self._control_send(sock, hello)
 
-                self._control_send_state()
                 self._send_silence_probe()
 
                 buf = b""
@@ -549,6 +571,7 @@ class IntercomClient:
                 logger.debug("control loop error: {}", e)
             finally:
                 self._ctrl_connected = False
+                self._ctrl_received_config = False
                 try:
                     if self._ctrl_sock is not None:
                         self._ctrl_sock.close()

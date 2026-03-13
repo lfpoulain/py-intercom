@@ -1,7 +1,7 @@
 # py-intercom
-
+ 
 Intercom audio temps réel sur LAN (architecture client/serveur).
-
+ 
 - Audio: UDP (Opus)
 - Contrôle: TCP (JSON par ligne)
 - UI: PySide6
@@ -11,17 +11,17 @@ Intercom audio temps réel sur LAN (architecture client/serveur).
 
 - Bus **fixes** : Régie (bus 0, bidirectionnel), Plateau (bus 1), VMix (bus 2).
 - PTT côté client **par bus uniquement**.
+- Modes PTT : `PTT` / `Toggle` / `Always On` sur le client Python et le client web.
+- Raccourcis clavier globaux OS disponibles uniquement sur le client Python.
 - Écoute : toggle séparé pour **Régie** et **Return bus**.
 - Return bus configurable à chaud (activation + device d'entrée) pendant que le serveur tourne.
-- Gains côté serveur simplifiés pour l'UX :
-  - gain return fixe à `0 dB` (unity)
-  - gain client effectif fixe à `0 dB` (unity)
+- Routage et gains côté serveur volontairement simplifiés pour l'UX.
 - Ports audio/contrôle **fixes** (5000/5001).
 
 ## Prérequis
 
 - Python 3.x
-- Windows: `bin/opus.dll` est fourni et automatiquement chargé par `run_server.py` / `run_client.py`.
+- Windows: `bin/opus.dll` est fourni. Les scripts `run_server.py` / `run_client.py` gèrent explicitement son chargement, et `run_web.py` prépare le dossier `bin/` pour le chargement des DLL nécessaires.
 
 ## Installation
 

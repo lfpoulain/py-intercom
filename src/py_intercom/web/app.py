@@ -12,6 +12,7 @@ from flask import Flask, render_template, request, send_from_directory
 from flask_socketio import SocketIO, emit
 from loguru import logger
 
+from ..common.audio import float32_to_int16_bytes
 from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, FRAME_SAMPLES, SAMPLE_RATE
 from ..common.discovery import DiscoveryListener
 from .bridge import BridgeConfig, IntercomBridge
@@ -31,6 +32,7 @@ def create_app() -> tuple[Flask, SocketIO]:
     socketio = SocketIO(app, async_mode="threading")
 
     sessions: Dict[str, WebClientSession] = {}
+    session_revisions: Dict[str, int] = {}
     sessions_lock = threading.Lock()
 
     discovery = DiscoveryListener()
@@ -43,12 +45,12 @@ def create_app() -> tuple[Flask, SocketIO]:
         for sess in all_sess:
             try:
                 sess.bridge.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("web stop_all bridge stop failed sid={}: {}", sess.sid, e)
         try:
             discovery.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("web discovery stop failed: {}", e)
 
     atexit.register(_stop_all)
 
@@ -78,13 +80,14 @@ def create_app() -> tuple[Flask, SocketIO]:
 
     def _stop_session(sid: str) -> None:
         with sessions_lock:
+            session_revisions[str(sid)] = int(session_revisions.get(str(sid), 0)) + 1
             sess = sessions.pop(str(sid), None)
         if sess is None:
             return
         try:
             sess.bridge.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("web session stop failed sid={}: {}", sid, e)
 
     @socketio.on("connect")
     def on_connect():
@@ -121,6 +124,8 @@ def create_app() -> tuple[Flask, SocketIO]:
             return
 
         _stop_session(sid)
+        with sessions_lock:
+            session_revision = int(session_revisions.get(sid, 0))
 
         # Threaded setup for Bridge
         def _setup_bridge():
@@ -144,17 +149,16 @@ def create_app() -> tuple[Flask, SocketIO]:
                 
                 def _on_audio_frame(frame):
                     try:
-                        from ..common.audio import float32_to_int16_bytes
                         pcm = float32_to_int16_bytes(frame)
                         socketio.emit("audio_out", pcm, to=sid)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("web audio_out emit failed sid={}: {}", sid, e)
 
                 def _on_control_msg(msg):
                     try:
                         socketio.emit("control", msg, to=sid)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("web control emit failed sid={}: {}", sid, e)
 
                 bridge = IntercomBridge(
                     client_uuid=client_uuid, 
@@ -166,8 +170,8 @@ def create_app() -> tuple[Flask, SocketIO]:
                 def _on_kick(message: str) -> None:
                     try:
                         socketio.emit("server", {"type": "kick", "message": str(message or "")}, to=sid)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("web kick emit failed sid={}: {}", sid, e)
                     # Defer stop to another thread to avoid deadlocks
                     import threading
                     threading.Thread(target=_stop_session, args=(sid,), daemon=True).start()
@@ -178,7 +182,18 @@ def create_app() -> tuple[Flask, SocketIO]:
 
                 sess = WebClientSession(sid=sid, bridge=bridge)
                 with sessions_lock:
-                    sessions[sid] = sess
+                    if int(session_revisions.get(sid, 0)) != int(session_revision):
+                        store_session = False
+                    else:
+                        sessions[sid] = sess
+                        store_session = True
+
+                if not store_session:
+                    try:
+                        bridge.stop()
+                    except Exception as e:
+                        logger.debug("web stale bridge stop failed sid={}: {}", sid, e)
+                    return
 
                 response = {
                     "type": "joined",
@@ -230,8 +245,8 @@ def create_app() -> tuple[Flask, SocketIO]:
         try:
             if bus_id is not None:
                 sess.bridge.set_ptt_bus(int(bus_id), bool(active))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("web ptt_bus update failed sid={}: {}", sid, e)
 
     @socketio.on("listen_return_bus")
     def on_listen_return_bus(data: Any):
@@ -245,8 +260,8 @@ def create_app() -> tuple[Flask, SocketIO]:
             return
         try:
             sess.bridge.set_listen_return_bus(bool(enabled))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("web listen_return_bus update failed sid={}: {}", sid, e)
 
     @socketio.on("listen_regie")
     def on_listen_regie(data: Any):
@@ -260,7 +275,7 @@ def create_app() -> tuple[Flask, SocketIO]:
             return
         try:
             sess.bridge.set_listen_regie(bool(enabled))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("web listen_regie update failed sid={}: {}", sid, e)
 
     return app, socketio

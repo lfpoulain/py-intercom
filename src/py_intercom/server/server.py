@@ -41,6 +41,8 @@ class ClientState:
     client_uuid: str = ""
     control_connected: bool = False
     last_control_monotonic: float = 0.0
+    input_gain_db: float = 0.0
+    applies_input_gain_locally: bool = False
 
     ptt_buses: Dict[int, bool] = field(default_factory=dict)
     listen_return_bus: bool = False
@@ -61,6 +63,7 @@ class OutputState:
     output_id: int
     device: int
     bus_id: int
+    gain_db: float = 0.0
     stream: Optional[sd.OutputStream] = None
     samplerate: int = int(SAMPLE_RATE)
     phase: float = 0.0
@@ -169,7 +172,11 @@ class IntercomServer:
                     bid = int(diffusion_fallback)
                 oid = int(self._next_output_id)
                 self._next_output_id += 1
-                self._outputs[oid] = OutputState(output_id=oid, device=dev, bus_id=bid)
+                try:
+                    output_gain_db = float(o.get("gain_db", 0.0))
+                except Exception:
+                    output_gain_db = 0.0
+                self._outputs[oid] = OutputState(output_id=oid, device=dev, bus_id=bid, gain_db=float(output_gain_db))
         elif output_device is not None:
             oid = int(self._next_output_id)
             self._next_output_id += 1
@@ -240,7 +247,8 @@ class IntercomServer:
             devices,
         )
 
-        feed_by_id = {1: True, 2: True}
+        feed_by_id = {1: False, 2: False}
+        gain_by_id = {0: 0.0, 1: 0.0, 2: 0.0}
         if isinstance(buses, dict):
             for bus_id_str, b in buses.items():
                 try:
@@ -248,15 +256,24 @@ class IntercomServer:
                 except Exception:
                     continue
                 if bid not in (1, 2) or not isinstance(b, dict):
+                    if bid == 0 and isinstance(b, dict):
+                        try:
+                            gain_by_id[0] = float(b.get("gain_db", 0.0))
+                        except Exception:
+                            gain_by_id[0] = 0.0
                     continue
                 feed_by_id[int(bid)] = bool(b.get("feed_to_regie", False))
+                try:
+                    gain_by_id[int(bid)] = float(b.get("gain_db", 0.0))
+                except Exception:
+                    gain_by_id[int(bid)] = 0.0
 
         logger.debug("load_preset: return_enabled={} return_input_device={}", bool(return_enabled), return_input_device)
         with self._lock:
             self._buses = {
-                0: AudioBus(bus_id=0, name="Regie", gain_db=0.0, feed_to_regie=False),
-                1: AudioBus(bus_id=1, name="Plateau", gain_db=0.0, feed_to_regie=feed_by_id[1]),
-                2: AudioBus(bus_id=2, name="VMix", gain_db=0.0, feed_to_regie=feed_by_id[2]),
+                0: AudioBus(bus_id=0, name="Regie", gain_db=float(gain_by_id[0]), feed_to_regie=False),
+                1: AudioBus(bus_id=1, name="Plateau", gain_db=float(gain_by_id[1]), feed_to_regie=feed_by_id[1]),
+                2: AudioBus(bus_id=2, name="VMix", gain_db=float(gain_by_id[2]), feed_to_regie=feed_by_id[2]),
             }
             self._next_bus_id = 3
             self._return_enabled = bool(return_enabled)
@@ -297,7 +314,11 @@ class IntercomServer:
 
                     oid = int(self._next_output_id)
                     self._next_output_id += 1
-                    self._outputs[oid] = OutputState(output_id=oid, device=int(dev), bus_id=bid)
+                    try:
+                        output_gain_db = float(o.get("gain_db", 0.0))
+                    except Exception:
+                        output_gain_db = 0.0
+                    self._outputs[oid] = OutputState(output_id=oid, device=int(dev), bus_id=bid, gain_db=float(output_gain_db))
 
             now = time.monotonic()
             if isinstance(clients, dict):
@@ -318,6 +339,10 @@ class IntercomServer:
                             st.name = str(c.get("name") or "")
                         except Exception:
                             st.name = ""
+                        try:
+                            st.input_gain_db = float(c.get("input_gain_db", 0.0))
+                        except Exception:
+                            st.input_gain_db = 0.0
                     st.control_connected = False
 
         with self._preset_lock:
@@ -342,6 +367,7 @@ class IntercomServer:
                         "device_name": str(getattr(dev_info, "name", "")) if dev_info is not None else "",
                         "device_hostapi": str(getattr(dev_info, "hostapi", "")) if dev_info is not None else "",
                         "bus_id": int(o.bus_id),
+                        "gain_db": float(o.gain_db),
                     }
                 )
 
@@ -350,7 +376,11 @@ class IntercomServer:
             )
 
             buses: Dict[str, dict] = {
-                "0": {"name": "Regie", "feed_to_regie": False, "gain_db": 0.0},
+                "0": {
+                    "name": "Regie",
+                    "feed_to_regie": False,
+                    "gain_db": float(self._buses.get(0, AudioBus(0, "Regie")).gain_db),
+                },
                 "1": {
                     "name": "Plateau",
                     "feed_to_regie": bool(self._buses.get(1, AudioBus(1, "Plateau")).feed_to_regie),
@@ -370,6 +400,7 @@ class IntercomServer:
                     continue
                 clients[u] = {
                     "name": str(st.name or ""),
+                    "input_gain_db": float(st.input_gain_db),
                 }
 
         server_data = {
@@ -418,6 +449,7 @@ class IntercomServer:
                     "client_id": client_id,
                     "name": st.name,
                     "client_uuid": st.client_uuid,
+                    "input_gain_db": float(st.input_gain_db),
                     "addr": st.addr,
                     "age_s": max(0.0, now - st.last_packet_monotonic),
                     "vu_dbfs": st.vu_dbfs,
@@ -498,6 +530,22 @@ class IntercomServer:
         if u:
             with self._preset_lock:
                 self._preset_client_by_uuid.pop(str(u), None)
+
+        self._autosave_preset()
+
+    def set_output_gain(self, output_id: int, gain_db: float) -> None:
+        next_gain = max(-60.0, min(12.0, float(gain_db)))
+        changed = False
+        with self._lock:
+            out = self._outputs.get(int(output_id))
+            if out is None:
+                return
+            if abs(float(out.gain_db) - float(next_gain)) >= 0.01:
+                out.gain_db = float(next_gain)
+                changed = True
+
+        if not changed:
+            return
 
         self._autosave_preset()
 
@@ -603,6 +651,7 @@ class IntercomServer:
                     "output_id": out.output_id,
                     "device": out.device,
                     "bus_id": out.bus_id,
+                    "gain_db": float(out.gain_db),
                     "samplerate": out.samplerate,
                     "queued_ms": float(out.buf.size) * 1000.0 / float(SAMPLE_RATE),
                     "underflows": int(out.underflows),
@@ -624,62 +673,107 @@ class IntercomServer:
         self._control_push_all_configs()
         self._autosave_preset()
 
+    def set_bus_gain(self, bus_id: int, gain_db: float) -> None:
+        bid = int(bus_id)
+        if bid not in (0, 1, 2):
+            return
+        next_gain = max(-60.0, min(12.0, float(gain_db)))
+        changed = False
+        with self._lock:
+            bus = self._buses.get(int(bid))
+            if bus is None:
+                return
+            if abs(float(bus.gain_db) - float(next_gain)) >= 0.01:
+                bus.gain_db = float(next_gain)
+                changed = True
+
+        if not changed:
+            return
+
+        self._control_push_all_configs()
+        self._autosave_preset()
+
+    def set_client_input_gain(self, client_id: int, gain_db: float) -> None:
+        cid = int(client_id)
+        next_gain = max(-60.0, min(12.0, float(gain_db)))
+        changed = False
+        with self._lock:
+            st = self._clients.get(int(cid))
+            if st is None:
+                return
+            if abs(float(st.input_gain_db) - float(next_gain)) >= 0.01:
+                st.input_gain_db = float(next_gain)
+                changed = True
+
+        if not changed:
+            return
+
+        self._control_push_config(int(cid))
+        self._autosave_preset()
+
     def start(self) -> None:
         logger.info("server listening on {}:{}", self.bind_ip, self.port)
 
         self._running = True
 
-        rx = threading.Thread(target=self._rx_loop, name="udp-rx", daemon=True)
-        tx = threading.Thread(target=self._broadcast_loop, name="udp-tx", daemon=True)
-        self._mix_thread = threading.Thread(target=self._mix_loop, name="mix", daemon=True)
-        self._ctrl_thread = threading.Thread(target=self._ctrl_accept_loop, name="ctrl-accept", daemon=True)
-
-        rx.start()
-        tx.start()
-        self._mix_thread.start()
-        self._ctrl_thread.start()
-
-        if self._discovery_enabled:
-            self._beacon = DiscoveryBeacon(
-                server_name=self._server_name,
-                audio_port=self.port,
-                bind_ip=self.bind_ip,
-            )
-            self._beacon.start()
-
-        with self._lock:
-            outputs = list(self._outputs.values())
-
-        ok = 0
-        last_err: Optional[Exception] = None
-        for out in outputs:
-            try:
-                self._open_output_stream(out)
-                ok += 1
-            except Exception as e:
-                last_err = e
-                logger.warning("output {} failed to start: {}", int(out.output_id), e)
-
-        if ok == 0 and last_err is not None:
-            raise last_err
-
-        if outputs and any(out.stream is None or not self._stream_is_active(out.stream) for out in outputs):
-            self._retry_thread = threading.Thread(
-                target=self._retry_output_streams,
-                name="output-retry",
-                daemon=True,
-            )
-            self._retry_thread.start()
-
         try:
-            logger.info("start: return_enabled={} return_input_device={}", bool(self._return_enabled), self._return_input_device)
-            if self._return_enabled and self._return_input_device is not None:
-                self._open_return_input_stream(int(self._return_input_device))
-                logger.info("start: return input stream opened on device {}", self._return_input_device)
-            else:
-                logger.info("start: return input stream NOT opened (enabled={} device={})", bool(self._return_enabled), self._return_input_device)
-        except Exception as e:
-            logger.error("return input failed to start: {}", e)
+            rx = threading.Thread(target=self._rx_loop, name="udp-rx", daemon=True)
+            tx = threading.Thread(target=self._broadcast_loop, name="udp-tx", daemon=True)
+            self._mix_thread = threading.Thread(target=self._mix_loop, name="mix", daemon=True)
+            self._ctrl_thread = threading.Thread(target=self._ctrl_accept_loop, name="ctrl-accept", daemon=True)
+
+            rx.start()
+            tx.start()
+            self._mix_thread.start()
+            self._ctrl_thread.start()
+
+            if self._discovery_enabled:
+                self._beacon = DiscoveryBeacon(
+                    server_name=self._server_name,
+                    audio_port=self.port,
+                    bind_ip=self.bind_ip,
+                )
+                self._beacon.start()
+
+            with self._lock:
+                outputs = list(self._outputs.values())
+
+            ok = 0
+            last_err: Optional[Exception] = None
+            for out in outputs:
+                try:
+                    self._open_output_stream(out)
+                    ok += 1
+                except Exception as e:
+                    last_err = e
+                    logger.warning("output {} failed to start: {}", int(out.output_id), e)
+
+            if ok == 0 and last_err is not None:
+                raise last_err
+
+            if outputs and any(out.stream is None or not self._stream_is_active(out.stream) for out in outputs):
+                self._retry_thread = threading.Thread(
+                    target=self._retry_output_streams,
+                    name="output-retry",
+                    daemon=True,
+                )
+                self._retry_thread.start()
+
+            try:
+                logger.info("start: return_enabled={} return_input_device={}", bool(self._return_enabled), self._return_input_device)
+                if self._return_enabled and self._return_input_device is not None:
+                    self._open_return_input_stream(int(self._return_input_device))
+                    logger.info("start: return input stream opened on device {}", self._return_input_device)
+                else:
+                    logger.info("start: return input stream NOT opened (enabled={} device={})", bool(self._return_enabled), self._return_input_device)
+            except Exception as e:
+                logger.error("return input failed to start: {}", e)
+        except Exception:
+            try:
+                self.stop()
+            except Exception:
+                pass
+            raise
 
     def stop(self) -> None:
         self._stop.set()
@@ -858,11 +952,13 @@ class IntercomServer:
                 return
             cfg = {
                 "client_id": int(client_id),
+                "input_gain_db": float(st.input_gain_db),
                 "return_vu_dbfs": float(self._return_vu_dbfs),
                 "buses": [
                     {
                         "bus_id": int(bus.bus_id),
                         "name": str(bus.name or f"Bus {int(bus.bus_id)}"),
+                        "gain_db": float(bus.gain_db),
                         "feed_to_regie": bool(bus.feed_to_regie),
                     }
                     for _bid, bus in sorted(self._buses.items(), key=lambda kv: int(kv[0]))
@@ -975,6 +1071,9 @@ class IntercomServer:
                         listen_return_bus = msg.get("listen_return_bus")
                         listen_regie = msg.get("listen_regie")
                         return_gain_db = msg.get("return_gain_db")
+                        input_gain_db = msg.get("input_gain_db")
+                        applies_input_gain_locally = msg.get("applies_input_gain_locally")
+                        changed = False
                         logger.debug("state from cid={}: listen_return_bus={} listen_regie={}", cid, listen_return_bus, listen_regie)
                         with self._lock:
                             st = self._clients.get(int(cid))
@@ -993,9 +1092,24 @@ class IntercomServer:
                                         st.return_gain_db = float(return_gain_db)
                                     except Exception:
                                         st.return_gain_db = 0.0
+                                if input_gain_db is not None:
+                                    try:
+                                        next_input_gain = max(-60.0, min(12.0, float(input_gain_db)))
+                                    except Exception:
+                                        next_input_gain = float(st.input_gain_db)
+                                    if abs(float(st.input_gain_db) - float(next_input_gain)) >= 0.01:
+                                        st.input_gain_db = float(next_input_gain)
+                                        changed = True
+                                if applies_input_gain_locally is not None:
+                                    next_applies = bool(applies_input_gain_locally)
+                                    if bool(st.applies_input_gain_locally) != bool(next_applies):
+                                        st.applies_input_gain_locally = bool(next_applies)
+                                        changed = True
 
                                 st.control_connected = True
                                 st.last_control_monotonic = time.monotonic()
+                        if changed:
+                            self._autosave_preset()
                         continue
 
                     if mtype != "hello":
@@ -1009,6 +1123,7 @@ class IntercomServer:
                     client_id = int(cid)
                     name = str(msg.get("name") or "")
                     client_uuid = str(msg.get("client_uuid") or "")
+                    applies_input_gain_locally = bool(msg.get("applies_input_gain_locally", False))
                     udp_port = None
                     try:
                         raw_udp_port = int(msg.get("udp_port"))
@@ -1042,6 +1157,7 @@ class IntercomServer:
                         st.last_sequence_number = 0
                         st.name = name
                         st.client_uuid = client_uuid
+                        st.applies_input_gain_locally = bool(applies_input_gain_locally)
                         st.ptt_buses = {}
                         st.vu_dbfs = -60.0
                         if udp_port is not None:
@@ -1091,7 +1207,12 @@ class IntercomServer:
             self._outputs[oid] = out
 
         if self._running and not self._stop.is_set():
-            self._open_output_stream(out)
+            try:
+                self._open_output_stream(out)
+            except Exception:
+                with self._lock:
+                    self._outputs.pop(int(oid), None)
+                raise
         self._autosave_preset()
         return int(oid)
 
@@ -1218,7 +1339,7 @@ class IntercomServer:
                         bus_id: (float(bus.gain_db), bool(bus.feed_to_regie))
                         for bus_id, bus in self._buses.items()
                     }
-                    clients_snapshot: list[tuple[int, ClientState, Dict[int, bool], bool, float]] = []
+                    clients_snapshot: list[tuple[int, ClientState, Dict[int, bool], bool, float, float, bool]] = []
                     for client_id, st in list(self._clients.items()):
                         try:
                             clients_snapshot.append(
@@ -1228,17 +1349,19 @@ class IntercomServer:
                                     dict(st.ptt_buses),
                                     bool(st.control_connected),
                                     float(st.last_control_monotonic),
+                                    float(st.input_gain_db),
+                                    bool(st.applies_input_gain_locally),
                                 )
                             )
                         except Exception:
-                            clients_snapshot.append((int(client_id), st, {}, False, 0.0))
+                            clients_snapshot.append((int(client_id), st, {}, False, 0.0, 0.0, False))
                     outputs = list(self._outputs.values())
 
                 per_client: Dict[int, np.ndarray] = {}
                 client_meta: Dict[int, tuple[Dict[int, bool], bool, float]] = {}
                 vu_updates: Dict[int, float] = {}
 
-                for client_id, st, ptt_buses, ctrl_ok, last_ctrl in clients_snapshot:
+                for client_id, st, ptt_buses, ctrl_ok, last_ctrl, input_gain_db, applies_input_gain_locally in clients_snapshot:
                     try:
                         payload = st.jb.pop()
                     except Exception:
@@ -1253,10 +1376,15 @@ class IntercomServer:
                         self._rx_decode_errors += 1
                         continue
 
+                    if not bool(applies_input_gain_locally):
+                        try:
+                            frame = apply_gain_db(frame.astype(np.float32, copy=False), float(input_gain_db))
+                        except Exception:
+                            frame = frame.astype(np.float32, copy=False)
+
                     vu = rms_dbfs(frame)
                     vu_updates[int(client_id)] = float(vu)
 
-                    # Per-client gain is fixed to unity.
                     per_client[int(client_id)] = frame
                     client_meta[int(client_id)] = (
                         dict(ptt_buses),
@@ -1388,6 +1516,7 @@ class IntercomServer:
             with out.lock:
                 n = int(frames)
                 have = int(out.buf.size)
+                output_gain_db = float(out.gain_db)
                 take = min(n, have)
                 if take > 0:
                     y = out.buf[:take]
@@ -1402,12 +1531,17 @@ class IntercomServer:
                     else:
                         y = np.concatenate([y.astype(np.float32, copy=False), np.zeros((n - take,), dtype=np.float32)])
 
+            y = np.clip(y.astype(np.float32, copy=False), -1.0, 1.0)
+            try:
+                y = apply_gain_db(y, float(output_gain_db))
+            except Exception:
+                pass
+            y = np.clip(y.astype(np.float32, copy=False), -1.0, 1.0)
+            with out.lock:
                 try:
                     out.vu_dbfs = rms_dbfs(y)
                 except Exception:
                     out.vu_dbfs = -60.0
-
-            y = np.clip(y.astype(np.float32, copy=False), -1.0, 1.0)
             if outdata.ndim == 1:
                 outdata[:] = y
             else:
