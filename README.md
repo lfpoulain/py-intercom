@@ -151,12 +151,69 @@ Options : `--host`, `--port`, `--debug`, `--ssl-adhoc`, `--ssl-cert`, `--ssl-key
 
 > **Android / iOS** : HTTPS est obligatoire pour l'accès micro. Le certificat auto-signé (`--ssl-adhoc`) déclenche un avertissement navigateur à accepter une fois (Avancé → Continuer). Les serveurs intercom sont détectés automatiquement via le dropdown "Détection auto".
 
+### Déploiement Docker du serveur web
+
+La solution recommandée pour un déploiement simple et reproductible est :
+
+- une **image dédiée** `py-intercom-web`
+- publiée automatiquement sur **GHCR** via `.github/workflows/web-docker-image.yml`
+- déployée via `docker compose`
+- avec **HTTPS géré par un reverse proxy** si tu exposes le service publiquement
+
+- Le bridge web n'a **pas besoin d'accès aux périphériques audio** du host. Il a seulement besoin de :
+
+- servir l'UI web
+- ouvrir des sockets UDP/TCP vers le serveur intercom
+- éventuellement écouter l'auto-discovery UDP sur le port `5002`
+
+- Pour **Unraid avec Nginx reverse proxy**, la recommandation est :
+
+- conteneur en **mode bridge**
+- `PY_INTERCOM_WEB_PORT=8741` par défaut
+- `PY_INTERCOM_DISCOVERY_PORT=5002` par défaut
+- `PY_INTERCOM_WEB_SSL_MODE=plain`
+
+#### Démarrage simple
+
+```powershell
+docker compose up -d --build
+```
+
+Par défaut, `docker-compose.yml` expose le bridge web sur le port `8741`.
+
+#### Auto-discovery LAN
+
+En conteneur Docker classique, la réception du broadcast UDP LAN peut dépendre du réseau Docker et de l'OS hôte.
+
+Si tu veux que la détection automatique fonctionne, il faut en pratique garder le **port publié UDP à `5002`** côté host.
+
+#### HTTPS
+
+Deux modes sont supportés via variables d'environnement :
+
+- `PY_INTERCOM_WEB_SSL_MODE=plain` : HTTP simple dans le conteneur, recommandé derrière reverse proxy
+- `PY_INTERCOM_WEB_SSL_MODE=adhoc` : HTTPS auto-signé dans le conteneur
+
+Avec **Nginx reverse proxy**, il faut utiliser **`plain`**.
+
+`adhoc` peut fonctionner seulement si Nginx parle en **HTTPS vers le conteneur** et accepte le certificat auto-signé, mais c'est inutilement plus compliqué.
+
+En pratique :
+
+```powershell
+$env:PY_INTERCOM_WEB_SSL_MODE='plain'
+docker compose up -d --build
+```
+
+L'image Docker dédiée est définie dans `Dockerfile.web` et ses dépendances minimales dans `requirements-web.txt`.
+
 ## Ports
 
 - Audio (UDP): `5000` (fixe)
 - Contrôle (TCP): `5001` (fixe)
 - Discovery (UDP broadcast): `5002` (fixe)
-- Client Web (HTTPS): `8443` (par défaut)
+- Client Web Docker: `8741` (par défaut)
+- Client Web natif (`run_web.py`): `8443` (par défaut)
 
 ## Presets
 
