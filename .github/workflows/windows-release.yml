@@ -1,0 +1,79 @@
+name: Build Windows Release
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Build executables
+        shell: pwsh
+        run: |
+          & '.\exe scripts\build_exe.ps1' -Clean
+
+      - name: Prepare release metadata
+        id: meta
+        shell: pwsh
+        run: |
+          $branch = "${{ github.ref_name }}"
+          $branchSlug = $branch -replace '[^A-Za-z0-9._-]', '-'
+          $sha = "${{ github.sha }}".Substring(0, 7)
+          $tag = "build-$branchSlug-${{ github.run_number }}-$sha"
+          $name = "Windows build $branch #${{ github.run_number }} ($sha)"
+          if ($branch -in @('main', 'master')) {
+            $prerelease = 'false'
+          } else {
+            $prerelease = 'true'
+          }
+          $zipName = "py-intercom-$tag-windows.zip"
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "prerelease=$prerelease" >> $env:GITHUB_OUTPUT
+          "zip_name=$zipName" >> $env:GITHUB_OUTPUT
+
+      - name: Package executables
+        shell: pwsh
+        run: |
+          Compress-Archive -Path '.\dist\client.exe', '.\dist\server.exe' -DestinationPath (Join-Path '.\dist' '${{ steps.meta.outputs.zip_name }}') -Force
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.tag }}
+          path: |
+            dist/client.exe
+            dist/server.exe
+            dist/${{ steps.meta.outputs.zip_name }}
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/client.exe
+            dist/server.exe
+            dist/${{ steps.meta.outputs.zip_name }}

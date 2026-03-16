@@ -108,6 +108,22 @@ Les exécutables sont générés dans `dist/`.
 - `dist\client.exe`
 - `dist\server.exe`
 
+## CI GitHub / Releases
+
+Un workflow GitHub Actions est fourni dans `.github/workflows/windows-release.yml`.
+
+- à chaque `push`, il build les `.exe` Windows
+- il crée un tag de build unique
+- il publie une GitHub Release avec :
+  - `client.exe`
+  - `server.exe`
+  - une archive `.zip` contenant les deux
+
+Par défaut :
+
+- les builds de `main` / `master` sortent en release normale
+- les autres branches sortent en `pre-release`
+
 Note: en mode "onefile", les DLL (dont `opus.dll`) sont extraites au lancement dans un dossier temporaire (`%TEMP%\_MEI...`).
 
 Au double-clic, les exécutables démarrent l'interface (équivalent `--gui`).
