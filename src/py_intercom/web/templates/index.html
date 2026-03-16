@@ -117,44 +117,50 @@
                   <span class="ptt-label">Régie</span>
                   <span id="busStateLabel0" class="bus-state-label off">OFF</span>
                 </button>
-                <div class="mode-seg" id="busModeSelect0" data-bus="0">
-                  <button class="mode-seg-btn active" data-val="ptt">PTT</button>
-                  <button class="mode-seg-btn" data-val="toggle">Toggle</button>
-                  <button class="mode-seg-btn" data-val="always_on">Always On</button>
-                </div>
+                <select id="busModeSelect0" class="mode-select" data-bus="0">
+                  <option value="ptt">Appui</option>
+                  <option value="toggle">Verrou</option>
+                  <option value="always_on">Toujours</option>
+                </select>
               </div>
               <div class="ptt-bus-col">
                 <button id="btnBus1" class="btn btn-ptt" data-bus-id="1" disabled>
                   <span class="ptt-label">Plateau</span>
                   <span id="busStateLabel1" class="bus-state-label off">OFF</span>
                 </button>
-                <div class="mode-seg" id="busModeSelect1" data-bus="1">
-                  <button class="mode-seg-btn active" data-val="ptt">PTT</button>
-                  <button class="mode-seg-btn" data-val="toggle">Toggle</button>
-                  <button class="mode-seg-btn" data-val="always_on">Always On</button>
-                </div>
+                <select id="busModeSelect1" class="mode-select" data-bus="1">
+                  <option value="ptt">Appui</option>
+                  <option value="toggle">Verrou</option>
+                  <option value="always_on">Toujours</option>
+                </select>
               </div>
               <div class="ptt-bus-col">
                 <button id="btnBus2" class="btn btn-ptt" data-bus-id="2" disabled>
                   <span class="ptt-label">VMix</span>
                   <span id="busStateLabel2" class="bus-state-label off">OFF</span>
                 </button>
-                <div class="mode-seg" id="busModeSelect2" data-bus="2">
-                  <button class="mode-seg-btn active" data-val="ptt">PTT</button>
-                  <button class="mode-seg-btn" data-val="toggle">Toggle</button>
-                  <button class="mode-seg-btn" data-val="always_on">Always On</button>
-                </div>
+                <select id="busModeSelect2" class="mode-select" data-bus="2">
+                  <option value="ptt">Appui</option>
+                  <option value="toggle">Verrou</option>
+                  <option value="always_on">Toujours</option>
+                </select>
               </div>
             </div>
 
             <div class="listen-row">
-              <label class="toggle">
+              <label class="listen-toggle">
                 <input id="listenRegie" type="checkbox" checked />
-                <span>Écoute Régie</span>
+                <span class="listen-toggle-body">
+                  <span class="listen-toggle-title">Régie</span>
+                  <span class="listen-toggle-state">ON</span>
+                </span>
               </label>
-              <label class="toggle">
+              <label class="listen-toggle">
                 <input id="listenReturnBus" type="checkbox" />
-                <span>Écoute retour</span>
+                <span class="listen-toggle-body">
+                  <span class="listen-toggle-title">Retour</span>
+                  <span class="listen-toggle-state">OFF</span>
+                </span>
               </label>
             </div>
 
@@ -171,7 +177,7 @@
             </div>
 
             <div class="volume-row">
-              <svg class="vol-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1v22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14.5a3.5 3.5 0 0 1 0 7H7"/></svg>
+              <svg class="vol-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>
               <input id="micGainSlider" type="range" min="-60" max="{{ max_gain_db|int }}" value="12" class="slider" />
               <span id="micGainValue" class="vol-value">12 dB</span>
             </div>

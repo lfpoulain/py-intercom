@@ -42,6 +42,14 @@
     return Math.max(-60, Math.min(MAX_GAIN_DB, n));
   };
 
+  const updateListenToggle = (input) => {
+    if (!input) return;
+    const root = input.closest(".listen-toggle");
+    if (!root) return;
+    const state = root.querySelector(".listen-toggle-state");
+    if (state) state.textContent = input.checked ? "ON" : "OFF";
+  };
+
   // --- Persistence ---
   const saveSettings = () => {
     try {
@@ -66,6 +74,8 @@
       if (s.name) el.name.value = s.name;
       if (s.listenRegie != null) el.listenRegie.checked = !!s.listenRegie;
       if (s.listenReturnBus != null) el.listenReturnBus.checked = !!s.listenReturnBus;
+      updateListenToggle(el.listenRegie);
+      updateListenToggle(el.listenReturnBus);
       if (s.volume != null) {
         el.volumeSlider.value = s.volume;
         el.volumeValue.textContent = s.volume + "%";
@@ -90,7 +100,11 @@
     while (el.log.children.length > MAX_LOG_LINES) el.log.removeChild(el.log.lastChild);
   };
 
-  const setStatus = (s) => { el.statusLine.textContent = s; };
+  const setStatus = (s, tone = "neutral") => {
+    if (!el.statusLine) return;
+    el.statusLine.textContent = s;
+    el.statusLine.className = `status-badge status-${String(tone || "neutral")}`;
+  };
 
   // --- UUID ---
   const uuidKey = "py-intercom-web-client-uuid";
@@ -165,6 +179,77 @@
   let lastControlTs = 0;
   const CTRL_TIMEOUT_MS = 3000;
   let actualSR = TARGET_SR;
+  const userAgent = navigator.userAgent || "";
+  const isAppleMobile = /iPhone|iPad|iPod/i.test(userAgent) || (/Macintosh/i.test(userAgent) && (navigator.maxTouchPoints || 0) > 1);
+  const APPLE_MOBILE_MIC_PRE_GAIN = 2.0;
+  let playbackUnlockDone = false;
+  let playbackUnlockUrl = "";
+  let playbackUnlockAudioEl = null;
+
+  const applyScalarGain = (src, gain) => {
+    if (!Number.isFinite(gain) || Math.abs(gain - 1) < 0.001) return src;
+    const out = new Float32Array(src.length);
+    for (let i = 0; i < src.length; i++) {
+      out[i] = Math.max(-1, Math.min(1, src[i] * gain));
+    }
+    return out;
+  };
+
+  const ensurePlaybackUnlock = async () => {
+    if (audioCtx && audioCtx.state === "suspended") {
+      try { await audioCtx.resume(); } catch (_) {}
+    }
+    try {
+      if (audioCtx) {
+        const buffer = audioCtx.createBuffer(1, 1, audioCtx.sampleRate || 22050);
+        const source = audioCtx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioCtx.destination);
+        source.start(0);
+      }
+    } catch (_) {}
+    if (!isAppleMobile || playbackUnlockDone) return;
+    try {
+      if (!playbackUnlockUrl) {
+        const sampleRate = 22050;
+        const frames = 220;
+        const dataSize = frames * 2;
+        const wav = new ArrayBuffer(44 + dataSize);
+        const view = new DataView(wav);
+        const writeAscii = (offset, text) => {
+          for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
+        };
+        writeAscii(0, "RIFF");
+        view.setUint32(4, 36 + dataSize, true);
+        writeAscii(8, "WAVE");
+        writeAscii(12, "fmt ");
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, 1, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * 2, true);
+        view.setUint16(32, 2, true);
+        view.setUint16(34, 16, true);
+        writeAscii(36, "data");
+        view.setUint32(40, dataSize, true);
+        playbackUnlockUrl = URL.createObjectURL(new Blob([wav], { type: "audio/wav" }));
+      }
+      if (!playbackUnlockAudioEl) {
+        playbackUnlockAudioEl = new Audio();
+        playbackUnlockAudioEl.preload = "auto";
+        playbackUnlockAudioEl.playsInline = true;
+        playbackUnlockAudioEl.src = playbackUnlockUrl;
+        playbackUnlockAudioEl.volume = 0.001;
+      }
+      playbackUnlockAudioEl.currentTime = 0;
+      await playbackUnlockAudioEl.play();
+      setTimeout(() => {
+        try { if (playbackUnlockAudioEl) playbackUnlockAudioEl.pause(); } catch (_) {}
+      }, 60);
+      playbackUnlockDone = true;
+      logLine("audio: playback unlock actif");
+    } catch (_) {}
+  };
 
   // --- Device enumeration ---
   const sinkIdSupported = typeof HTMLMediaElement !== "undefined" &&
@@ -520,9 +605,15 @@
     }
   };
 
+  const setBusModeUi = (busId, mode) => {
+    const select = document.getElementById(`busModeSelect${busId}`);
+    if (!select) return;
+    select.value = mode;
+  };
+
   const onBusModeChange = (busId, mode) => {
     busModes.set(busId, mode);
-    setSegActive(busId, mode);
+    setBusModeUi(busId, mode);
     saveBusModes();
     if (mode === "always_on") {
       busToggleState.set(busId, false);
@@ -534,14 +625,6 @@
       if (joined) setPttBus(busId, false);
     }
     updateBusStateLabel(busId);
-  };
-
-  const setSegActive = (busId, val) => {
-    const seg = document.getElementById(`busModeSelect${busId}`);
-    if (!seg) return;
-    seg.querySelectorAll(".mode-seg-btn").forEach(b => {
-      b.classList.toggle("active", b.dataset.val === val);
-    });
   };
 
   const saveBusModes = () => {
@@ -559,7 +642,7 @@
       for (const [bid] of busModes.entries()) {
         if (s[bid]) {
           busModes.set(bid, s[bid]);
-          setSegActive(bid, s[bid]);
+          setBusModeUi(bid, s[bid]);
         }
       }
     } catch (_) {}
@@ -590,7 +673,7 @@
     const params = buildJoinParams();
     if (!params.server_ip) {
       connecting = false;
-      setStatus("Serveur manquant");
+      setStatus("Serveur manquant", "warn");
       refreshActionButtons();
       logLine("erreur: IP serveur manquante");
       return false;
@@ -601,7 +684,7 @@
     lastControlTs = 0;
     connecting = true;
     setUiConnected(false);
-    setStatus("Connexion intercom...");
+    setStatus("Connexion intercom...", "info");
     socket.emit("join", lastJoinParams);
     return true;
   };
@@ -622,9 +705,11 @@
     if (audioCtx.state === "suspended") {
       await audioCtx.resume();
     }
+    await ensurePlaybackUnlock();
     actualSR = audioCtx.sampleRate;
     audioRateOk = true;
     logLine(`audio: sr=${actualSR} state=${audioCtx.state}${actualSR !== TARGET_SR ? " (resampling TX)" : ""}`);
+    if (isAppleMobile) logLine(`audio: optimisations Apple mobile actives (mic x${APPLE_MOBILE_MIC_PRE_GAIN.toFixed(1)})`);
 
     // Resume AudioContext after interruptions (phone calls, notifications on mobile)
     audioCtx.onstatechange = () => {
@@ -701,9 +786,6 @@
       if (!anyPttActive()) { txMeter = 0; return; }
 
       const ch0 = e.inputBuffer.getChannelData(0);
-      txMeter = Math.max(txMeter, meterFromDb(rmsDbfs(ch0)));
-
-      // Resample to 48 kHz if needed (e.g. iOS Safari at 44100 Hz)
       let samples = ch0;
       if (actualSR !== TARGET_SR) {
         const ratio = TARGET_SR / actualSR;
@@ -719,6 +801,10 @@
         }
         samples = resampled;
       }
+      if (isAppleMobile) {
+        samples = applyScalarGain(samples, APPLE_MOBILE_MIC_PRE_GAIN);
+      }
+      txMeter = Math.max(txMeter, meterFromDb(rmsDbfs(samples)));
 
       const merged = new Float32Array(captureBuf.length + samples.length);
       merged.set(captureBuf, 0);
@@ -782,9 +868,17 @@
         outputAudioEl.srcObject = null;
       }
     } catch (_) {}
+    try {
+      if (playbackUnlockAudioEl) {
+        playbackUnlockAudioEl.pause();
+        playbackUnlockAudioEl.src = "";
+      }
+    } catch (_) {}
     micProc = null; micNode = null; playProc = null; gainNode = null;
     outputDestNode = null;
     outputAudioEl = null;
+    playbackUnlockAudioEl = null;
+    playbackUnlockDone = false;
     try { if (micStream) micStream.getTracks().forEach(t => t.stop()); } catch (_) {}
     micStream = null;
     try { if (audioCtx) audioCtx.onstatechange = null; } catch (_) {}
@@ -799,7 +893,7 @@
     if (joined || connecting) return;
     saveSettings();
     if (!el.serverIp.value.trim()) {
-      setStatus("Serveur manquant");
+      setStatus("Serveur manquant", "warn");
       logLine("erreur: IP serveur manquante");
       return;
     }
@@ -810,13 +904,13 @@
         return;
       }
       connecting = true;
-     setStatus("Connexion backend...");
+     setStatus("Connexion backend...", "info");
      refreshActionButtons();
      socket.connect();
      return;
     }
     connecting = true;
-    setStatus("Initialisation audio...");
+    setStatus("Initialisation audio...", "info");
     refreshActionButtons();
 
     try {
@@ -832,7 +926,7 @@
 
     socket.on("connect", () => {
       stopDiscoveryPolling();
-      setStatus("Backend web");
+      setStatus("Backend web", "info");
       setUiConnected(false);
       const transportName = getSocketTransportName();
       logLine(`socket.io connect${transportName ? ` (${transportName})` : ""}`);
@@ -865,7 +959,7 @@
     socket.on("disconnect", (reason) => {
       startDiscoveryPolling();
       connecting = false;
-      setStatus("Déconnecté");
+      setStatus("Déconnecté", "neutral");
       setUiConnected(false);
       joined = false;
       intercomAlive = false;
@@ -879,7 +973,7 @@
         joined = true;
         intercomAlive = true;
         lastControlTs = Date.now();
-        setStatus(`${msg.server_ip}:${msg.server_port}`);
+        setStatus(`${msg.server_ip}:${msg.server_port}`, "ok");
         logLine(`joined (id=${msg.client_id})`);
         if (socket) socket.emit("input_gain_db", { gain_db: inputGainDb });
         setListenRegie(el.listenRegie.checked);
@@ -892,7 +986,7 @@
       } else if (msg.type === "error") {
         connecting = false;
         setUiConnected(false);
-        setStatus("Erreur intercom");
+        setStatus("Erreur intercom", "error");
         logLine(`error: ${msg.message || ""}`);
       } else if (msg.type === "left") {
         connecting = false;
@@ -950,7 +1044,7 @@
 
     socket.on("connect_error", (e) => {
       connecting = false;
-      setStatus("Backend web indisponible");
+      setStatus("Backend web indisponible", "error");
       refreshActionButtons();
       logLine(`connect_error: ${e && e.message ? e.message : e}`);
     });
@@ -967,7 +1061,7 @@
     intercomAlive = false;
     lastControlTs = 0;
     setUiConnected(false);
-    setStatus("Déconnecté");
+    setStatus("Déconnecté", "neutral");
     await releaseWakeLock();
     await teardownAudio();
   };
@@ -976,7 +1070,7 @@
     if (joined && intercomAlive && Date.now() - lastControlTs > CTRL_TIMEOUT_MS) {
       intercomAlive = false;
       setUiConnected(false);
-      setStatus("Serveur intercom perdu");
+      setStatus("Serveur intercom perdu", "warn");
     }
     if (!socket) {
       setNetHealth("offline", "Déconnecté");
@@ -1055,13 +1149,11 @@
   bindPttButton(el.btnBus1, 1);
   bindPttButton(el.btnBus2, 2);
 
-  // Mode segmented buttons
+  // Mode selectors
   for (const busId of [0, 1, 2]) {
-    const seg = document.getElementById(`busModeSelect${busId}`);
-    if (!seg) continue;
-    seg.querySelectorAll(".mode-seg-btn").forEach(btn => {
-      btn.addEventListener("click", () => onBusModeChange(busId, btn.dataset.val));
-    });
+    const select = document.getElementById(`busModeSelect${busId}`);
+    if (!select) continue;
+    select.addEventListener("change", () => onBusModeChange(busId, select.value));
   }
 
   el.discoverySelect.addEventListener("change", applyDiscoverySelection);
@@ -1077,11 +1169,13 @@
   el.outputDeviceSelect.addEventListener("change", saveSettings);
 
   el.listenRegie.addEventListener("change", () => {
+    updateListenToggle(el.listenRegie);
     setListenRegie(el.listenRegie.checked);
     saveSettings();
   });
 
   el.listenReturnBus.addEventListener("change", () => {
+    updateListenToggle(el.listenReturnBus);
     setListenReturn(el.listenReturnBus.checked);
     saveSettings();
   });
@@ -1162,23 +1256,27 @@
   // --- Init ---
   loadSettings();
   loadBusModes();
+  updateListenToggle(el.listenRegie);
+  updateListenToggle(el.listenReturnBus);
   enumerateDevices();
   setUiConnected(false);
-  setStatus("Déconnecté");
+  setStatus("Déconnecté", "neutral");
   setNetHealth("offline", "Déconnecté");
   startDiscoveryPolling();
   requestAnimationFrame(monitorIntercom);
 
   // Resume AudioContext on any user interaction (critical for iOS/Mobile)
   const resumeAudioOnInteraction = () => {
-    if (audioCtx && audioCtx.state === "suspended") {
-      audioCtx.resume().catch(() => {});
-    }
+    ensurePlaybackUnlock().catch(() => {});
   };
   document.body.addEventListener("touchstart", resumeAudioOnInteraction, { passive: true });
   document.body.addEventListener("click", resumeAudioOnInteraction, { passive: true });
   window.addEventListener("beforeunload", () => {
     stopDiscoveryPolling();
     releaseWakeLock().catch(() => {});
+    try {
+      if (playbackUnlockAudioEl) playbackUnlockAudioEl.pause();
+      if (playbackUnlockUrl) URL.revokeObjectURL(playbackUnlockUrl);
+    } catch (_) {}
   });
 })();
