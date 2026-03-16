@@ -12,7 +12,7 @@ from ..common.devices import list_devices, resolve_device
 from ..common.gui_utils import DeviceWorker, is_checked
 from ..common.identity import client_id_from_uuid
 from ..common.jsonio import atomic_write_json, read_json_file
-from ..common.constants import AUDIO_UDP_PORT
+from ..common.constants import AUDIO_UDP_PORT, MAX_GAIN_DB
 from ..common.theme import VuMeter, StatusIndicator, apply_theme, patch_combo, centered_checkbox, cell_vu
 
 
@@ -668,7 +668,7 @@ class ServerWindow(QtWidgets.QMainWindow):
                 gain_lay.setSpacing(6)
                 gain_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
                 gain_slider.setMinimum(-60)
-                gain_slider.setMaximum(12)
+                gain_slider.setMaximum(int(MAX_GAIN_DB))
                 gain_slider.setSingleStep(1)
                 gain_slider.valueChanged.connect(lambda value, bus_id=int(bid): self._on_bus_gain_changed(bus_id, value))
                 gain_lbl = QtWidgets.QLabel("0 dB")
@@ -786,7 +786,7 @@ class ServerWindow(QtWidgets.QMainWindow):
                 gain_lay.setSpacing(6)
                 gain_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
                 gain_slider.setMinimum(-60)
-                gain_slider.setMaximum(12)
+                gain_slider.setMaximum(int(MAX_GAIN_DB))
                 gain_slider.setSingleStep(1)
                 gain_slider.valueChanged.connect(lambda value, out_id=int(oid): self._on_output_gain_changed(out_id, value))
                 gain_lbl = QtWidgets.QLabel("0 dB")
@@ -1377,7 +1377,7 @@ class ServerWindow(QtWidgets.QMainWindow):
                 gain_lay.setSpacing(6)
                 gain_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
                 gain_slider.setMinimum(-60)
-                gain_slider.setMaximum(12)
+                gain_slider.setMaximum(int(MAX_GAIN_DB))
                 gain_slider.setSingleStep(1)
                 gain_slider.valueChanged.connect(lambda value, cid=int(client_id): self._on_client_input_gain_changed(cid, value))
                 gain_lbl = QtWidgets.QLabel("0 dB")

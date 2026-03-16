@@ -10,9 +10,9 @@ from typing import Any, Callable, Optional
 import numpy as np
 from loguru import logger
 
-from ..common.audio import int16_bytes_to_float32
+from ..common.audio import apply_gain_db, int16_bytes_to_float32, limit_peak
 from ..common.identity import client_id_from_uuid
-from ..common.constants import CONTROL_PORT_OFFSET, CTRL_LIVENESS_TIMEOUT_S, CTRL_PING_INTERVAL_S, FRAME_SAMPLES, JB_MAX_FRAMES, JB_SILENCE_GATE_FRAMES, JB_START_FRAMES, SAMPLE_RATE
+from ..common.constants import CONTROL_PORT_OFFSET, CTRL_LIVENESS_TIMEOUT_S, CTRL_PING_INTERVAL_S, FRAME_SAMPLES, JB_MAX_FRAMES, JB_SILENCE_GATE_FRAMES, JB_START_FRAMES, MAX_GAIN_DB, SAMPLE_RATE
 from ..common.jitter_buffer import OpusPacketJitterBuffer
 from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import pack_audio_packet, unpack_audio_packet
@@ -25,6 +25,7 @@ class BridgeConfig:
     name: str
     listen_return_bus: bool = False
     listen_regie: bool = True
+    input_gain_db: float = 0.0
 
 
 class IntercomBridge:
@@ -76,6 +77,7 @@ class IntercomBridge:
         self._known_bus_ids: set[int] = {0, 1, 2}
         self._listen_return_bus = bool(self.config.listen_return_bus)
         self._listen_regie = bool(self.config.listen_regie)
+        self._input_gain_db = max(-60.0, min(float(MAX_GAIN_DB), float(self.config.input_gain_db)))
 
     def _can_transmit_audio(self) -> bool:
         with self._state_lock:
@@ -162,6 +164,16 @@ class IntercomBridge:
         if frame.shape[0] != int(FRAME_SAMPLES):
             return
 
+        with self._state_lock:
+            input_gain_db = float(self._input_gain_db)
+
+        try:
+            frame = apply_gain_db(frame.astype(np.float32, copy=False), input_gain_db)
+            frame = limit_peak(frame)
+            frame = np.clip(frame.astype(np.float32, copy=False), -1.0, 1.0)
+        except Exception:
+            frame = np.clip(frame.astype(np.float32, copy=False), -1.0, 1.0)
+        
         try:
             self._send_udp_frame_f32(frame)
         except Exception:
@@ -186,6 +198,11 @@ class IntercomBridge:
             self._listen_regie = bool(enabled)
         self._control_send_state()
 
+    def set_input_gain_db(self, gain_db: float) -> None:
+        with self._state_lock:
+            self._input_gain_db = max(-60.0, min(float(MAX_GAIN_DB), float(gain_db)))
+        self._control_send_state()
+
     def _control_send(self, sock: socket.socket, msg: dict[str, Any]) -> None:
         data = (json.dumps(msg, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
         with self._ctrl_send_lock:
@@ -200,6 +217,8 @@ class IntercomBridge:
             msg: dict[str, Any] = {
                 "type": "state",
                 "client_id": int(self.client_id),
+                "input_gain_db": float(self._input_gain_db),
+                "applies_input_gain_locally": True,
                 "ptt_buses": dict(self._ptt_buses),
                 "listen_return_bus": bool(self._listen_return_bus),
                 "listen_regie": bool(self._listen_regie),
@@ -227,6 +246,12 @@ class IntercomBridge:
             if cfg is None and mtype == "update":
                 cfg = msg
             if isinstance(cfg, dict):
+                if "input_gain_db" in cfg:
+                    try:
+                        with self._state_lock:
+                            self._input_gain_db = max(-60.0, min(float(MAX_GAIN_DB), float(cfg.get("input_gain_db"))))
+                    except Exception:
+                        pass
                 if "buses" in cfg:
                     buses = cfg.get("buses")
                     parsed_bus_ids: set[int] = set()
@@ -283,6 +308,7 @@ class IntercomBridge:
                     "client_id": int(self.client_id),
                     "client_uuid": str(self.client_uuid),
                     "name": str(self.config.name or ""),
+                    "applies_input_gain_locally": True,
                     "udp_port": int(self._udp_sock.getsockname()[1]),
                 }
                 self._control_send(sock, hello)

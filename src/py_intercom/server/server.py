@@ -14,7 +14,7 @@ import sounddevice as sd
 from loguru import logger
 
 from ..common.audio import apply_gain_db, limit_peak, rms_dbfs
-from ..common.constants import AUDIO_UDP_PORT, CHANNELS, CONTROL_PORT_OFFSET, FRAME_SAMPLES, JB_MAX_FRAMES, JB_START_FRAMES, SAMPLE_RATE
+from ..common.constants import AUDIO_UDP_PORT, CHANNELS, CONTROL_PORT_OFFSET, FRAME_SAMPLES, JB_MAX_FRAMES, JB_START_FRAMES, MAX_GAIN_DB, SAMPLE_RATE
 from ..common.discovery import DiscoveryBeacon
 from ..common.devices import list_devices, resolve_device
 from ..common.identity import client_id_from_uuid
@@ -434,6 +434,39 @@ class IntercomServer:
             return 2
         return 0
 
+    def get_buses_snapshot(self) -> Dict[int, dict]:
+        with self._lock:
+            return {
+                int(bus_id): {
+                    "bus_id": int(bus.bus_id),
+                    "name": str(bus.name),
+                    "gain_db": float(bus.gain_db),
+                    "feed_to_regie": bool(bus.feed_to_regie),
+                }
+                for bus_id, bus in self._buses.items()
+            }
+
+    def get_outputs_snapshot(self) -> Dict[int, dict]:
+        with self._lock:
+            out: Dict[int, dict] = {}
+            for output_id, st in self._outputs.items():
+                samplerate = int(st.samplerate) if int(st.samplerate) > 0 else int(SAMPLE_RATE)
+                try:
+                    queued_ms = (1000.0 * float(len(st.buf))) / float(samplerate)
+                except Exception:
+                    queued_ms = 0.0
+                out[int(output_id)] = {
+                    "output_id": int(st.output_id),
+                    "device": int(st.device),
+                    "bus_id": int(st.bus_id),
+                    "gain_db": float(st.gain_db),
+                    "samplerate": int(samplerate),
+                    "queued_ms": float(queued_ms),
+                    "underflows": int(st.underflows),
+                    "vu_dbfs": float(st.vu_dbfs),
+                }
+            return out
+
     def get_clients_snapshot(self) -> Dict[int, dict]:
         now = time.monotonic()
         with self._lock:
@@ -534,7 +567,7 @@ class IntercomServer:
         self._autosave_preset()
 
     def set_output_gain(self, output_id: int, gain_db: float) -> None:
-        next_gain = max(-60.0, min(12.0, float(gain_db)))
+        next_gain = max(-60.0, min(float(MAX_GAIN_DB), float(gain_db)))
         changed = False
         with self._lock:
             out = self._outputs.get(int(output_id))
@@ -557,6 +590,39 @@ class IntercomServer:
         except Exception:
             return False
 
+    def _output_stream_needs_reopen(self, out: OutputState, *, now: Optional[float] = None) -> bool:
+        stream = out.stream
+        if stream is None or not self._stream_is_active(stream):
+            return True
+        if now is None:
+            now = time.monotonic()
+        with out.lock:
+            last_callback = float(out.last_callback_monotonic)
+        return last_callback <= 0.0 or (float(now) - float(last_callback)) > 1.0
+
+    def _restart_output_stream(self, out: OutputState) -> None:
+        with out.lock:
+            old_stream = out.stream
+            out.stream = None
+        try:
+            if old_stream is not None:
+                old_stream.stop()
+                old_stream.close()
+        except Exception:
+            pass
+        self._open_output_stream(out)
+
+    def _ensure_output_retry_thread(self) -> None:
+        t = self._retry_thread
+        if t is not None and t.is_alive():
+            return
+        self._retry_thread = threading.Thread(
+            target=self._retry_output_streams,
+            name="output-retry",
+            daemon=True,
+        )
+        self._retry_thread.start()
+
     def reopen_outputs(self, *, force: bool = False) -> None:
         if not self._running or self._stop.is_set():
             return
@@ -564,21 +630,14 @@ class IntercomServer:
             outputs = list(self._outputs.values())
 
         for out in outputs:
-            if not force and self._stream_is_active(out.stream):
+            if not force and not self._output_stream_needs_reopen(out):
                 continue
             try:
-                with out.lock:
-                    old_stream = out.stream
-                    out.stream = None
-                try:
-                    if old_stream is not None:
-                        old_stream.stop()
-                        old_stream.close()
-                except Exception:
-                    pass
-                self._open_output_stream(out)
+                self._restart_output_stream(out)
             except Exception as e:
                 logger.warning("output {} reopen failed: {}", int(out.output_id), e)
+        if outputs:
+            self._ensure_output_retry_thread()
 
     def reopen_return_input(self) -> None:
         if not bool(self._running) or self._stop.is_set():
@@ -591,74 +650,6 @@ class IntercomServer:
             logger.debug("reopen_return_input: stream reopened on device {}", self._return_input_device)
         except Exception as e:
             logger.warning("reopen_return_input failed: {}", e)
-
-    def set_return_enabled(self, enabled: bool) -> None:
-        self._return_enabled = bool(enabled)
-        try:
-            if not bool(self._running):
-                if not bool(self._return_enabled):
-                    self._close_return_input_stream()
-                return
-
-            if not bool(self._return_enabled):
-                self._close_return_input_stream()
-                return
-
-            if self._return_input_device is None:
-                return
-
-            self._close_return_input_stream()
-            try:
-                self._open_return_input_stream(int(self._return_input_device))
-            except Exception as e:
-                logger.warning("return input restart failed: {}", e)
-        finally:
-            self._autosave_preset()
-
-    def set_return_input_device(self, device: Optional[int]) -> None:
-        self._return_input_device = int(device) if device is not None else None
-        try:
-            if not bool(self._running):
-                return
-
-            self._close_return_input_stream()
-            if not bool(self._return_enabled) or self._return_input_device is None:
-                return
-
-            try:
-                self._open_return_input_stream(int(self._return_input_device))
-            except Exception as e:
-                logger.warning("return input device switch failed: {}", e)
-        finally:
-            self._autosave_preset()
-
-    def get_buses_snapshot(self) -> Dict[int, dict]:
-        with self._lock:
-            return {
-                bus_id: {
-                    "bus_id": bus.bus_id,
-                    "name": bus.name,
-                    "gain_db": bus.gain_db,
-                    "feed_to_regie": bool(bus.feed_to_regie),
-                }
-                for bus_id, bus in self._buses.items()
-            }
-
-    def get_outputs_snapshot(self) -> Dict[int, dict]:
-        with self._lock:
-            return {
-                output_id: {
-                    "output_id": out.output_id,
-                    "device": out.device,
-                    "bus_id": out.bus_id,
-                    "gain_db": float(out.gain_db),
-                    "samplerate": out.samplerate,
-                    "queued_ms": float(out.buf.size) * 1000.0 / float(SAMPLE_RATE),
-                    "underflows": int(out.underflows),
-                    "vu_dbfs": float(out.vu_dbfs),
-                }
-                for output_id, out in self._outputs.items()
-            }
 
     def set_bus_feed_to_regie(self, bus_id: int, enabled: bool) -> None:
         bid = int(bus_id)
@@ -677,7 +668,7 @@ class IntercomServer:
         bid = int(bus_id)
         if bid not in (0, 1, 2):
             return
-        next_gain = max(-60.0, min(12.0, float(gain_db)))
+        next_gain = max(-60.0, min(float(MAX_GAIN_DB), float(gain_db)))
         changed = False
         with self._lock:
             bus = self._buses.get(int(bid))
@@ -695,7 +686,7 @@ class IntercomServer:
 
     def set_client_input_gain(self, client_id: int, gain_db: float) -> None:
         cid = int(client_id)
-        next_gain = max(-60.0, min(12.0, float(gain_db)))
+        next_gain = max(-60.0, min(float(MAX_GAIN_DB), float(gain_db)))
         changed = False
         with self._lock:
             st = self._clients.get(int(cid))
@@ -751,13 +742,8 @@ class IntercomServer:
             if ok == 0 and last_err is not None:
                 raise last_err
 
-            if outputs and any(out.stream is None or not self._stream_is_active(out.stream) for out in outputs):
-                self._retry_thread = threading.Thread(
-                    target=self._retry_output_streams,
-                    name="output-retry",
-                    daemon=True,
-                )
-                self._retry_thread.start()
+            if outputs:
+                self._ensure_output_retry_thread()
 
             try:
                 logger.info("start: return_enabled={} return_input_device={}", bool(self._return_enabled), self._return_input_device)
@@ -818,33 +804,30 @@ class IntercomServer:
     def _retry_output_streams(self) -> None:
         retries = 3
         delay_s = 1.0
-        for attempt in range(retries):
-            if self._stop.is_set():
-                return
-            time.sleep(delay_s)
-            with self._lock:
-                outputs = list(self._outputs.values())
-            now = time.monotonic()
-            pending = [
-                out
-                for out in outputs
-                if out.stream is None
-                or not self._stream_is_active(out.stream)
-                or (now - float(out.last_callback_monotonic)) > 1.0
-            ]
-            if not pending:
-                return
-            for out in pending:
-                try:
-                    self._open_output_stream(out)
-                except Exception as e:
-                    logger.warning(
-                        "output {} retry {}/{} failed: {}",
-                        int(out.output_id),
-                        attempt + 1,
-                        retries,
-                        e,
-                    )
+        try:
+            for attempt in range(retries):
+                if self._stop.is_set():
+                    return
+                time.sleep(delay_s)
+                with self._lock:
+                    outputs = list(self._outputs.values())
+                now = time.monotonic()
+                pending = [out for out in outputs if self._output_stream_needs_reopen(out, now=now)]
+                if not pending:
+                    return
+                for out in pending:
+                    try:
+                        self._restart_output_stream(out)
+                    except Exception as e:
+                        logger.warning(
+                            "output {} retry {}/{} failed: {}",
+                            int(out.output_id),
+                            attempt + 1,
+                            retries,
+                            e,
+                        )
+        finally:
+            self._retry_thread = None
 
     def _close_return_input_stream(self) -> None:
         try:
@@ -1094,7 +1077,7 @@ class IntercomServer:
                                         st.return_gain_db = 0.0
                                 if input_gain_db is not None:
                                     try:
-                                        next_input_gain = max(-60.0, min(12.0, float(input_gain_db)))
+                                        next_input_gain = max(-60.0, min(float(MAX_GAIN_DB), float(input_gain_db)))
                                     except Exception:
                                         next_input_gain = float(st.input_gain_db)
                                     if abs(float(st.input_gain_db) - float(next_input_gain)) >= 0.01:

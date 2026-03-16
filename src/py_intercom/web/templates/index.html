@@ -13,7 +13,7 @@
     <link rel="manifest" href="/static/manifest.json" />
     <link rel="stylesheet" href="/static/style.css" />
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
-    <script>window.PY_INTERCOM_CONFIG = { FRAME_SAMPLES: {{ frame_samples }}, SAMPLE_RATE: {{ sample_rate }} };</script>
+    <script>window.PY_INTERCOM_CONFIG = { FRAME_SAMPLES: {{ frame_samples }}, SAMPLE_RATE: {{ sample_rate }}, MAX_GAIN_DB: {{ max_gain_db }} };</script>
   </head>
   <body>
     <div class="app">
@@ -170,10 +170,16 @@
               </div>
             </div>
 
+            <div class="volume-row">
+              <svg class="vol-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1v22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14.5a3.5 3.5 0 0 1 0 7H7"/></svg>
+              <input id="micGainSlider" type="range" min="-60" max="{{ max_gain_db|int }}" value="12" class="slider" />
+              <span id="micGainValue" class="vol-value">12 dB</span>
+            </div>
+
             <!-- Volume -->
             <div class="volume-row">
               <svg class="vol-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-              <input id="volumeSlider" type="range" min="0" max="150" value="100" class="slider" />
+              <input id="volumeSlider" type="range" min="0" max="500" value="100" class="slider" />
               <span id="volumeValue" class="vol-value">100%</span>
             </div>
           </div>

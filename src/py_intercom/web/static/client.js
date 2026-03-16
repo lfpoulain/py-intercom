@@ -1,6 +1,7 @@
 (() => {
   const FRAME_SAMPLES = (window.PY_INTERCOM_CONFIG && window.PY_INTERCOM_CONFIG.FRAME_SAMPLES) || 480;
   const TARGET_SR = (window.PY_INTERCOM_CONFIG && window.PY_INTERCOM_CONFIG.SAMPLE_RATE) || 48000;
+  const MAX_GAIN_DB = (window.PY_INTERCOM_CONFIG && window.PY_INTERCOM_CONFIG.MAX_GAIN_DB) || 20;
   const MAX_LOG_LINES = 80;
   const SETTINGS_KEY = "py-intercom-web-settings";
   const DISCOVERY_POLL_MS = 3000;
@@ -22,6 +23,8 @@
     netHealth: document.getElementById("netHealth"),
     connDot: document.getElementById("connDot"),
     connLabel: document.getElementById("connLabel"),
+    micGainSlider: document.getElementById("micGainSlider"),
+    micGainValue: document.getElementById("micGainValue"),
     volumeSlider: document.getElementById("volumeSlider"),
     volumeValue: document.getElementById("volumeValue"),
     discoverySelect: document.getElementById("discoverySelect"),
@@ -33,6 +36,12 @@
     audioSuspendedBanner: document.getElementById("audioSuspendedBanner"),
   };
 
+  const clampInputGainDb = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return Math.min(12, MAX_GAIN_DB);
+    return Math.max(-60, Math.min(MAX_GAIN_DB, n));
+  };
+
   // --- Persistence ---
   const saveSettings = () => {
     try {
@@ -41,6 +50,7 @@
         name: el.name.value,
         listenRegie: el.listenRegie.checked,
         listenReturnBus: el.listenReturnBus.checked,
+        inputGainDb: inputGainDb,
         volume: el.volumeSlider.value,
         inputDeviceId: el.inputDeviceSelect.value,
         outputDeviceId: el.outputDeviceSelect.value,
@@ -59,6 +69,12 @@
       if (s.volume != null) {
         el.volumeSlider.value = s.volume;
         el.volumeValue.textContent = s.volume + "%";
+        outputVolume = Math.max(0, Number(s.volume) || 0) / 100;
+      }
+      if (s.inputGainDb != null) {
+        inputGainDb = clampInputGainDb(s.inputGainDb);
+        if (el.micGainSlider) el.micGainSlider.value = String(inputGainDb);
+        if (el.micGainValue) el.micGainValue.textContent = `${Math.round(inputGainDb)} dB`;
       }
       // Device IDs are restored after enumerateDevices populates the lists
       if (s.inputDeviceId) el.inputDeviceSelect.dataset.savedId = s.inputDeviceId;
@@ -137,6 +153,7 @@
   const busNames = new Map([[0, "Régie"], [1, "Plateau"], [2, "VMix"]]);
   const PTT_RELEASE_DELAY_MS = 250;
   const pttReleaseTimers = new Map();
+  let inputGainDb = Math.min(12.0, MAX_GAIN_DB);
   let outputVolume = 1.0;
   let lastJoinParams = null;
 
@@ -279,6 +296,16 @@
 
   const stopDiscoveryPolling = () => {
     if (discoveryTimer) { clearInterval(discoveryTimer); discoveryTimer = null; }
+  };
+
+  const getSocketTransportName = () => {
+    try {
+      return socket && socket.io && socket.io.engine && socket.io.engine.transport
+        ? String(socket.io.engine.transport.name || "")
+        : "";
+    } catch (_) {
+      return "";
+    }
   };
 
   // --- Audio helpers ---
@@ -555,6 +582,7 @@
     client_uuid: getClientUuid(),
     listen_return_bus: el.listenReturnBus.checked,
     listen_regie: el.listenRegie.checked,
+    input_gain_db: inputGainDb,
   });
 
   const emitJoin = () => {
@@ -782,12 +810,11 @@
         return;
       }
       connecting = true;
-      setStatus("Connexion backend...");
-      refreshActionButtons();
-      socket.connect();
-      return;
+     setStatus("Connexion backend...");
+     refreshActionButtons();
+     socket.connect();
+     return;
     }
-
     connecting = true;
     setStatus("Initialisation audio...");
     refreshActionButtons();
@@ -804,13 +831,30 @@
     socket = io({ transports: ["websocket", "polling"] });
 
     socket.on("connect", () => {
+      stopDiscoveryPolling();
       setStatus("Backend web");
       setUiConnected(false);
-      logLine("socket.io connect");
+      const transportName = getSocketTransportName();
+      logLine(`socket.io connect${transportName ? ` (${transportName})` : ""}`);
       emitJoin();
     });
 
+    try {
+      socket.io.on("reconnect_attempt", () => {
+        startDiscoveryPolling();
+      });
+      socket.io.engine.on("upgrade", (transport) => {
+        const nextName = transport && transport.name ? String(transport.name) : "";
+        if (nextName) logLine(`socket.io transport -> ${nextName}`);
+      });
+      socket.io.engine.on("upgradeError", (err) => {
+        const msg = err && err.message ? err.message : String(err || "upgrade error");
+        logLine(`socket.io upgrade error: ${msg}`);
+      });
+    } catch (_) {}
+
     socket.on("reconnect", () => {
+      stopDiscoveryPolling();
       logLine("socket.io reconnect");
       joined = false;
       intercomAlive = false;
@@ -819,6 +863,7 @@
     });
 
     socket.on("disconnect", (reason) => {
+      startDiscoveryPolling();
       connecting = false;
       setStatus("Déconnecté");
       setUiConnected(false);
@@ -836,6 +881,7 @@
         lastControlTs = Date.now();
         setStatus(`${msg.server_ip}:${msg.server_port}`);
         logLine(`joined (id=${msg.client_id})`);
+        if (socket) socket.emit("input_gain_db", { gain_db: inputGainDb });
         setListenRegie(el.listenRegie.checked);
         setListenReturn(el.listenReturnBus.checked);
         setUiConnected(true);
@@ -863,6 +909,15 @@
       }
       if (msg.type === "update" || msg.type === "welcome") {
         const cfg = msg.config || msg;
+        if (cfg && cfg.input_gain_db != null) {
+          const nextInputGainDb = clampInputGainDb(cfg.input_gain_db);
+          if (Math.abs(nextInputGainDb - inputGainDb) >= 0.01) {
+            inputGainDb = nextInputGainDb;
+            if (el.micGainSlider) el.micGainSlider.value = String(inputGainDb);
+            if (el.micGainValue) el.micGainValue.textContent = `${Math.round(inputGainDb)} dB`;
+            saveSettings();
+          }
+        }
         if (cfg && Array.isArray(cfg.buses)) {
           for (const b of cfg.buses) {
             try {
@@ -1030,6 +1085,16 @@
     setListenReturn(el.listenReturnBus.checked);
     saveSettings();
   });
+
+  if (el.micGainSlider) {
+    el.micGainSlider.addEventListener("input", () => {
+      inputGainDb = clampInputGainDb(el.micGainSlider.value);
+      el.micGainSlider.value = String(inputGainDb);
+      if (el.micGainValue) el.micGainValue.textContent = `${Math.round(inputGainDb)} dB`;
+      if (socket && joined) socket.emit("input_gain_db", { gain_db: inputGainDb });
+      saveSettings();
+    });
+  }
 
   el.volumeSlider.addEventListener("input", () => {
     const pct = parseInt(el.volumeSlider.value, 10);

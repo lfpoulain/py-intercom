@@ -9,7 +9,7 @@ from typing import Optional
 from PySide6 import QtCore, QtGui, QtWidgets
 from pynput import keyboard
 
-from ..common.constants import AUDIO_UDP_PORT
+from ..common.constants import AUDIO_UDP_PORT, MAX_GAIN_DB
 from ..common.devices import list_devices, resolve_device
 from ..common.gui_utils import DeviceWorker, is_checked
 from ..common.identity import client_id_from_uuid
@@ -361,7 +361,7 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         self._mic_gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self._mic_gain.setMinimum(-60)
-        self._mic_gain.setMaximum(12)
+        self._mic_gain.setMaximum(int(MAX_GAIN_DB))
         self._mic_gain.setValue(0)
         self._mic_gain.setEnabled(False)
         self._mic_gain_lbl = QtWidgets.QLabel("0 dB")
@@ -370,7 +370,7 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         self._hp_gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self._hp_gain.setMinimum(-60)
-        self._hp_gain.setMaximum(12)
+        self._hp_gain.setMaximum(int(MAX_GAIN_DB))
         self._hp_gain.setValue(0)
         self._hp_gain.setEnabled(False)
         self._hp_gain_lbl = QtWidgets.QLabel("0 dB")
@@ -379,7 +379,7 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         self._return_gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self._return_gain.setMinimum(-60)
-        self._return_gain.setMaximum(12)
+        self._return_gain.setMaximum(int(MAX_GAIN_DB))
         self._return_gain.setValue(0)
         self._return_gain.setEnabled(False)
         self._return_gain_lbl = QtWidgets.QLabel("0 dB")

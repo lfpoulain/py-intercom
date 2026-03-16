@@ -11,7 +11,7 @@ import sounddevice as sd
 from loguru import logger
 
 from ..common.audio import apply_gain_db, limit_peak, rms_dbfs
-from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, CTRL_LIVENESS_TIMEOUT_S, CTRL_PING_INTERVAL_S, FRAME_SAMPLES, JB_MAX_FRAMES, JB_START_FRAMES, SAMPLE_RATE
+from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, CTRL_LIVENESS_TIMEOUT_S, CTRL_PING_INTERVAL_S, FRAME_SAMPLES, JB_MAX_FRAMES, JB_START_FRAMES, MAX_GAIN_DB, SAMPLE_RATE
 from ..common.jitter_buffer import OpusPacketJitterBuffer
 from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import pack_audio_packet, unpack_audio_packet
@@ -209,7 +209,7 @@ class IntercomClient:
 
     def set_input_gain_db(self, gain_db: float) -> None:
         with self._state_lock:
-            self._input_gain_db = max(-60.0, min(12.0, float(gain_db)))
+            self._input_gain_db = max(-60.0, min(float(MAX_GAIN_DB), float(gain_db)))
         self._control_send_state()
 
     def set_output_gain_db(self, gain_db: float) -> None:
@@ -446,7 +446,7 @@ class IntercomClient:
                 if "input_gain_db" in cfg:
                     try:
                         with self._state_lock:
-                            self._input_gain_db = max(-60.0, min(12.0, float(cfg.get("input_gain_db"))))
+                            self._input_gain_db = max(-60.0, min(float(MAX_GAIN_DB), float(cfg.get("input_gain_db"))))
                     except Exception:
                         pass
                 if "buses" in cfg:

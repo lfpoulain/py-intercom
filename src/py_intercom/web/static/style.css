@@ -577,6 +577,7 @@ kbd {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-height: 40px;
 }
 
 .vol-icon {
@@ -590,17 +591,32 @@ kbd {
   flex: 1;
   -webkit-appearance: none;
   appearance: none;
-  height: 5px;
-  border-radius: 999px;
-  background: rgba(255,255,255,0.10);
+  height: 32px;
+  padding: 0;
+  background: transparent;
   outline: none;
+  touch-action: pan-y;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.slider::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.12);
+}
+
+.slider::-moz-range-track {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.12);
 }
 
 .slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 16px;
-  height: 16px;
+  width: 28px;
+  height: 28px;
+  margin-top: -10px;
   border-radius: 50%;
   background: var(--accent);
   cursor: pointer;
@@ -608,8 +624,8 @@ kbd {
 }
 
 .slider::-moz-range-thumb {
-  width: 16px;
-  height: 16px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   background: var(--accent);
   cursor: pointer;
@@ -620,7 +636,7 @@ kbd {
   font-size: 12px;
   font-weight: 600;
   color: var(--text2);
-  width: 36px;
+  width: 56px;
   text-align: right;
 }
 

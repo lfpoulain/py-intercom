@@ -13,7 +13,7 @@ from flask_socketio import SocketIO, emit
 from loguru import logger
 
 from ..common.audio import float32_to_int16_bytes
-from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, FRAME_SAMPLES, SAMPLE_RATE
+from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, FRAME_SAMPLES, MAX_GAIN_DB, SAMPLE_RATE
 from ..common.discovery import DiscoveryListener
 from .bridge import BridgeConfig, IntercomBridge
 
@@ -56,7 +56,12 @@ def create_app() -> tuple[Flask, SocketIO]:
 
     @app.get("/")
     def index():
-        return render_template("index.html", frame_samples=int(FRAME_SAMPLES), sample_rate=int(SAMPLE_RATE))
+        return render_template(
+            "index.html",
+            frame_samples=int(FRAME_SAMPLES),
+            sample_rate=int(SAMPLE_RATE),
+            max_gain_db=float(MAX_GAIN_DB),
+        )
 
     @app.get("/img/<path:filename>")
     def img_asset(filename: str):
@@ -118,6 +123,10 @@ def create_app() -> tuple[Flask, SocketIO]:
         client_uuid = str(data.get("client_uuid") or "").strip() or secrets.token_hex(16)
         listen_return_bus = bool(data.get("listen_return_bus", False))
         listen_regie = bool(data.get("listen_regie", True))
+        try:
+            input_gain_db = max(-60.0, min(float(MAX_GAIN_DB), float(data.get("input_gain_db", 0.0))))
+        except Exception:
+            input_gain_db = 0.0
 
         if not server_ip:
             emit("server", {"type": "error", "message": "server_ip required"})
@@ -145,6 +154,7 @@ def create_app() -> tuple[Flask, SocketIO]:
                     name=name,
                     listen_return_bus=bool(listen_return_bus),
                     listen_regie=bool(listen_regie),
+                    input_gain_db=float(input_gain_db),
                 )
                 
                 def _on_audio_frame(frame):
@@ -247,6 +257,24 @@ def create_app() -> tuple[Flask, SocketIO]:
                 sess.bridge.set_ptt_bus(int(bus_id), bool(active))
         except Exception as e:
             logger.debug("web ptt_bus update failed sid={}: {}", sid, e)
+
+    @socketio.on("input_gain_db")
+    def on_input_gain_db(data: Any):
+        sid = str(request.sid)
+        gain_db = 0.0
+        if isinstance(data, dict):
+            try:
+                gain_db = max(-60.0, min(float(MAX_GAIN_DB), float(data.get("gain_db", 0.0))))
+            except Exception:
+                gain_db = 0.0
+        with sessions_lock:
+            sess = sessions.get(sid)
+        if sess is None:
+            return
+        try:
+            sess.bridge.set_input_gain_db(float(gain_db))
+        except Exception as e:
+            logger.debug("web input_gain_db update failed sid={}: {}", sid, e)
 
     @socketio.on("listen_return_bus")
     def on_listen_return_bus(data: Any):
