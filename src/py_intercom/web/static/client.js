@@ -181,10 +181,14 @@
   let actualSR = TARGET_SR;
   const userAgent = navigator.userAgent || "";
   const isAppleMobile = /iPhone|iPad|iPod/i.test(userAgent) || (/Macintosh/i.test(userAgent) && (navigator.maxTouchPoints || 0) > 1);
+  const isAndroidChrome = /Android/i.test(userAgent) && /Chrome/i.test(userAgent) && !/EdgA|OPR/i.test(userAgent);
   const APPLE_MOBILE_MIC_PRE_GAIN = 2.0;
+  const ANDROID_BACKGROUND_KEEPALIVE_SRC = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
   let playbackUnlockDone = false;
   let playbackUnlockUrl = "";
   let playbackUnlockAudioEl = null;
+  let androidKeepAliveAudioEl = null;
+  let androidKeepAliveActive = false;
 
   const applyScalarGain = (src, gain) => {
     if (!Number.isFinite(gain) || Math.abs(gain - 1) < 0.001) return src;
@@ -249,6 +253,40 @@
       playbackUnlockDone = true;
       logLine("audio: playback unlock actif");
     } catch (_) {}
+  };
+
+  const ensureAndroidBackgroundKeepAlive = async () => {
+    if (!isAndroidChrome || !audioCtx) return;
+    try {
+      if (!androidKeepAliveAudioEl) {
+        androidKeepAliveAudioEl = new Audio(ANDROID_BACKGROUND_KEEPALIVE_SRC);
+        androidKeepAliveAudioEl.loop = true;
+        androidKeepAliveAudioEl.preload = "auto";
+        androidKeepAliveAudioEl.playsInline = true;
+      }
+      if (!androidKeepAliveAudioEl.paused) {
+        androidKeepAliveActive = true;
+        return;
+      }
+      const playPromise = androidKeepAliveAudioEl.play();
+      if (playPromise && typeof playPromise.then === "function") await playPromise;
+      if (!androidKeepAliveActive) logLine("audio: keepalive Android actif");
+      androidKeepAliveActive = true;
+    } catch (err) {
+      androidKeepAliveActive = false;
+      const msg = err && err.message ? err.message : String(err || "play failed");
+      logLine(`audio: keepalive Android indisponible: ${msg}`);
+    }
+  };
+
+  const stopAndroidBackgroundKeepAlive = () => {
+    try {
+      if (androidKeepAliveAudioEl) {
+        androidKeepAliveAudioEl.pause();
+        androidKeepAliveAudioEl.currentTime = 0;
+      }
+    } catch (_) {}
+    androidKeepAliveActive = false;
   };
 
   // --- Device enumeration ---
@@ -706,6 +744,7 @@
       await audioCtx.resume();
     }
     await ensurePlaybackUnlock();
+    await ensureAndroidBackgroundKeepAlive();
     actualSR = audioCtx.sampleRate;
     audioRateOk = true;
     logLine(`audio: sr=${actualSR} state=${audioCtx.state}${actualSR !== TARGET_SR ? " (resampling TX)" : ""}`);
@@ -874,10 +913,17 @@
         playbackUnlockAudioEl.src = "";
       }
     } catch (_) {}
+    stopAndroidBackgroundKeepAlive();
+    try {
+      if (androidKeepAliveAudioEl) {
+        androidKeepAliveAudioEl.src = "";
+      }
+    } catch (_) {}
     micProc = null; micNode = null; playProc = null; gainNode = null;
     outputDestNode = null;
     outputAudioEl = null;
     playbackUnlockAudioEl = null;
+    androidKeepAliveAudioEl = null;
     playbackUnlockDone = false;
     try { if (micStream) micStream.getTracks().forEach(t => t.stop()); } catch (_) {}
     micStream = null;
@@ -1212,6 +1258,7 @@
       // Re-acquire wake lock if we are still connected
       if (joined) {
         requestWakeLock().catch(() => {});
+        ensureAndroidBackgroundKeepAlive().catch(() => {});
       }
     }
   });
@@ -1268,6 +1315,7 @@
   // Resume AudioContext on any user interaction (critical for iOS/Mobile)
   const resumeAudioOnInteraction = () => {
     ensurePlaybackUnlock().catch(() => {});
+    ensureAndroidBackgroundKeepAlive().catch(() => {});
   };
   document.body.addEventListener("touchstart", resumeAudioOnInteraction, { passive: true });
   document.body.addEventListener("click", resumeAudioOnInteraction, { passive: true });
@@ -1275,6 +1323,8 @@
     stopDiscoveryPolling();
     releaseWakeLock().catch(() => {});
     try {
+      stopAndroidBackgroundKeepAlive();
+      if (androidKeepAliveAudioEl) androidKeepAliveAudioEl.src = "";
       if (playbackUnlockAudioEl) playbackUnlockAudioEl.pause();
       if (playbackUnlockUrl) URL.revokeObjectURL(playbackUnlockUrl);
     } catch (_) {}
