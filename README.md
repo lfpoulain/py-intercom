@@ -177,6 +177,12 @@ Lister les devices audio:
 .\.venv\Scripts\python run_server.py --list-devices
 ```
 
+## Licence
+
+Ce projet est distribué sous licence **Creative Commons Attribution - NonCommercial - NoDerivatives 4.0 International** (`CC BY-NC-ND 4.0`).
+
+Voir le fichier `LICENSE` ou <https://creativecommons.org/licenses/by-nc-nd/4.0/>.
+
 ## Documentation
 
 Voir `playbook.md` pour le détail du protocole, des presets, du modèle de gains, des VU mètres et du workflow.
