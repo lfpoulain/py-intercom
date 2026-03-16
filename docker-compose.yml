@@ -2,14 +2,16 @@ version: "3.9"
 
 services:
   web:
-    image: python:3.11-slim
-    working_dir: /app
-    volumes:
-      - .:/app
+    image: ghcr.io/lfpoulain/py-intercom-web:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    restart: unless-stopped
     ports:
-      - "8443:8443"
-      - "5002:5002/udp"
+      - "${PY_INTERCOM_WEB_PORT:-8741}:${PY_INTERCOM_WEB_PORT:-8741}"
+      - "${PY_INTERCOM_DISCOVERY_PORT:-5002}:5002/udp"
     environment:
-      PYTHONUNBUFFERED: "1"
-    command: >
-      /bin/sh -c "pip install -r requirements.txt && python run_web.py --host 0.0.0.0 --port 8443 --ssl-adhoc"
+      PY_INTERCOM_WEB_HOST: 0.0.0.0
+      PY_INTERCOM_WEB_PORT: ${PY_INTERCOM_WEB_PORT:-8741}
+      PY_INTERCOM_WEB_DEBUG: ${PY_INTERCOM_WEB_DEBUG:-0}
+      PY_INTERCOM_WEB_SSL_MODE: ${PY_INTERCOM_WEB_SSL_MODE:-plain}
