@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#080e1a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="py-intercom" />
+    <title>py-intercom — Client Web</title>
+    <link rel="icon" type="image/png" href="/img/logo.png" />
+    <link rel="apple-touch-icon" href="/img/logo.png" />
+    <link rel="manifest" href="/static/manifest.json" />
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
+    <script>window.PY_INTERCOM_CONFIG = { FRAME_SAMPLES: {{ frame_samples }}, SAMPLE_RATE: {{ sample_rate }} };</script>
+  </head>
+  <body>
+    <div class="app">
+      <!-- Header bar -->
+      <header class="topbar">
+        <div class="topbar-left">
+          <img class="logo-img" src="/img/logo.png" alt="py-intercom" />
+          <span class="topbar-title">py-intercom</span>
+          <span class="topbar-badge">web</span>
+        </div>
+        <div class="topbar-right">
+          <div id="netHealth" class="net-health" title="Qualité réseau">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+          </div>
+          <div id="connDot" class="conn-indicator off">
+            <span class="conn-dot"></span>
+            <span id="connLabel" class="conn-text">Déconnecté</span>
+          </div>
+        </div>
+      </header>
+
+      <div id="audioSuspendedBanner" class="audio-suspended-banner" style="display: none;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+        <span>Son coupé par le navigateur — Touchez ici pour réactiver</span>
+      </div>
+
+      <main class="main">
+        <!-- Connection card -->
+        <section class="card" id="cardConfig">
+          <div class="card-header card-header-toggle" id="cardConfigHeader">
+            <svg class="card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
+            <span>Connexion</span>
+            <svg id="cardConfigChevron" class="card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </div>
+          <div class="card-body card-body-collapsible" id="cardConfigBody">
+            <div class="field-group">
+              <label class="field-label">Serveur</label>
+              <div class="server-row">
+                <select id="discoverySelect" class="discovery-select" title="Serveurs détectés">
+                  <option value="">-- Détection auto --</option>
+                </select>
+                <button id="btnRefreshDiscovery" class="icon-btn" title="Rafraîchir">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                </button>
+              </div>
+              <div class="ip-port-row">
+                <input id="serverIp" class="input" placeholder="192.168.1.10" />
+              </div>
+            </div>
+            <div class="field-group">
+              <label class="field-label">Nom</label>
+              <input id="name" class="input" placeholder="Plateau" />
+            </div>
+            <div class="field-group">
+              <div class="devices-header">
+                <span class="field-label" style="margin-bottom:0">Périphériques audio</span>
+                <button id="btnRefreshDevices" class="icon-btn" title="Détecter les périphériques (demande la permission micro)">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                </button>
+              </div>
+              <div class="device-row" id="deviceRow">
+                <div class="field-half">
+                  <label class="field-label">Microphone</label>
+                  <select id="inputDeviceSelect" class="discovery-select">
+                    <option value="">-- Par défaut --</option>
+                  </select>
+                </div>
+                <div class="field-half" id="outputDeviceGroup">
+                  <label class="field-label">Sortie audio</label>
+                  <select id="outputDeviceSelect" class="discovery-select">
+                    <option value="">-- Par défaut --</option>
+                  </select>
+                </div>
+              </div>
+              <button id="btnApplyDevices" class="btn btn-ghost btn-sm" style="margin-top:6px" title="Appliquer les périphériques sans recharger (double-clic sur le bouton rafraîchir aussi)">
+                Appliquer les périphériques
+              </button>
+            </div>
+            <div class="connect-actions">
+              <button id="btnConnect" class="btn btn-primary btn-lg">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+                Connecter
+              </button>
+              <button id="btnDisconnect" class="btn btn-ghost" disabled>Déconnecter</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Controls card -->
+        <section class="card" id="cardControls">
+          <div class="card-header">
+            <svg class="card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+            <span>Audio</span>
+            <span id="statusLine" class="status-badge">Déconnecté</span>
+          </div>
+          <div class="card-body">
+            <!-- PTT buses -->
+            <div class="ptt-grid">
+              <div class="ptt-bus-col">
+                <button id="btnBus0" class="btn btn-ptt" data-bus-id="0" disabled>
+                  <span class="ptt-label">Régie</span>
+                  <span id="busStateLabel0" class="bus-state-label off">OFF</span>
+                </button>
+                <div class="mode-seg" id="busModeSelect0" data-bus="0">
+                  <button class="mode-seg-btn active" data-val="ptt">PTT</button>
+                  <button class="mode-seg-btn" data-val="toggle">Toggle</button>
+                  <button class="mode-seg-btn" data-val="always_on">Always On</button>
+                </div>
+              </div>
+              <div class="ptt-bus-col">
+                <button id="btnBus1" class="btn btn-ptt" data-bus-id="1" disabled>
+                  <span class="ptt-label">Plateau</span>
+                  <span id="busStateLabel1" class="bus-state-label off">OFF</span>
+                </button>
+                <div class="mode-seg" id="busModeSelect1" data-bus="1">
+                  <button class="mode-seg-btn active" data-val="ptt">PTT</button>
+                  <button class="mode-seg-btn" data-val="toggle">Toggle</button>
+                  <button class="mode-seg-btn" data-val="always_on">Always On</button>
+                </div>
+              </div>
+              <div class="ptt-bus-col">
+                <button id="btnBus2" class="btn btn-ptt" data-bus-id="2" disabled>
+                  <span class="ptt-label">VMix</span>
+                  <span id="busStateLabel2" class="bus-state-label off">OFF</span>
+                </button>
+                <div class="mode-seg" id="busModeSelect2" data-bus="2">
+                  <button class="mode-seg-btn active" data-val="ptt">PTT</button>
+                  <button class="mode-seg-btn" data-val="toggle">Toggle</button>
+                  <button class="mode-seg-btn" data-val="always_on">Always On</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="listen-row">
+              <label class="toggle">
+                <input id="listenRegie" type="checkbox" checked />
+                <span>Écoute Régie</span>
+              </label>
+              <label class="toggle">
+                <input id="listenReturnBus" type="checkbox" />
+                <span>Écoute retour</span>
+              </label>
+            </div>
+
+            <!-- VU Meters -->
+            <div class="meters">
+              <div class="meter-row">
+                <span class="meter-label">TX</span>
+                <div class="meter-track"><div id="txBar" class="meter-fill tx"></div></div>
+              </div>
+              <div class="meter-row">
+                <span class="meter-label">RX</span>
+                <div class="meter-track"><div id="rxBar" class="meter-fill rx"></div></div>
+              </div>
+            </div>
+
+            <!-- Volume -->
+            <div class="volume-row">
+              <svg class="vol-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+              <input id="volumeSlider" type="range" min="0" max="150" value="100" class="slider" />
+              <span id="volumeValue" class="vol-value">100%</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Log -->
+        <section class="card card-log">
+          <div class="card-header card-header-sm">
+            <svg class="card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+            <span>Journal</span>
+          </div>
+          <div id="log" class="log-body"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/client.js"></script>
+  </body>
+</html>
