@@ -480,7 +480,28 @@ Par défaut, `run_web.py` lance en HTTPS adhoc sur le port 8443 avec détection 
 - Vérifier le VU "Return VU" côté serveur
 - Sur Windows WASAPI avec interface USB (ex: Focusrite) : le stream return est automatiquement rouvert ~2.5s après le démarrage du serveur pour contourner l'interférence WASAPI entre le stream de sortie et le stream d'entrée sur le même device physique. Patienter quelques secondes avant de diagnostiquer.
 
-## 15) Limitations connues
+## 15) Optimisations pour usage LAN (Latence Ultra-Faible vs Stabilité)
+
+Afin d'offrir une expérience de type "Discord local" tout en évitant les clics audio sur des réseaux Wi-Fi ou Ethernet légèrement instables, les paramètres de latence ont été exposés dans `src/py_intercom/common/constants.py`.
+
+Le but est de trouver le bon compromis : 
+- **Trop faible :** l'audio est ultra-rapide mais clique ou hache au moindre saut de ping (jitter).
+- **Trop élevé :** l'audio est très stable mais on accumule du retard (lag de type talkie-walkie).
+
+### Constantes ajustables dans `constants.py` :
+
+- **Jitter Buffer (Serveur & Client) :**
+  - `JB_START_FRAMES = 4` (~40 ms de pré-chargement). Si vous entendez des clics en début de phrase, montez à 6. Si vous voulez zéro latence sur un réseau filaire parfait, descendez à 2.
+  - `JB_MAX_FRAMES = 30` (~300 ms). Limite dure réseau. Au-delà, l'application jettera des paquets pour ne pas accumuler de délai.
+- **Sorties Physiques Serveur :** `SERVER_OUT_MAX_BUFFER_S = 0.2`. Tolérance de 200 ms de dérive entre l'horloge système et la carte son. Tout buffer excédentaire est immédiatement rogné pour coller au direct.
+- **Return Bus :** `SERVER_RETURN_FRAMES_MAX = 20`. File d'attente d'entrée maximale (200 ms).
+- **Client Web (`client.js`) :**
+  - `WEB_MAX_QUEUE_FRAMES = 15` (~150 ms). Tampon JavaScript normal.
+  - `WEB_QUEUE_SYNC_MULTIPLIER = 2.0`. Si le navigateur suspend l'onglet ou fige le thread et dépasse `15 * 2.0 = 30 frames` (300 ms) de retard, il resynchronise brutalement l'audio en jetant l'excédent.
+
+Ces réglages empêchent formellement toute "fuite" ou accumulation progressive de latence sur de très longues sessions (par exemple, 2 à 3 secondes de décalage au bout d'une heure n'arriveront plus). Si un saut réseau majeur survient, l'audio "cliquera" (drop packet forcé) plutôt que de dériver lentement.
+
+## 16) Limitations connues
 
 - Resampling serveur volontairement simple (robustesse > qualité audiophile).
 - Pas de chiffrement/authentification (usage LAN uniquement).
@@ -490,7 +511,7 @@ Par défaut, `run_web.py` lance en HTTPS adhoc sur le port 8443 avec détection 
 - Client web : pas de raccourcis clavier (supprimés volontairement — conflits avec les applications hôtes sur plateau).
 - Client web : latence plus élevée que le client Python (surcoût typique ~30-40 ms), principalement dû au `ScriptProcessor` (buffer 2048 samples = ~42 ms).
 
-## 16) UI / Thème
+## 17) UI / Thème
 
 - Thème sombre global via `QPalette` + QSS (`common/theme.py`).
 - Boutons colorés par classe : `success` (vert), `danger` (rouge), `warning` (orange).
@@ -501,7 +522,7 @@ Par défaut, `run_web.py` lance en HTTPS adhoc sur le port 8443 avec détection 
 - Layouts serveur et client : colonnes (champs | boutons | options), marges cohérentes.
 - Tables serveur : hauteur de ligne 32 px (alignée avec les combos), colonnes VU en `Stretch`.
 
-## 17) Roadmap (non implémenté)
+## 18) Roadmap (non implémenté)
 
 - AudioWorklet (remplacement de ScriptProcessor — attendre stabilisation mobile, bug WebAudio #2632)
 - Jitter buffer adaptatif (ajustement dynamique de `start_frames`)

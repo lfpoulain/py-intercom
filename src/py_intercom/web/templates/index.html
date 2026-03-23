@@ -13,7 +13,15 @@
     <link rel="manifest" href="/static/manifest.json" />
     <link rel="stylesheet" href="/static/style.css" />
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
-    <script>window.PY_INTERCOM_CONFIG = { FRAME_SAMPLES: {{ frame_samples }}, SAMPLE_RATE: {{ sample_rate }}, MAX_GAIN_DB: {{ max_gain_db }} };</script>
+    <script>
+      window.PY_INTERCOM_CONFIG = {
+        FRAME_SAMPLES: {{ frame_samples|default(480) }},
+        SAMPLE_RATE: {{ sample_rate|default(48000) }},
+        MAX_GAIN_DB: {{ max_gain_db|default(20.0) }},
+        WEB_MAX_QUEUE_FRAMES: {{ web_max_queue_frames|default(15) }},
+        WEB_QUEUE_SYNC_MULTIPLIER: {{ web_queue_sync_multiplier|default(2.0) }}
+      };
+    </script>
   </head>
   <body>
     <div class="app">

@@ -13,7 +13,7 @@ from flask_socketio import SocketIO, emit
 from loguru import logger
 
 from ..common.audio import float32_to_int16_bytes
-from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, FRAME_SAMPLES, MAX_GAIN_DB, SAMPLE_RATE
+from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, FRAME_SAMPLES, MAX_GAIN_DB, SAMPLE_RATE, WEB_MAX_QUEUE_FRAMES, WEB_QUEUE_SYNC_MULTIPLIER
 from ..common.discovery import DiscoveryListener
 from .bridge import BridgeConfig, IntercomBridge
 
@@ -54,13 +54,15 @@ def create_app() -> tuple[Flask, SocketIO]:
 
     atexit.register(_stop_all)
 
-    @app.get("/")
+    @app.route("/")
     def index():
         return render_template(
             "index.html",
             frame_samples=int(FRAME_SAMPLES),
             sample_rate=int(SAMPLE_RATE),
             max_gain_db=float(MAX_GAIN_DB),
+            web_max_queue_frames=int(WEB_MAX_QUEUE_FRAMES),
+            web_queue_sync_multiplier=float(WEB_QUEUE_SYNC_MULTIPLIER),
         )
 
     @app.get("/img/<path:filename>")

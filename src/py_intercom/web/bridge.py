@@ -404,35 +404,41 @@ class IntercomBridge:
         while not self._stop.is_set():
             now = time.monotonic()
             if now < next_t:
-                time.sleep(min(0.002, next_t - now))
+                time.sleep(min(0.005, next_t - now))
                 continue
 
-            next_t += tick_s
-            if next_t < now - 0.1:
+            # Rattraper le retard éventuel : si on est très en retard (> 100ms), on resynchronise l'horloge interne
+            if now > next_t + 0.1:
                 next_t = now
 
-            try:
-                payload = self._jb.pop()
-            except Exception:
-                payload = None
+            # Produire au plus 3 frames par boucle pour rattraper un léger retard sans saturer le thread
+            produced = 0
+            while now >= next_t and produced < 3 and not self._stop.is_set():
+                next_t += tick_s
+                produced += 1
 
-            if payload is None:
-                _consecutive_silence += 1
-                if _consecutive_silence <= _SILENCE_GATE:
-                    # Send silence to keep the JS queue fed and avoid underrun clicks
-                    try:
-                        self._on_audio_frame(_silence)
-                    except Exception:
-                        pass
-                continue
+                try:
+                    payload = self._jb.pop()
+                except Exception:
+                    payload = None
 
-            _consecutive_silence = 0
-            try:
-                frame = self._dec.decode(payload)
-            except Exception:
-                continue
+                if payload is None:
+                    _consecutive_silence += 1
+                    if _consecutive_silence <= _SILENCE_GATE:
+                        # Send silence to keep the JS queue fed and avoid underrun clicks
+                        try:
+                            self._on_audio_frame(_silence)
+                        except Exception:
+                            pass
+                    continue
 
-            try:
-                self._on_audio_frame(frame)
-            except Exception:
-                pass
+                _consecutive_silence = 0
+                try:
+                    frame = self._dec.decode(payload)
+                except Exception:
+                    continue
+
+                try:
+                    self._on_audio_frame(frame)
+                except Exception:
+                    pass

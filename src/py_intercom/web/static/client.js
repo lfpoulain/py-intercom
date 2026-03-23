@@ -443,7 +443,8 @@
     playQueueSamples += x.length;
   };
 
-  const MAX_QUEUE_SAMPLES = FRAME_SAMPLES * 20; // ~200ms — enough buffer to absorb jitter
+  const MAX_QUEUE_SAMPLES = FRAME_SAMPLES * (window.PY_INTERCOM_CONFIG?.WEB_MAX_QUEUE_FRAMES || 15);
+  const SYNC_MULTIPLIER = window.PY_INTERCOM_CONFIG?.WEB_QUEUE_SYNC_MULTIPLIER || 2.0;
 
   const dropPlaySamples = (n) => {
     let remaining = Math.min(Math.max(0, n), playQueueSamples);
@@ -462,9 +463,12 @@
   };
 
   const popPlay = (n) => {
-    // If queue is too large, skip ahead gradually (one extra frame per callback)
-    // to avoid a hard cut that causes a click
-    if (playQueueSamples > MAX_QUEUE_SAMPLES) {
+    // Si la file devient vraiment énorme (dérive horloge ou pause de l'onglet), on resynchronise brutalement
+    if (playQueueSamples > MAX_QUEUE_SAMPLES * SYNC_MULTIPLIER) {
+      console.warn("Buffer audio énorme, resynchronisation", playQueueSamples);
+      dropPlaySamples(playQueueSamples - MAX_QUEUE_SAMPLES);
+    } else if (playQueueSamples > MAX_QUEUE_SAMPLES) {
+      // Skips progressifs pour absorber le jitter sans clic dur
       dropPlaySamples(FRAME_SAMPLES);
     }
 

@@ -348,6 +348,9 @@ class ServerWindow(QtWidgets.QMainWindow):
     def _update_controls_for_server_state(self) -> None:
         running = self._server is not None
 
+        self._server_name.setReadOnly(bool(running))
+        self._discovery_cb.setEnabled(not bool(running))
+
         self._add_output_device.setEnabled(bool(running))
         self._bus_selector.setEnabled(bool(running))
         can_add_output = bool(running) and self._add_output_device.currentData() is not None and self._bus_selector.currentData() is not None

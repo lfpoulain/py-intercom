@@ -14,7 +14,7 @@ import sounddevice as sd
 from loguru import logger
 
 from ..common.audio import apply_gain_db, limit_peak, rms_dbfs
-from ..common.constants import AUDIO_UDP_PORT, CHANNELS, CONTROL_PORT_OFFSET, FRAME_SAMPLES, JB_MAX_FRAMES, JB_START_FRAMES, MAX_GAIN_DB, SAMPLE_RATE
+from ..common.constants import AUDIO_UDP_PORT, CHANNELS, CONTROL_PORT_OFFSET, FRAME_SAMPLES, JB_MAX_FRAMES, JB_START_FRAMES, MAX_GAIN_DB, SAMPLE_RATE, SERVER_MIX_QUEUE_MAX, SERVER_RETURN_FRAMES_MAX, SERVER_OUT_MAX_BUFFER_S
 from ..common.discovery import DiscoveryBeacon
 from ..common.devices import list_devices, resolve_device
 from ..common.identity import client_id_from_uuid
@@ -143,7 +143,7 @@ class IntercomServer:
         self._next_bus_id: int = 3
 
         # items are (raw_mix_48k, contributions_by_client_id)
-        self._mix_queue: queue.Queue[object] = queue.Queue(maxsize=50)
+        self._mix_queue: queue.Queue[object] = queue.Queue(maxsize=SERVER_MIX_QUEUE_MAX)
         self._stop = threading.Event()
         self._seq_out = 0
 
@@ -193,7 +193,7 @@ class IntercomServer:
         self._return_in_samplerate: int = int(SAMPLE_RATE)
         self._return_in_phase: float = 0.0
         self._return_capture_buf: np.ndarray = np.zeros((0,), dtype=np.float32)
-        self._return_frames: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=120)
+        self._return_frames: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=SERVER_RETURN_FRAMES_MAX)
         self._return_vu_dbfs: float = -60.0
         self._regie_vu_dbfs: float = -60.0
 
@@ -655,13 +655,55 @@ class IntercomServer:
         bid = int(bus_id)
         if bid not in (1, 2):
             return
+        changed = False
         with self._lock:
-            bus = self._buses.get(int(bid))
-            if bus is None:
-                return
-            bus.feed_to_regie = bool(enabled)
-
+            bus = self._buses.get(bid)
+            if bus is not None and bool(bus.feed_to_regie) != bool(enabled):
+                bus.feed_to_regie = bool(enabled)
+                changed = True
+                
+        if not changed:
+            return
+            
         self._control_push_all_configs()
+        self._autosave_preset()
+
+    def set_return_enabled(self, enabled: bool) -> None:
+        changed = False
+        with self._lock:
+            if self._return_enabled != bool(enabled):
+                self._return_enabled = bool(enabled)
+                changed = True
+        
+        if not changed:
+            return
+
+        # Remise à zéro du VU mètre si désactivé
+        if not bool(enabled):
+            with self._return_lock:
+                self._return_vu_dbfs = -60.0
+
+        # Si le serveur tourne, on rouvre (ou ferme) le stream
+        if self._running:
+            self.reopen_return_input()
+
+        self._autosave_preset()
+
+    def set_return_input_device(self, device: Optional[int]) -> None:
+        changed = False
+        dev_val = int(device) if device is not None else None
+        with self._lock:
+            if self._return_input_device != dev_val:
+                self._return_input_device = dev_val
+                changed = True
+        
+        if not changed:
+            return
+
+        # Si le serveur tourne, on rouvre le stream sur le nouveau device
+        if self._running:
+            self.reopen_return_input()
+
         self._autosave_preset()
 
     def set_bus_gain(self, bus_id: int, gain_db: float) -> None:
@@ -1465,8 +1507,10 @@ class IntercomServer:
                         else:
                             out.buf = np.concatenate([out.buf, mix.astype(np.float32, copy=False)])
 
-                        max_samples = int(SAMPLE_RATE * 3)
+                        # C'est ici que l'audio physique vers le plateau pouvait dériver et s'accumuler
+                        max_samples = int(SAMPLE_RATE * SERVER_OUT_MAX_BUFFER_S)
                         if out.buf.size > max_samples:
+                            # On coupe le *début* (le plus vieux) et on garde la *fin* (le plus récent)
                             out.buf = out.buf[-max_samples:]
 
     def _output_callback(self, output_id: int, outdata, frames, time_info, status) -> None:

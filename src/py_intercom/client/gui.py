@@ -1386,6 +1386,10 @@ class ClientWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+        self._name.setReadOnly(True)
+        self._server_ip.setReadOnly(True)
+        self._discovered_servers.setEnabled(False)
+
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
         self._listen_regie.setEnabled(True)
@@ -1424,6 +1428,11 @@ class ClientWindow(QtWidgets.QMainWindow):
         finally:
             self._connected = False
             self._status_label.setText("Disconnected")
+
+            self._name.setReadOnly(False)
+            self._server_ip.setReadOnly(False)
+            self._discovered_servers.setEnabled(True)
+
             self._connect_btn.setEnabled(True)
             self._disconnect_btn.setEnabled(False)
             self._listen_regie.setEnabled(False)
