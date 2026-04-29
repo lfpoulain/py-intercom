@@ -14,6 +14,7 @@ import sounddevice as sd
 from loguru import logger
 
 from ..common.audio import apply_gain_db, limit_peak, rms_dbfs
+from ..common.audio_errors import friendly_audio_open_error
 from ..common.constants import AUDIO_UDP_PORT, CHANNELS, CONTROL_PORT_OFFSET, FRAME_SAMPLES, JB_MAX_FRAMES, JB_START_FRAMES, MAX_GAIN_DB, SAMPLE_RATE, SERVER_MIX_QUEUE_MAX, SERVER_RETURN_FRAMES_MAX, SERVER_OUT_MAX_BUFFER_S
 from ..common.discovery import DiscoveryBeacon
 from ..common.devices import list_devices, resolve_device
@@ -155,6 +156,9 @@ class IntercomServer:
         self._rx_decode_errors = 0
         self._tx_encode_errors = 0
         self._tx_socket_errors = 0
+        # Tracks clients we've already warned about as having no UDP port,
+        # so the broadcast loop logs at most once per stale state.
+        self._silent_dest_logged: Dict[int, bool] = {}
         self._last_stats_log = time.monotonic()
 
         self._outputs: Dict[int, OutputState] = {}
@@ -905,16 +909,59 @@ class IntercomServer:
             except Exception:
                 pass
 
-        st = sd.InputStream(
-            samplerate=float(in_sr),
-            channels=1,
-            dtype="float32",
-            blocksize=blocksize_frame,
-            device=int(device),
-            latency="low",
-            callback=self._return_in_callback,
-        )
-        st.start()
+        # Pre-check the device against the requested format. This surfaces a
+        # clear error before allocating the stream and gives a friendly message.
+        dev_info = None
+        try:
+            dev_info = sd.query_devices(int(device))
+        except Exception:
+            dev_info = None
+        try:
+            sd.check_input_settings(
+                device=int(device),
+                channels=1,
+                dtype="float32",
+                samplerate=int(in_sr),
+            )
+        except Exception as e:
+            msg = friendly_audio_open_error(
+                e,
+                kind="input",
+                dev_info=dev_info,
+                device=int(device),
+                sr=int(in_sr),
+                ch=1,
+            )
+            raise RuntimeError(msg) from e
+
+        st: Optional[sd.InputStream] = None
+        try:
+            st = sd.InputStream(
+                samplerate=float(in_sr),
+                channels=1,
+                dtype="float32",
+                blocksize=blocksize_frame,
+                device=int(device),
+                latency="low",
+                callback=self._return_in_callback,
+            )
+            st.start()
+        except Exception as e:
+            try:
+                if st is not None:
+                    st.stop()
+                    st.close()
+            except Exception:
+                pass
+            msg = friendly_audio_open_error(
+                e,
+                kind="input",
+                dev_info=dev_info,
+                device=int(device),
+                sr=int(in_sr),
+                ch=1,
+            )
+            raise RuntimeError(msg) from e
         self._return_stream = st
 
     def _return_in_callback(self, indata, frames, time_info, status) -> None:
@@ -1099,7 +1146,8 @@ class IntercomServer:
                         input_gain_db = msg.get("input_gain_db")
                         applies_input_gain_locally = msg.get("applies_input_gain_locally")
                         changed = False
-                        logger.debug("state from cid={}: listen_return_bus={} listen_regie={}", cid, listen_return_bus, listen_regie)
+                        # Fires on every PTT toggle / slider move; keep at TRACE to avoid log spam.
+                        logger.trace("state from cid={}: listen_return_bus={} listen_regie={}", cid, listen_return_bus, listen_regie)
                         with self._lock:
                             st = self._clients.get(int(cid))
                             if st is not None:
@@ -1172,9 +1220,16 @@ class IntercomServer:
                         if st is None:
                             st = ClientState(addr=(str(addr[0]), 0), last_packet_monotonic=now)
                             self._clients[int(client_id)] = st
-                        # Full reset of audio backend for this client
+                        # Full reset of audio backend for this client.
+                        # Resetting BOTH decoder (incoming PCM from this client) AND
+                        # encoder (mix-minus broadcast back to this client) avoids stale
+                        # Opus state causing pops/glitches on reconnect.
                         try:
                             st.decoder = OpusDecoder()
+                        except Exception:
+                            pass
+                        try:
+                            st.encoder = OpusEncoder()
                         except Exception:
                             pass
                         st.jb = OpusPacketJitterBuffer(start_frames=JB_START_FRAMES, max_frames=JB_MAX_FRAMES)
@@ -1289,6 +1344,7 @@ class IntercomServer:
         self._autosave_preset()
 
     def _open_output_stream(self, out: OutputState) -> None:
+        dev = None
         try:
             dev = sd.query_devices(int(out.device))
             logger.debug(
@@ -1304,6 +1360,27 @@ class IntercomServer:
 
         sr = int(SAMPLE_RATE)
         blocksize = int(FRAME_SAMPLES)
+
+        try:
+            sd.check_output_settings(
+                device=int(out.device),
+                channels=int(CHANNELS),
+                dtype="float32",
+                samplerate=int(sr),
+            )
+        except Exception as e:
+            with out.lock:
+                out.stream = None
+            msg = friendly_audio_open_error(
+                e,
+                kind="output",
+                dev_info=dev,
+                device=int(out.device),
+                sr=int(sr),
+                ch=int(CHANNELS),
+            )
+            raise RuntimeError(msg) from e
+
         stream: Optional[sd.OutputStream] = None
         try:
             with out.lock:
@@ -1343,7 +1420,15 @@ class IntercomServer:
                 pass
             with out.lock:
                 out.stream = None
-            raise RuntimeError(f"failed to open output stream: {e}") from e
+            msg = friendly_audio_open_error(
+                e,
+                kind="output",
+                dev_info=dev,
+                device=int(out.device),
+                sr=int(sr),
+                ch=int(CHANNELS),
+            )
+            raise RuntimeError(msg) from e
 
     def _mix_loop(self) -> None:
         tick_s = float(FRAME_SAMPLES) / float(SAMPLE_RATE)
@@ -1353,6 +1438,13 @@ class IntercomServer:
             if now < next_t:
                 time.sleep(min(0.005, next_t - now))
                 continue
+
+            # Resync after a clock jump (system suspend/resume, GC pause, freeze).
+            # Without this, the loop would burn CPU producing thousands of stale
+            # frames trying to "catch up" several seconds of missed ticks.
+            if now > next_t + 0.1:
+                logger.debug("mix loop resync: skipping {:.0f} ms of missed ticks", (now - next_t) * 1000.0)
+                next_t = now
 
             produced = 0
             while now >= next_t and produced < 5 and not self._stop.is_set():
@@ -1708,10 +1800,23 @@ class IntercomServer:
 
             for client_id, addr, enc, listen_return, listen_regie, return_gain_db in dests:
                 try:
-                    if int(addr[1]) <= 0:
-                        continue
+                    udp_port = int(addr[1])
                 except Exception:
+                    udp_port = 0
+                if udp_port <= 0:
+                    # Client connected via TCP control but never sent UDP audio yet,
+                    # so we don't know where to send the mix-minus. Log once per
+                    # client to surface this state instead of dropping silently.
+                    if not self._silent_dest_logged.get(int(client_id), False):
+                        self._silent_dest_logged[int(client_id)] = True
+                        logger.info(
+                            "client {} has no UDP port yet, broadcast skipped (waiting for first UDP frame)",
+                            int(client_id),
+                        )
                     continue
+                else:
+                    if self._silent_dest_logged.get(int(client_id), False):
+                        self._silent_dest_logged.pop(int(client_id), None)
                 try:
                     c = contrib.get(int(client_id))
                     if bool(listen_regie):

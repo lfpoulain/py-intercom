@@ -234,6 +234,30 @@ Lister les devices audio:
 .\.venv\Scripts\python run_server.py --list-devices
 ```
 
+## Périphériques Bluetooth
+
+py-intercom utilise un pipeline audio fixe **48 kHz mono** (Opus 64 kbps, frames 10 ms). Cette contrainte est volontaire pour garantir une qualité broadcast et une faible latence.
+
+Conséquence : un casque Bluetooth classique **ne peut pas** servir simultanément de micro et de sortie. Dès que Windows ouvre le micro du casque, il bascule tout l'appareil en profil **HFP** (mono 8/16 kHz), ce qui fait échouer l'ouverture de la sortie 48 kHz.
+
+Quand cela se produit, l'application affiche maintenant un message clair indiquant :
+
+- la cause (HFP vs A2DP côté Windows)
+- les solutions possibles (casque USB/jack, BT en sortie + micro séparé, ou désactivation du service « Téléphonie mains libres »)
+
+Pour un duplex HQ sur le **même** casque Bluetooth, il faut un casque **LE Audio (LC3)** + un PC avec chipset BT compatible LE Audio (Intel AX211/BE200, Qualcomm FastConnect 7800…) sous Windows 11 24H2 ou plus récent. Sans cela, **un casque USB ou jack reste la solution recommandée** pour l'intercom.
+
+## Tests
+
+Une suite pytest minimale est fournie dans `tests/`. Elle couvre les modules les plus critiques (packets UDP, conversions audio, jitter buffer / PLC, discovery LAN).
+
+```powershell
+.\.venv\Scripts\python -m pip install pytest
+.\.venv\Scripts\python -m pytest tests -q
+```
+
+Aucune dépendance audio physique n'est requise pour ces tests.
+
 ## Licence
 
 Ce projet est distribué sous licence **Creative Commons Attribution - NonCommercial - NoDerivatives 4.0 International** (`CC BY-NC-ND 4.0`).

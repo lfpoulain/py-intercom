@@ -221,7 +221,7 @@ Chaque `ClientState` possède son propre `OpusEncoder` pour le mix-minus (évite
 
 Windows : `bin/opus.dll` est fourni et chargé automatiquement par les scripts `run_*.py`.
 
-Note : `aiortc` est encore présent dans `requirements.txt`, mais n'est plus utilisé par le flux web actif (bridge Socket.IO).
+Note : `aiortc` n'est plus dans `requirements.txt` ni utilisé. Le flux web actif passe par le bridge Socket.IO + UDP/TCP vers le serveur intercom.
 
 ### Organisation du code
 
@@ -230,7 +230,8 @@ src/py_intercom/
 ├── common/
 │   ├── constants.py        # Ports, sample rate, frame size, Opus params
 │   ├── audio.py            # DSP : gain, RMS, conversions, limit_peak
-│   ├── packets.py          # Pack/unpack header UDP (12 bytes)
+│   ├── audio_errors.py     # Traduction des erreurs PortAudio en messages clairs (BT/HFP, sample rate, etc.)
+│   ├── packets.py          # Pack/unpack header UDP (12 bytes, validation taille mini/maxi)
 │   ├── opus_codec.py       # OpusEncoder / OpusDecoder
 │   ├── jitter_buffer.py    # OpusPacketJitterBuffer
 │   ├── devices.py          # list_devices, resolve_device, format_devices
@@ -256,6 +257,20 @@ src/py_intercom/
     └── static/
         ├── client.js       # WebAudio capture/playback, Socket.IO, UI
         └── style.css
+
+tests/
+├── conftest.py             # Ajoute src/ au sys.path
+├── test_packets.py         # Roundtrip pack/unpack, validation taille
+├── test_audio.py           # Gain, RMS, limit_peak, conversions, régression aliasing apply_gain_db
+├── test_jitter_buffer.py   # Push/pop, late drop, far-future reset, PLC
+└── test_discovery.py       # Parse beacon, JSON invalide, expiration
+```
+
+Lancement :
+
+```powershell
+.\.venv\Scripts\python -m pip install pytest
+.\.venv\Scripts\python -m pytest tests -q
 ```
 
 ### Modèle d'exécution (threads)

@@ -23,8 +23,11 @@ def pack_audio_packet(client_id: int, timestamp_ms: int, sequence_number: int, p
 
 
 def unpack_audio_packet(data: bytes) -> AudioPacket:
-    if len(data) < PACKET_HEADER_BYTES:
-        raise ValueError("packet too small")
+    n = len(data)
+    if n < PACKET_HEADER_BYTES:
+        raise ValueError(f"packet too small: {n} bytes")
+    if n > PACKET_HEADER_BYTES + MAX_UDP_PAYLOAD_BYTES:
+        raise ValueError(f"packet too large: {n} bytes")
     client_id, timestamp_ms, sequence_number = _HEADER_STRUCT.unpack_from(data, 0)
     payload = data[PACKET_HEADER_BYTES:]
     return AudioPacket(client_id=client_id, timestamp_ms=timestamp_ms, sequence_number=sequence_number, payload=payload)

@@ -8,9 +8,11 @@ def db_to_linear(db: float) -> float:
 
 
 def apply_gain_db(x: np.ndarray, gain_db: float) -> np.ndarray:
+    # Always return a fresh array so callers can mutate the result safely
+    # (e.g. accumulate into a bus mix, clip in place) without aliasing the input.
     if gain_db == 0.0:
-        return x
-    return x * db_to_linear(gain_db)
+        return np.array(x, dtype=np.float32, copy=True)
+    return (x * db_to_linear(gain_db)).astype(np.float32, copy=False)
 
 
 def rms_dbfs(x: np.ndarray, floor_db: float = -60.0) -> float:

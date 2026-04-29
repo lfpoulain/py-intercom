@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import json
 import socket
 import threading
@@ -11,6 +11,7 @@ import sounddevice as sd
 from loguru import logger
 
 from ..common.audio import apply_gain_db, limit_peak, rms_dbfs
+from ..common.audio_errors import friendly_audio_open_error
 from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, CTRL_LIVENESS_TIMEOUT_S, CTRL_PING_INTERVAL_S, FRAME_SAMPLES, JB_MAX_FRAMES, JB_START_FRAMES, MAX_GAIN_DB, SAMPLE_RATE
 from ..common.jitter_buffer import OpusPacketJitterBuffer
 from ..common.opus_codec import OpusDecoder, OpusEncoder
@@ -604,6 +605,25 @@ class IntercomClient:
         sr = int(SAMPLE_RATE)
         ch = 1
         blocksize = int(FRAME_SAMPLES)
+
+        try:
+            sd.check_input_settings(
+                device=self.config.input_device,
+                channels=ch,
+                dtype="float32",
+                samplerate=sr,
+            )
+        except Exception as e:
+            msg = friendly_audio_open_error(
+                e,
+                kind="input",
+                dev_info=dev_info,
+                device=self.config.input_device,
+                sr=sr,
+                ch=ch,
+            )
+            raise RuntimeError(msg) from e
+
         try:
             logger.debug(
                 "opening InputStream: dev={} ch={} blocksize={} latency=low sr={}",
@@ -622,7 +642,15 @@ class IntercomClient:
                 callback=self._in_callback,
             )
         except Exception as e:
-            raise RuntimeError(f"failed to open input stream: {e}") from e
+            msg = friendly_audio_open_error(
+                e,
+                kind="input",
+                dev_info=dev_info,
+                device=self.config.input_device,
+                sr=sr,
+                ch=ch,
+            )
+            raise RuntimeError(msg) from e
 
         with self._state_lock:
             self._in_channels = ch
@@ -651,6 +679,25 @@ class IntercomClient:
         sr = int(SAMPLE_RATE)
         ch = 1
         blocksize = int(FRAME_SAMPLES)
+
+        try:
+            sd.check_output_settings(
+                device=self.config.output_device,
+                channels=ch,
+                dtype="float32",
+                samplerate=sr,
+            )
+        except Exception as e:
+            msg = friendly_audio_open_error(
+                e,
+                kind="output",
+                dev_info=dev_info,
+                device=self.config.output_device,
+                sr=sr,
+                ch=ch,
+            )
+            raise RuntimeError(msg) from e
+
         try:
             logger.debug(
                 "opening OutputStream: dev={} ch={} blocksize={} latency=low sr={}",
@@ -669,7 +716,15 @@ class IntercomClient:
                 callback=self._out_callback,
             )
         except Exception as e:
-            raise RuntimeError(f"failed to open output stream: {e}") from e
+            msg = friendly_audio_open_error(
+                e,
+                kind="output",
+                dev_info=dev_info,
+                device=self.config.output_device,
+                sr=sr,
+                ch=ch,
+            )
+            raise RuntimeError(msg) from e
 
         with self._state_lock:
             self._out_channels = ch
