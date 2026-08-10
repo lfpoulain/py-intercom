@@ -1,44 +1,57 @@
 # py-intercom
- 
-Intercom audio temps réel sur LAN (architecture client/serveur).
- 
-- Audio: UDP (Opus)
-- Contrôle: TCP (JSON par ligne)
-- UI: PySide6
-- Return bus: capture audio locale côté serveur (ex: VB-Cable) mixée dans le flux des clients abonnés
 
-## État actuel (résumé)
+Intercom audio temps réel sur LAN pour les équipes de production live. Le produit comprend deux applications desktop PySide6 :
 
-- Bus **fixes** : Régie (bus 0, bidirectionnel), Plateau (bus 1), VMix (bus 2).
-- PTT côté client **par bus uniquement**.
-- Modes PTT : `PTT` / `Toggle` / `Always On` sur le client Python et le client web.
-- Raccourcis clavier globaux OS disponibles uniquement sur le client Python.
-- Écoute : toggle séparé pour **Régie** et **Return bus**.
-- Return bus configurable à chaud (activation + device d'entrée) pendant que le serveur tourne.
-- Modèle de gains cohérent entre client desktop et serveur : talk gain partagé, gain master par bus, gain par sortie physique serveur, gain de retour par client, volume casque local côté client desktop.
-- Outputs serveur configurables à chaud avec `device`, `bus`, `gain` et `VU` par sortie physique.
-- Ports audio/contrôle **fixes** (5000/5001).
+- le **serveur Régie**, qui reçoit, route et redistribue l'audio ;
+- le **client**, qui capture le micro et restitue un mix-minus au casque.
+
+Il n'existe plus de produit web ni de mode headless public. Les lanceurs démarrent toujours une interface graphique ; les variantes `debug` restent des GUI avec une console de diagnostic.
+
+## État actuel
+
+- Trois bus fixes issus d'un catalogue commun : **Régie** (0), **Plateau** (1) et **VMix** (2).
+- PTT par bus avec les modes `PTT`, `Toggle` et `Always On`, plus raccourcis clavier globaux côté client.
+- Routage centralisé dans un moteur pur, validation fail-closed des routes et mix-minus calculé avant la limitation de crête.
+- Return bus capturé sur une entrée audio locale du serveur et ajouté individuellement aux clients abonnés.
+- Sorties physiques serveur configurables par périphérique, bus et gain.
+- Audio Opus 48 kHz mono, 64 kbit/s, frames nominales de 10 ms.
+- Callbacks PortAudio alimentés par des rings PCM préalloués et bornés ; codec et sockets sont exécutés par des workers dédiés.
+- Transport audio **V2** sur UDP : header strict de 32 octets, token de session 64 bits et `bus_mask` attaché à chaque frame.
+- Contrôle **V2** sur TCP : messages JSON délimités par ligne, handshake obligatoire et limites de taille.
+- Jitter buffer Opus avec métadonnées alignées par séquence et PLC local fail-closed.
+- Reconnexion isolée par génération, ancien backlog UDP purgé et anciens tokens révoqués.
+- États opérateur explicites côté client : Déconnecté, Connexion, En ligne, Dégradé et Reconnexion. Le PTT est désarmé hors état En ligne.
+- Santé serveur séparée en moteur, contrôle, UDP et audio.
+- Presets JSON de schéma 2, migration des anciens presets, sauvegarde atomique avec `.bak` et écritures sérialisées avec debounce.
+- Logs persistants tournants pour les exécutables sans console.
+
+Le périmètre de bus reste volontairement fixe pour l'usage actuel. Le catalogue et le moteur de routage posent une base claire pour une future matrice multibus/multipiste, sans exposer aujourd'hui une configuration dynamique non qualifiée.
+
+## Sécurité de fonctionnement
+
+Une connexion TCP seule ne rend pas l'audio actif. Le client attend successivement `welcome`, un token valide et la configuration initiale. Le serveur n'accepte ensuite un datagramme audio que si la session de contrôle est vivante et si direction, token, identité, endpoint UDP, stream réservé et masque de bus correspondent à la session courante.
+
+Un paquet ancien, anonyme, mal formé ou provenant d'une autre adresse est rejeté et comptabilisé. Une frame PLC porte un masque de bus nul : une perte réseau ne peut donc pas ouvrir une route par accident. Le protocole V1 n'est pas accepté par les moteurs V2.
+
+Le token lie l'UDP à la session TCP mais ne constitue pas un chiffrement ni une authentification forte. py-intercom reste destiné à un LAN de confiance.
 
 ## Modèle de gains
 
 | Niveau | Portée | Rôle |
 |---|---|---|
-| `input_gain_db` | Client desktop + serveur | **Talk gain** partagé par client. Si le client desktop l'applique localement, le serveur le synchronise ; sinon le serveur l'applique lui-même. |
-| `AudioBus.gain_db` | Serveur | Gain master d'un bus (`Régie`, `Plateau`, `VMix`). |
-| `OutputState.gain_db` | Serveur | Gain master d'une sortie physique serveur. |
-| `return_gain_db` | Serveur, par client | Réglage d'écoute personnel du return bus reçu par ce client. |
-| `output_gain_db` | Client desktop | Volume casque local du client Python. |
-
-Dans la GUI serveur :
-
-- slider **Talk** par client
-- slider **Gain** par bus
-- slider **Gain** + **VU** par output physique
+| `input_gain_db` | Client + serveur | Talk gain partagé par client |
+| gain du bus | Serveur | Master de Régie, Plateau ou VMix |
+| gain de l'output | Serveur | Niveau d'une sortie physique |
+| `return_gain_db` | Serveur, par client | Niveau personnel du Return bus |
+| `output_gain_db` | Client | Volume casque local |
 
 ## Prérequis
 
-- Python 3.x
-- Windows: `bin/opus.dll` est fourni. Les scripts `run_server.py` / `run_client.py` gèrent explicitement son chargement, et `run_web.py` prépare le dossier `bin/` pour le chargement des DLL nécessaires.
+- Windows ;
+- Python 3.11 ou plus récent pour un lancement depuis les sources ;
+- `bin/opus.dll`, chargé par le bootstrap commun de `run_server.py` et `run_client.py`.
+
+L'origine de la DLL Opus actuellement embarquée n'est pas suffisamment traçable pour une redistribution publique. Voir [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) avant toute release externe.
 
 ## Installation
 
@@ -47,223 +60,88 @@ python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
 ```
 
-## Lancement rapide (scripts .bat)
+## Lancement
 
-Les scripts dans `lunch script/` créent automatiquement le virtualenv `.venv` et installent les dépendances si nécessaire.
+Les scripts de `lunch script/` créent le virtualenv et installent les dépendances au besoin.
 
 | Script | Description |
-|--------|-------------|
-| `lunch script\lancer_serveur_gui.bat` | Serveur en mode GUI (sans console) |
-| `lunch script\lancer_client_gui.bat` | Client en mode GUI (sans console) |
-| `lunch script\lancer_serveur_debug.bat` | Serveur en mode GUI + console avec logs debug |
-| `lunch script\lancer_client_debug.bat` | Client en mode GUI + console avec logs debug |
-| `lunch script\lancer_web.bat` | Client Web (HTTPS, auto-détection IP LAN) |
+|---|---|
+| `lancer_serveur_gui.bat` | GUI serveur sans console |
+| `lancer_client_gui.bat` | GUI client sans console |
+| `lancer_serveur_debug.bat` | GUI serveur avec console de diagnostic |
+| `lancer_client_debug.bat` | GUI client avec console de diagnostic |
 
-## Lancement manuel
-
-### Serveur
+Lancement manuel :
 
 ```powershell
-.\.venv\Scripts\python run_server.py --gui
+.\.venv\Scripts\python run_server.py
+.\.venv\Scripts\python run_client.py
 ```
 
-Activer les logs debug:
+Les seules options publiques sont `--debug` et `--minimized` :
 
 ```powershell
-.\.venv\Scripts\python run_server.py --gui --debug
+.\.venv\Scripts\python run_server.py --debug --minimized
+.\.venv\Scripts\python run_client.py --debug --minimized
 ```
 
-Mode CLI (sans GUI) supporté pour l'usage serveur headless (`run_server.py` sans `--gui`).
+## Build Windows
 
-### Client
-
-```powershell
-.\.venv\Scripts\python run_client.py --gui
-```
-
-Activer les logs debug:
-
-```powershell
-.\.venv\Scripts\python run_client.py --gui --debug
-```
-
-## Build des exécutables
-
-Le script `exe scripts\build_exe.ps1` compile le client et le serveur en `.exe` via PyInstaller (mode "onefile").
-
-Prérequis: avoir déjà un virtualenv `.venv` et les dépendances installées (voir section Installation).
+Le build utilise une version verrouillée de PyInstaller et produit deux exécutables `onefile` :
 
 ```powershell
 & '.\exe scripts\build_exe.ps1'
 ```
 
-Avec nettoyage des dossiers `build/` et `dist/` avant compilation:
+L'option `-Clean` supprime d'abord les dossiers `build/` et `dist/` :
 
 ```powershell
 & '.\exe scripts\build_exe.ps1' -Clean
 ```
 
-Les exécutables sont générés dans `dist/`.
-
-- `dist\client.exe`
-- `dist\server.exe`
-
-## CI GitHub / Releases
-
-Un workflow GitHub Actions est fourni dans `.github/workflows/windows-release.yml`.
-
-- à chaque `push`, il build les `.exe` Windows
-- il crée un tag de build unique
-- il publie une GitHub Release avec :
-  - `client.exe`
-  - `server.exe`
-  - une archive `.zip` contenant les deux
-
-Par défaut :
-
-- les builds de `main` / `master` sortent en release normale
-- les autres branches sortent en `pre-release`
-
-Note: en mode "onefile", les DLL (dont `opus.dll`) sont extraites au lancement dans un dossier temporaire (`%TEMP%\_MEI...`).
-
-Au double-clic, les exécutables démarrent l'interface (équivalent `--gui`).
-
-En cas de crash au démarrage (mode windowed), un fichier est écrit ici:
-
-- `~\py-intercom\client_crash.txt`
-- `~\py-intercom\server_crash.txt`
-
-### Client Web (Plateau)
-
-Pour les personnes sur plateau sans le client Python (PC, tablette Android, iPad) :
-
-```powershell
-# Défaut : HTTPS adhoc, port 8443, IP LAN auto-détectée
-.\.venv\Scripts\python run_web.py
-
-# Personnalisé
-.\.venv\Scripts\python run_web.py --host 0.0.0.0 --port 8000 --ssl-adhoc --debug
-```
-
-Ouvrir `https://<ip>:8443/` dans un navigateur.
-
-Options : `--host`, `--port`, `--debug`, `--ssl-adhoc`, `--ssl-cert`, `--ssl-key`.
-
-> **Android / iOS** : HTTPS est obligatoire pour l'accès micro. Le certificat auto-signé (`--ssl-adhoc`) déclenche un avertissement navigateur à accepter une fois (Avancé → Continuer). Les serveurs intercom sont détectés automatiquement via le dropdown "Détection auto".
-
-### Déploiement Docker du serveur web
-
-La solution recommandée pour un déploiement simple et reproductible est :
-
-- une **image dédiée** `py-intercom-web`
-- publiée automatiquement sur **GHCR** via `.github/workflows/web-docker-image.yml`
-- déployée via `docker compose`
-- avec **HTTPS géré par un reverse proxy** si tu exposes le service publiquement
-
-- Le bridge web n'a **pas besoin d'accès aux périphériques audio** du host. Il a seulement besoin de :
-
-- servir l'UI web
-- ouvrir des sockets UDP/TCP vers le serveur intercom
-- éventuellement écouter l'auto-discovery UDP sur le port `5002`
-
-- Pour **Unraid avec Nginx reverse proxy**, la recommandation est :
-
-- conteneur en **mode bridge**
-- `PY_INTERCOM_WEB_PORT=8741` par défaut
-- `PY_INTERCOM_DISCOVERY_PORT=5002` par défaut
-- `PY_INTERCOM_WEB_SSL_MODE=plain`
-
-#### Démarrage simple
-
-```powershell
-docker compose up -d --build
-```
-
-Par défaut, `docker-compose.yml` expose le bridge web sur le port `8741`.
-
-#### Auto-discovery LAN
-
-En conteneur Docker classique, la réception du broadcast UDP LAN peut dépendre du réseau Docker et de l'OS hôte.
-
-Si tu veux que la détection automatique fonctionne, il faut en pratique garder le **port publié UDP à `5002`** côté host.
-
-#### HTTPS
-
-Deux modes sont supportés via variables d'environnement :
-
-- `PY_INTERCOM_WEB_SSL_MODE=plain` : HTTP simple dans le conteneur, recommandé derrière reverse proxy
-- `PY_INTERCOM_WEB_SSL_MODE=adhoc` : HTTPS auto-signé dans le conteneur
-
-Avec **Nginx reverse proxy**, il faut utiliser **`plain`**.
-
-`adhoc` peut fonctionner seulement si Nginx parle en **HTTPS vers le conteneur** et accepte le certificat auto-signé, mais c'est inutilement plus compliqué.
-
-En pratique :
-
-```powershell
-$env:PY_INTERCOM_WEB_SSL_MODE='plain'
-docker compose up -d --build
-```
-
-L'image Docker dédiée est définie dans `Dockerfile.web` et ses dépendances minimales dans `requirements-web.txt`.
+Résultats : `dist\client.exe` et `dist\server.exe`, accompagnés de `LICENSE`, `README.md` et `THIRD_PARTY_NOTICES.md`. Le workflow Windows compile les sources et exécute les tests avant le build et la création de l'archive.
 
 ## Ports
 
-- Audio (UDP): `5000` (fixe)
-- Contrôle (TCP): `5001` (fixe)
-- Discovery (UDP broadcast): `5002` (fixe)
-- Client Web Docker: `8741` (par défaut)
-- Client Web natif (`run_web.py`): `8443` (par défaut)
+| Service | Transport | Port par défaut |
+|---|---|---:|
+| Audio Opus V2 | UDP | 5000 |
+| Contrôle V2 | TCP | 5001 |
+| Découverte LAN | UDP broadcast | 5002 |
 
-## Presets
+## Presets et diagnostics
 
-- Serveur: `~\py-intercom\server_preset.json`
-  - `buses` : `gain_db`, `feed_to_regie`
-  - `outputs` : `device`, `bus_id`, `gain_db`
-  - `clients` : `input_gain_db` persisté par `client_uuid`
-- Client: `~\py-intercom\client_preset.json`
-  - gains locaux : `input_gain_db`, `output_gain_db`
-  - écoute retour : `return_gain_db`, `listen_return_bus`, `listen_regie`
+- Serveur : `~\py-intercom\server_preset.json`
+- Client : `~\py-intercom\client_preset.json`
+- Sauvegarde précédente : même chemin avec le suffixe `.bak`
+- Logs : `%LOCALAPPDATA%\py-intercom\logs\server.log` et `client.log`
+- Rapports de crash : `~\py-intercom\server_crash.txt` et `client_crash.txt`
 
-## Aide
-
-Lister les devices audio:
-
-```powershell
-.\.venv\Scripts\python run_client.py --list-devices
-.\.venv\Scripts\python run_server.py --list-devices
-```
-
-## Périphériques Bluetooth
-
-py-intercom utilise un pipeline audio fixe **48 kHz mono** (Opus 64 kbps, frames 10 ms). Cette contrainte est volontaire pour garantir une qualité broadcast et une faible latence.
-
-Conséquence : un casque Bluetooth classique **ne peut pas** servir simultanément de micro et de sortie. Dès que Windows ouvre le micro du casque, il bascule tout l'appareil en profil **HFP** (mono 8/16 kHz), ce qui fait échouer l'ouverture de la sortie 48 kHz.
-
-Quand cela se produit, l'application affiche maintenant un message clair indiquant :
-
-- la cause (HFP vs A2DP côté Windows)
-- les solutions possibles (casque USB/jack, BT en sortie + micro séparé, ou désactivation du service « Téléphonie mains libres »)
-
-Pour un duplex HQ sur le **même** casque Bluetooth, il faut un casque **LE Audio (LC3)** + un PC avec chipset BT compatible LE Audio (Intel AX211/BE200, Qualcomm FastConnect 7800…) sous Windows 11 24H2 ou plus récent. Sans cela, **un casque USB ou jack reste la solution recommandée** pour l'intercom.
+Les logs tournent à 10 Mo, sont conservés 14 jours et les archives sont compressées. Si `%LOCALAPPDATA%` n'est pas disponible, les logs utilisent `~\py-intercom\logs`.
 
 ## Tests
 
-Une suite pytest minimale est fournie dans `tests/`. Elle couvre les modules les plus critiques (packets UDP, conversions audio, jitter buffer / PLC, discovery LAN).
-
 ```powershell
-.\.venv\Scripts\python -m pip install pytest
+.\.venv\Scripts\python -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python -m pytest tests -q
 ```
 
-Aucune dépendance audio physique n'est requise pour ces tests.
+La suite couvre notamment le protocole V2, les tokens obsolètes, les routes par frame, le mix-minus, les jitter buffers et PLC, les durées Opus 2,5/5/10/20 ms, les rings, 100 générations réseau simulées, les presets, l'identité, les états GUI et le bootstrap. Elle ne nécessite pas de périphérique audio physique.
 
-## Licence
+La qualification n'est toutefois pas terminée sur un banc matériel représentatif : cartes son de production, Wi-Fi dégradé, charge CPU, 2/5/10 clients et endurance d'un live complet restent à mesurer. Le jitter adaptatif, la correction de dérive d'horloge et le FEC Opus ne sont pas implémentés.
 
-Ce projet est distribué sous licence **Creative Commons Attribution - NonCommercial - NoDerivatives 4.0 International** (`CC BY-NC-ND 4.0`).
+## Bluetooth
 
-Voir le fichier `LICENSE` ou <https://creativecommons.org/licenses/by-nc-nd/4.0/>.
+Le pipeline intercom reste en 48 kHz mono. Sous Windows, un casque Bluetooth classique expose généralement une sortie stéréo A2DP et une paire micro/sortie mains-libres HFP. Pour utiliser le micro **et** le casque ensemble, sélectionner les deux endpoints HFP via une API Windows partagée que py-intercom a validée à 48 kHz ; ne pas associer la sortie A2DP au micro HFP du même casque.
 
-## Documentation
+Les sélecteurs affichent le nom, l'API audio, l'index et la fréquence native. L'option « Afficher tous les périphériques » est mémorisée afin de conserver une variante DirectSound/MME fonctionnelle. Les endpoints WDM-KS limités nativement à 8/16/44,1 kHz restent filtrés tant qu'un véritable adaptateur de fréquence n'est pas intégré.
 
-Voir `playbook.md` pour le détail du protocole, des presets, du modèle de gains, des VU mètres et du workflow.
+Pour un live critique, préférer un casque USB/jack. Pour conserver la qualité stéréo A2DP, utiliser un microphone séparé.
+
+## Documentation et licence
+
+- [playbook.md](playbook.md) : architecture, protocoles, exécution, exploitation et dépannage.
+- [roadmap-v2.md](roadmap-v2.md) : décisions, qualification et journal des améliorations à tenir à jour.
+- [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) : dépendances, licences et provenance du runtime natif.
+
+Le projet est distribué sous licence **CC BY-NC-ND 4.0**. Voir [LICENSE](LICENSE).

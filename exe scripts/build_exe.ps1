@@ -13,10 +13,12 @@ if (-not (Test-Path $venvPython)) {
   $venvDir = Join-Path $projectRoot '.venv'
 
   $bootstrapPython = $null
+  $bootstrapArgs = @()
   if (Get-Command py -ErrorAction SilentlyContinue) {
-    $bootstrapPython = @('py', '-3')
+    $bootstrapPython = 'py'
+    $bootstrapArgs = @('-3')
   } elseif (Get-Command python -ErrorAction SilentlyContinue) {
-    $bootstrapPython = @('python')
+    $bootstrapPython = 'python'
   }
 
   if (-not $bootstrapPython) {
@@ -24,20 +26,38 @@ if (-not (Test-Path $venvPython)) {
   }
 
   Write-Host "Creating virtualenv at $venvDir..."
-  & $bootstrapPython[0] @($bootstrapPython[1..($bootstrapPython.Count-1)]) -m venv $venvDir
+  & $bootstrapPython @bootstrapArgs -m venv $venvDir
 
   if (-not (Test-Path $venvPython)) {
     throw "Virtualenv creation failed: $venvPython not found"
   }
 }
 
+& $venvPython -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
+if ($LASTEXITCODE -ne 0) {
+  throw "The build virtualenv must use Python 3.11 or newer: $venvPython"
+}
+
 $requirementsFile = Join-Path $projectRoot 'requirements.txt'
+$buildRequirementsFile = Join-Path $projectRoot 'requirements-build.txt'
 
 & $venvPython -m pip install --upgrade pip
+if ($LASTEXITCODE -ne 0) {
+  throw "pip upgrade failed (exit code $LASTEXITCODE)"
+}
 if (Test-Path $requirementsFile) {
   & $venvPython -m pip install -r $requirementsFile
+  if ($LASTEXITCODE -ne 0) {
+    throw "Runtime dependency installation failed (exit code $LASTEXITCODE)"
+  }
 }
-& $venvPython -m pip install --upgrade pyinstaller
+if (-not (Test-Path $buildRequirementsFile)) {
+  throw "Build requirements not found at $buildRequirementsFile"
+}
+& $venvPython -m pip install -r $buildRequirementsFile
+if ($LASTEXITCODE -ne 0) {
+  throw "Build dependency installation failed (exit code $LASTEXITCODE)"
+}
 
 if ($Clean) {
   $buildDir = Join-Path $projectRoot 'build'
@@ -98,6 +118,17 @@ if (-not (Test-Path $clientExe)) {
 }
 if (-not (Test-Path $serverExe)) {
   throw "server.exe not found at $serverExe"
+}
+
+# Keep redistribution notices beside local build artifacts. The release
+# workflow packages the same files in its archive.
+$distDir = Join-Path $projectRoot 'dist'
+foreach ($noticeName in @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'README.md')) {
+  $noticeSource = Join-Path $projectRoot $noticeName
+  if (-not (Test-Path $noticeSource)) {
+    throw "Required distribution notice not found at $noticeSource"
+  }
+  Copy-Item -LiteralPath $noticeSource -Destination (Join-Path $distDir $noticeName) -Force
 }
 Write-Host $clientExe
 Write-Host $serverExe

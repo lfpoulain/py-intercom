@@ -1,9 +1,103 @@
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
+
 from PySide6 import QtCore, QtGui, QtWidgets
+
+
+_SEMANTIC_STATUS_COLORS = {
+    "online": "#2eb67d",
+    "healthy": "#2eb67d",
+    "connecting": "#21b0a6",
+    "degraded": "#f2b632",
+    "error": "#e25d5d",
+    "offline": "#6f7b8e",
+    "unknown": "#6f7b8e",
+}
+
+_UI_FONTS_REGISTERED = False
+
+
+def _ensure_ui_fonts(app: QtWidgets.QApplication) -> str:
+    """Return a usable UI family, including under Qt's offscreen backend.
+
+    On Windows the offscreen platform plugin may expose an empty system font
+    database. Registering the same Segoe UI files used by the desktop makes
+    screenshot-based QA representative instead of rendering every glyph as a
+    tofu square. Normal desktop runs simply reuse the already-known family.
+    """
+
+    global _UI_FONTS_REGISTERED
+    families = set(QtGui.QFontDatabase.families())
+    if (
+        not families
+        and sys.platform == "win32"
+        and not _UI_FONTS_REGISTERED
+    ):
+        windows_dir = Path(os.environ.get("WINDIR") or "C:/Windows")
+        fonts_dir = windows_dir / "Fonts"
+        for filename in (
+            "segoeui.ttf",
+            "seguisb.ttf",
+            "segoeuib.ttf",
+            "seguisym.ttf",
+            "seguiemj.ttf",
+        ):
+            font_path = fonts_dir / filename
+            if font_path.is_file():
+                QtGui.QFontDatabase.addApplicationFont(str(font_path))
+        families = set(QtGui.QFontDatabase.families())
+        _UI_FONTS_REGISTERED = True
+
+    if "Segoe UI" in families:
+        family = "Segoe UI"
+    elif "Noto Sans" in families:
+        family = "Noto Sans"
+    else:
+        family = str(app.font().family() or "Sans Serif")
+    app.setFont(QtGui.QFont(family, 10))
+    return family
+
+
+def set_status_label(
+    label: QtWidgets.QLabel,
+    text: str,
+    state: str,
+    *,
+    detail: str = "",
+) -> None:
+    """Apply a semantic, accessible status to a label.
+
+    The visible text remains the primary signal: colour is deliberately only a
+    secondary cue so an operator can understand the state at a glance even
+    with impaired colour perception.
+    """
+
+    semantic_state = str(state or "unknown").lower()
+    if semantic_state not in _SEMANTIC_STATUS_COLORS:
+        semantic_state = "unknown"
+    visible_text = str(text or "")
+    previous_state = str(label.property("status") or "")
+    changed = previous_state != semantic_state or label.text() != visible_text
+    label.setText(visible_text)
+    label.setProperty("status", semantic_state)
+    label.setAccessibleName(f"État : {visible_text}")
+    label.setAccessibleDescription(str(detail or visible_text))
+    label.setToolTip(str(detail or visible_text))
+
+    # Dynamic Qt properties do not automatically trigger a style refresh.
+    if changed:
+        style = label.style()
+        if style is not None:
+            style.unpolish(label)
+            style.polish(label)
+        label.update()
 
 def apply_theme(app: QtWidgets.QApplication) -> None:
     """Apply project-native Qt theme (no external theme engine)."""
+    ui_font_family = _ensure_ui_fonts(app)
     bg = "#12171f"
     surface = "#1b2330"
     surface_alt = "#222c3b"
@@ -53,7 +147,7 @@ def apply_theme(app: QtWidgets.QApplication) -> None:
 
     patch = f"""
         QWidget {{
-            font-family: "Segoe UI", "Noto Sans", sans-serif;
+            font-family: "{ui_font_family}", "Segoe UI Symbol";
             font-size: 13px;
             color: {text};
         }}
@@ -256,6 +350,44 @@ def apply_theme(app: QtWidgets.QApplication) -> None:
         QStatusBar QLabel {{
             padding: 0 6px;
         }}
+        QLabel[status="online"], QLabel[status="healthy"] {{
+            color: {success};
+            font-weight: 600;
+        }}
+        QLabel[status="connecting"] {{
+            color: {accent_hover};
+            font-weight: 600;
+        }}
+        QLabel[status="degraded"] {{
+            color: {warning};
+            font-weight: 600;
+        }}
+        QLabel[status="error"] {{
+            color: {danger};
+            font-weight: 600;
+        }}
+        QLabel[status="offline"], QLabel[status="unknown"] {{
+            color: {muted};
+            font-weight: 500;
+        }}
+        QLabel[role="statusBanner"] {{
+            background: {surface_alt};
+            border: 1px solid {border};
+            border-radius: 4px;
+            padding: 5px 10px;
+        }}
+        QLabel[role="statusBanner"][status="online"] {{
+            border-color: {success};
+        }}
+        QLabel[role="statusBanner"][status="connecting"] {{
+            border-color: {accent};
+        }}
+        QLabel[role="statusBanner"][status="degraded"] {{
+            border-color: {warning};
+        }}
+        QLabel[role="statusBanner"][status="error"] {{
+            border-color: {danger};
+        }}
 
         /* --- Splitter --- */
         QSplitter::handle {{
@@ -316,27 +448,46 @@ def centered_checkbox(cb: QtWidgets.QCheckBox) -> QtWidgets.QWidget:
 # Status indicator (colored dot: green=online, red=offline)
 # ---------------------------------------------------------------------------
 
-_STATUS_ONLINE = QtGui.QColor(76, 175, 80)
-_STATUS_OFFLINE = QtGui.QColor(198, 40, 40)
+_STATUS_COLORS = {
+    "online": QtGui.QColor(46, 182, 125),
+    "healthy": QtGui.QColor(46, 182, 125),
+    "connecting": QtGui.QColor(33, 176, 166),
+    "degraded": QtGui.QColor(242, 182, 50),
+    "error": QtGui.QColor(226, 93, 93),
+    "offline": QtGui.QColor(111, 123, 142),
+    "unknown": QtGui.QColor(111, 123, 142),
+}
 
 
 class StatusIndicator(QtWidgets.QWidget):
-    """Small colored circle indicating online/offline state."""
+    """Small semantic status dot with an accessible textual description."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self._online: bool = True
+        self._state: str = "unknown"
         self.setFixedSize(20, 20)
+        self.setAccessibleName("État inconnu")
+        self.setToolTip("État inconnu")
 
     def set_online(self, online: bool) -> None:
-        if self._online != online:
-            self._online = online
+        self.set_state("online" if online else "offline")
+
+    def set_state(self, state: str, *, description: str = "") -> None:
+        semantic_state = str(state or "unknown").lower()
+        if semantic_state not in _STATUS_COLORS:
+            semantic_state = "unknown"
+        if description:
+            self.setAccessibleName(str(description))
+            self.setAccessibleDescription(str(description))
+            self.setToolTip(str(description))
+        if self._state != semantic_state:
+            self._state = semantic_state
             self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        color = _STATUS_ONLINE if self._online else _STATUS_OFFLINE
+        color = _STATUS_COLORS.get(self._state, _STATUS_COLORS["unknown"])
 
         # Subtle glow
         glow = QtGui.QColor(color)

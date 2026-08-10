@@ -1,4 +1,13 @@
-from py_intercom.common.jitter_buffer import OpusPacketJitterBuffer, _seq_distance
+from dataclasses import FrozenInstanceError
+
+import pytest
+
+from py_intercom.common.jitter_buffer import (
+    FAIL_CLOSED_METADATA,
+    JitterFrameMetadata,
+    OpusPacketJitterBuffer,
+    _seq_distance,
+)
 
 
 def _payload(seq: int) -> bytes:
@@ -88,3 +97,115 @@ def test_max_frames_caps_buffer():
     for s in range(20):
         jb.push(s, _payload(s))
     assert jb.buffered_frames <= 3
+
+
+def test_pop_frame_preserves_immutable_metadata_atomically():
+    jb = OpusPacketJitterBuffer(start_frames=1, max_frames=5)
+    metadata = JitterFrameMetadata(
+        session_token=123,
+        client_id=7,
+        timestamp_ms=456,
+        stream_id=0,
+        bus_mask=0b101,
+        flags=1,
+    )
+    jb.push(9, b"packet", metadata)
+
+    frame = jb.pop_frame()
+    assert frame is not None
+    assert frame.sequence_number == 9
+    assert frame.payload == b"packet"
+    assert frame.metadata is metadata
+    assert frame.metadata.bus_mask == 0b101
+    assert frame.concealed is False
+    with pytest.raises(FrozenInstanceError):
+        frame.metadata.bus_mask = 0
+    with pytest.raises(FrozenInstanceError):
+        frame.payload = b"changed"
+
+
+def test_legacy_pop_remains_bytes_only_and_metadata_defaults_fail_closed():
+    jb = OpusPacketJitterBuffer(start_frames=1, max_frames=5)
+    jb.push(1, bytearray(b"legacy"))
+    assert jb.pop() == b"legacy"
+
+    jb.push(2, b"next")
+    frame = jb.pop_frame()
+    assert frame is not None
+    assert frame.metadata is FAIL_CLOSED_METADATA
+    assert frame.metadata.bus_mask == 0
+
+
+def test_plc_frame_has_expected_sequence_and_fail_closed_metadata():
+    jb = OpusPacketJitterBuffer(start_frames=2, max_frames=10)
+    metadata = JitterFrameMetadata(session_token=999, client_id=3, bus_mask=0b111, flags=1)
+    jb.push(10, b"p10", metadata)
+    jb.push(11, b"p11", metadata)
+    assert jb.pop_frame().sequence_number == 10
+    assert jb.pop_frame().sequence_number == 11
+    jb.push(13, b"p13", metadata)
+    jb.push(14, b"p14", metadata)
+
+    concealed = jb.pop_frame()
+    assert concealed is not None
+    assert concealed.sequence_number == 12
+    assert concealed.payload == b""
+    assert concealed.concealed is True
+    assert concealed.metadata is FAIL_CLOSED_METADATA
+    assert concealed.metadata.bus_mask == 0
+    assert concealed.metadata.session_token == 0
+
+
+def test_wraparound_playout_keeps_payload_and_metadata_order():
+    jb = OpusPacketJitterBuffer(start_frames=2, max_frames=5)
+    before_wrap = JitterFrameMetadata(timestamp_ms=1, bus_mask=0b001)
+    after_wrap = JitterFrameMetadata(timestamp_ms=2, bus_mask=0b010)
+    jb.push(0xFFFFFFFF, b"before", before_wrap)
+    jb.push(0, b"after", after_wrap)
+
+    first = jb.pop_frame()
+    second = jb.pop_frame()
+    assert first is not None and second is not None
+    assert (first.sequence_number, first.payload, first.metadata) == (
+        0xFFFFFFFF,
+        b"before",
+        before_wrap,
+    )
+    assert (second.sequence_number, second.payload, second.metadata) == (
+        0,
+        b"after",
+        after_wrap,
+    )
+    assert jb.expected_seq == 1
+
+
+def test_overflow_drops_oldest_frame_without_detaching_metadata():
+    jb = OpusPacketJitterBuffer(start_frames=1, max_frames=3)
+    jb.push(0, b"initial")
+    assert jb.pop_frame().sequence_number == 0
+    for sequence in range(1, 5):
+        jb.push(
+            sequence,
+            f"payload-{sequence}".encode(),
+            JitterFrameMetadata(timestamp_ms=sequence, bus_mask=1 << sequence),
+        )
+
+    assert jb.buffered_frames == 3
+    dropped = jb.pop_frame()
+    assert dropped is not None
+    assert dropped.sequence_number == 1
+    assert dropped.concealed is True
+    assert dropped.metadata is FAIL_CLOSED_METADATA
+    for expected_sequence in (2, 3, 4):
+        frame = jb.pop_frame()
+        assert frame is not None
+        assert frame.sequence_number == expected_sequence
+        assert frame.payload == f"payload-{expected_sequence}".encode()
+        assert frame.metadata.timestamp_ms == expected_sequence
+        assert frame.metadata.bus_mask == 1 << expected_sequence
+
+
+def test_push_rejects_mutable_or_untyped_metadata():
+    jb = OpusPacketJitterBuffer(start_frames=1, max_frames=3)
+    with pytest.raises(TypeError, match="JitterFrameMetadata"):
+        jb.push(1, b"payload", {"bus_mask": 1})

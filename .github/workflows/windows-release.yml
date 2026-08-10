@@ -2,6 +2,7 @@ name: Build Windows Release
 
 on:
   push:
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -24,6 +25,22 @@ jobs:
         with:
           python-version: '3.13'
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            requirements-build.txt
+
+      - name: Install test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Validate sources
+        shell: pwsh
+        run: |
+          python -m compileall -q src run_client.py run_server.py
+          python -m pytest tests -q
 
       - name: Build executables
         shell: pwsh
@@ -53,7 +70,14 @@ jobs:
       - name: Package executables
         shell: pwsh
         run: |
-          Compress-Archive -Path '.\dist\client.exe', '.\dist\server.exe' -DestinationPath (Join-Path '.\dist' '${{ steps.meta.outputs.zip_name }}') -Force
+          $releaseFiles = @(
+            '.\dist\client.exe',
+            '.\dist\server.exe',
+            '.\dist\LICENSE',
+            '.\dist\THIRD_PARTY_NOTICES.md',
+            '.\dist\README.md'
+          )
+          Compress-Archive -Path $releaseFiles -DestinationPath (Join-Path '.\dist' '${{ steps.meta.outputs.zip_name }}') -Force
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
@@ -62,9 +86,15 @@ jobs:
           path: |
             dist/client.exe
             dist/server.exe
+            dist/LICENSE
+            dist/THIRD_PARTY_NOTICES.md
+            dist/README.md
             dist/${{ steps.meta.outputs.zip_name }}
 
       - name: Publish GitHub release
+        # Public publishing is opt-in while the bundled opus.dll provenance is
+        # still recorded as a release blocker in THIRD_PARTY_NOTICES.md.
+        if: vars.PY_INTERCOM_ENABLE_PUBLIC_RELEASE == 'true' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/'))
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
@@ -76,4 +106,6 @@ jobs:
           files: |
             dist/client.exe
             dist/server.exe
+            dist/LICENSE
+            dist/THIRD_PARTY_NOTICES.md
             dist/${{ steps.meta.outputs.zip_name }}

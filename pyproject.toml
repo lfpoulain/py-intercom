@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "py-intercom"
+version = "2.0.0.dev0"
+description = "Low-latency desktop intercom for live production teams"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "CC-BY-NC-ND-4.0"
+dependencies = [
+    "loguru>=0.7,<1",
+    "numpy>=2,<3",
+    "opuslib>=3,<4",
+    "pynput>=1.7,<2",
+    "PySide6>=6.8,<7",
+    "sounddevice>=0.5,<1",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+py_intercom = ["img/*.ico", "img/*.png"]

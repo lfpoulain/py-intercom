@@ -48,6 +48,36 @@ def test_handle_wrong_type_ignored():
     assert listener.get_servers() == {}
 
 
+def test_handle_malformed_beacon_fields_ignored():
+    listener = DiscoveryListener()
+    bad = json.dumps(
+        {
+            "type": _BEACON_TYPE,
+            "server_name": "broken",
+            "audio_port": "not-a-port",
+            "control_port": AUDIO_UDP_PORT + CONTROL_PORT_OFFSET,
+            "version": _BEACON_VERSION,
+        }
+    ).encode("utf-8")
+    listener._handle_beacon(bad, "10.0.0.8")
+    assert listener.get_servers() == {}
+
+
+def test_handle_out_of_range_beacon_ports_ignored():
+    listener = DiscoveryListener()
+    bad = json.dumps(
+        {
+            "type": _BEACON_TYPE,
+            "server_name": "broken",
+            "audio_port": 70000,
+            "control_port": AUDIO_UDP_PORT + CONTROL_PORT_OFFSET,
+            "version": _BEACON_VERSION,
+        }
+    ).encode("utf-8")
+    listener._handle_beacon(bad, "10.0.0.9")
+    assert listener.get_servers() == {}
+
+
 def test_rename_triggers_update_callback():
     received = []
     listener = DiscoveryListener(on_update=lambda servers: received.append(dict(servers)))

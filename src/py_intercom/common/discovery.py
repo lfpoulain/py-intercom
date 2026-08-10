@@ -201,10 +201,18 @@ class DiscoveryListener:
         if not isinstance(msg, dict) or msg.get("type") != _BEACON_TYPE:
             return
 
-        server_name = str(msg.get("server_name", ""))
-        audio_port = int(msg.get("audio_port", AUDIO_UDP_PORT))
-        control_port = int(msg.get("control_port", audio_port + CONTROL_PORT_OFFSET))
-        version = int(msg.get("version", 0))
+        try:
+            server_name = str(msg.get("server_name", "")).strip() or "py-intercom"
+            audio_port = int(msg.get("audio_port", AUDIO_UDP_PORT))
+            control_port = int(msg.get("control_port", audio_port + CONTROL_PORT_OFFSET))
+            version = int(msg.get("version", 0))
+        except Exception:
+            return
+
+        if not (1 <= int(audio_port) <= 65535 and 1 <= int(control_port) <= 65535):
+            return
+        if int(version) <= 0:
+            return
 
         key = f"{sender_ip}:{audio_port}"
         entry = DiscoveredServer(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Final, Iterable, Optional
 
 import threading
 
@@ -20,6 +20,43 @@ class JitterStats:
     resets: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class JitterFrameMetadata:
+    """Wire metadata kept atomically with an Opus payload.
+
+    Zero values are intentional: they are the fail-closed metadata used by
+    legacy pushes and locally generated packet-loss concealment frames.
+    """
+
+    session_token: int = 0
+    client_id: int = 0
+    timestamp_ms: int = 0
+    stream_id: int = 0
+    bus_mask: int = 0
+    flags: int = 0
+
+
+FAIL_CLOSED_METADATA: Final[JitterFrameMetadata] = JitterFrameMetadata()
+
+
+@dataclass(frozen=True, slots=True)
+class JitterFrame:
+    sequence_number: int
+    payload: bytes
+    metadata: JitterFrameMetadata = FAIL_CLOSED_METADATA
+    concealed: bool = False
+
+
+def _sequence_order(keys: Iterable[int]) -> list[int]:
+    """Return sequence numbers in wrap-safe order for a bounded window."""
+
+    ordered = [int(key) & 0xFFFFFFFF for key in keys]
+    if len(ordered) < 2:
+        return ordered
+    anchor = int(ordered[0])
+    return sorted(ordered, key=lambda key: _seq_distance(int(key), anchor))
+
+
 class OpusPacketJitterBuffer:
     def __init__(
         self,
@@ -30,7 +67,7 @@ class OpusPacketJitterBuffer:
         self.start_frames = int(max(1, start_frames))
         self.max_frames = int(max(self.start_frames + 1, max_frames))
 
-        self._buf: Dict[int, bytes] = {}
+        self._buf: Dict[int, JitterFrame] = {}
         self._expected_seq: Optional[int] = None
         self._started: bool = False
         self.stats = JitterStats()
@@ -53,8 +90,16 @@ class OpusPacketJitterBuffer:
             self._started = False
             self.stats.resets += 1
 
-    def push(self, seq: int, payload: bytes) -> None:
+    def push(
+        self,
+        seq: int,
+        payload: bytes,
+        metadata: Optional[JitterFrameMetadata] = None,
+    ) -> None:
         s = int(seq) & 0xFFFFFFFF
+        if metadata is not None and not isinstance(metadata, JitterFrameMetadata):
+            raise TypeError("metadata must be a JitterFrameMetadata instance")
+        frame_metadata = FAIL_CLOSED_METADATA if metadata is None else metadata
         with self._lock:
             self.stats.received += 1
 
@@ -73,13 +118,18 @@ class OpusPacketJitterBuffer:
                 return
 
             try:
-                self._buf[s] = bytes(payload)
+                encoded_payload = memoryview(payload).tobytes()
             except Exception:
                 return
+            self._buf[s] = JitterFrame(
+                sequence_number=s,
+                payload=encoded_payload,
+                metadata=frame_metadata,
+            )
 
             if len(self._buf) > int(self.max_frames):
                 if self._expected_seq is None:
-                    key = min(self._buf.keys())
+                    key = _sequence_order(self._buf.keys())[0]
                     del self._buf[key]
                 else:
                     exp = int(self._expected_seq)
@@ -95,15 +145,23 @@ class OpusPacketJitterBuffer:
                         _oldest_dist, oldest_key = min(ahead, key=lambda t: int(t[0]))
                         del self._buf[int(oldest_key)]
                     else:
-                        key = min(self._buf.keys())
+                        key = _sequence_order(self._buf.keys())[0]
                         del self._buf[int(key)]
 
     def pop(self) -> Optional[bytes]:
+        """Return only payload bytes for compatibility with existing callers."""
+
+        frame = self.pop_frame()
+        return None if frame is None else frame.payload
+
+    def pop_frame(self) -> Optional[JitterFrame]:
+        """Return a payload and its immutable, sequence-aligned metadata."""
+
         with self._lock:
             if not self._started:
                 if len(self._buf) < int(self.start_frames):
                     return None
-                keys_sorted = sorted(self._buf.keys())
+                keys_sorted = _sequence_order(self._buf.keys())
                 # Realtime startup: do not begin from the oldest enqueued packet.
                 # Keep only a minimal safety window before playout starts.
                 start_idx = max(0, int(len(keys_sorted) - int(self.start_frames)))
@@ -119,10 +177,10 @@ class OpusPacketJitterBuffer:
             exp = int(self._expected_seq) & 0xFFFFFFFF
 
             if exp in self._buf:
-                out = self._buf.pop(exp)
+                frame = self._buf.pop(exp)
                 self._expected_seq = (exp + 1) & 0xFFFFFFFF
                 self.stats.played += 1
-                return out
+                return frame
 
             if len(self._buf) == 0:
                 return None
@@ -141,11 +199,11 @@ class OpusPacketJitterBuffer:
 
             if nearest_dist > int(self.start_frames):
                 # Large gap: fast-forward to nearest available frame
-                out = self._buf.pop(nearest_key)
+                frame = self._buf.pop(nearest_key)
                 self._expected_seq = (nearest_key + 1) & 0xFFFFFFFF
                 self.stats.played += 1
                 self.stats.missing += int(nearest_dist)
-                return out
+                return frame
 
             # Small gap: advance expected seq WITH PLC (Packet Loss Concealment)
             max_ahead = max(_seq_distance(int(k), exp) for k in self._buf.keys())
@@ -154,6 +212,11 @@ class OpusPacketJitterBuffer:
                 self.stats.played += 1
                 self.stats.missing += 1
                 self.stats.concealed += 1
-                return b""
+                return JitterFrame(
+                    sequence_number=exp,
+                    payload=b"",
+                    metadata=FAIL_CLOSED_METADATA,
+                    concealed=True,
+                )
 
             return None

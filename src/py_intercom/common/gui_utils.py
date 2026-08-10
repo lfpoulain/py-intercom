@@ -10,14 +10,22 @@ from .devices import list_devices
 class DeviceWorker(QtCore.QObject):
     finished = QtCore.Signal(object, str)
 
-    def __init__(self, hostapi_filter: Optional[str]):
+    def __init__(self, hostapi_filter: Optional[str], *, hard_refresh: bool = True):
         super().__init__()
         self._hostapi_filter = hostapi_filter
+        self._hard_refresh = bool(hard_refresh)
 
     @QtCore.Slot()
     def run(self) -> None:
         try:
-            devs = list_devices(hostapi_substring=self._hostapi_filter, hard_refresh=True, validate=True)
+            devs = list_devices(
+                hostapi_substring=self._hostapi_filter,
+                hard_refresh=self._hard_refresh,
+                validate=True,
+            )
+            if QtCore.QThread.currentThread().isInterruptionRequested():
+                self.finished.emit([], "Device enumeration cancelled.")
+                return
             self.finished.emit(devs, "")
         except Exception as e:
             self.finished.emit([], str(e))

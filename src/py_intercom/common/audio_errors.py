@@ -1,10 +1,48 @@
 from __future__ import annotations
 from typing import Optional
 
+import sounddevice as sd
+
+
+def _hostapi_name(dev_info: Optional[dict]) -> str:
+    """Return a device's host API name without assuming PortAudio indices are stable."""
+    if not isinstance(dev_info, dict):
+        return ""
+
+    raw_hostapi = dev_info.get("hostapi")
+    if isinstance(raw_hostapi, str):
+        return raw_hostapi.strip()
+    try:
+        hostapi = sd.query_hostapis(int(raw_hostapi))
+    except Exception:
+        return ""
+    if not isinstance(hostapi, dict):
+        return ""
+    return str(hostapi.get("name") or "").strip()
+
+
+def shared_stream_extra_settings(dev_info: Optional[dict]):
+    """Enable Windows' shared-mode format conversion for WASAPI endpoints.
+
+    py-intercom deliberately keeps its network/Opus clock at 48 kHz.  A
+    shared WASAPI endpoint can ask the Windows audio engine to convert a
+    device's current mix format while preserving that internal clock.  The
+    option must not be passed to another PortAudio host API (notably WDM-KS),
+    where it is invalid and no system resampler is available.
+    """
+    if "WASAPI" not in _hostapi_name(dev_info).upper():
+        return None
+    try:
+        return sd.WasapiSettings(exclusive=False, auto_convert=True)
+    except Exception:
+        # Keep enumeration usable on non-Windows test/dev hosts and with old
+        # PortAudio builds that do not expose this shared-mode option.
+        return None
+
 
 def _device_label(dev_info: Optional[dict], fallback: Optional[int]) -> str:
     if isinstance(dev_info, dict):
-        name = str(dev_info.get("name") or "").strip()
+        name = " ".join(str(dev_info.get("name") or "").split())
         if name:
             return name
     if fallback is None:
@@ -18,8 +56,11 @@ def looks_like_bluetooth(dev_info: Optional[dict]) -> bool:
     name = str(dev_info.get("name") or "").lower()
     needles = (
         "bluetooth",
+        "bthhfenum",
         "hands-free",
         "hands free",
+        "mains-libres",
+        "mains libres",
         "headset",
         "hfp",
         "airpods",
@@ -88,13 +129,17 @@ def friendly_audio_open_error(
         bt_hint = (
             "\n\nCe périphérique semble être un casque Bluetooth. "
             "En Bluetooth classique, dès que le micro du casque est ouvert, "
-            "Windows bascule tout le casque en profil HFP (mono 8/16 kHz), "
-            "ce qui empêche la sortie de fonctionner en 48 kHz.\n"
+            "Windows bascule tout le casque en profil mains-libres/HFP "
+            "(écoute et capture mono 8/16 kHz).\n"
             "Solutions :\n"
+            "  • pour utiliser le micro ET le casque, choisir les deux endpoints "
+            "mains-libres/HFP du même casque via WASAPI partagé, DirectSound ou MME,\n"
             "  • utiliser un casque USB ou jack (recommandé pour l'intercom),\n"
-            "  • ou utiliser le casque BT uniquement en sortie ET un autre micro,\n"
-            "  • ou désactiver le service « Téléphonie mains libres » du casque "
-            "dans les paramètres Bluetooth Windows pour le forcer en A2DP."
+            "  • pour conserver la sortie stéréo A2DP, utiliser un autre micro ; "
+            "dans ce cas seulement, le service « Téléphonie mains libres » peut "
+            "être désactivé dans Windows.\n"
+            "Une sortie A2DP et le micro HFP du même casque ne constituent pas "
+            "une paire simultanée fiable."
         )
 
     return f"{pa_hint}{bt_hint}\n\nDétail technique : {raw}"
