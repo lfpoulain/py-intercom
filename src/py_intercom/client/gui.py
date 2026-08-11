@@ -26,7 +26,13 @@ from ..common.preset_schema import (
     migrate_preset,
     stamp_preset,
 )
-from ..common.theme import VuMeter, apply_theme, patch_combo, set_status_label
+from ..common.theme import (
+    VuMeter,
+    apply_theme,
+    make_field,
+    patch_combo,
+    set_status_label,
+)
 from .client import ClientConfig, IntercomClient
 
 
@@ -398,10 +404,8 @@ class ClientWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Py-Intercom Client")
-        # The status, three fixed PTT routes and device selectors need this
-        # footprint to stay legible; smaller sizes previously clipped buttons
-        # and rows on top of each other.
-        self.setMinimumSize(620, 650)
+        self.setMinimumSize(860, 680)
+        self.resize(1060, 800)
         self._set_app_icon()
 
         self._client: Optional[IntercomClient] = None
@@ -499,7 +503,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._bus_rows_layout = QtWidgets.QGridLayout(self._bus_rows_widget)
         self._bus_rows_layout.setContentsMargins(0, 0, 0, 0)
         self._bus_rows_layout.setHorizontalSpacing(8)
-        self._bus_rows_layout.setVerticalSpacing(4)
+        self._bus_rows_layout.setVerticalSpacing(8)
         self._bus_rows_signature: tuple[int, ...] = tuple()
 
         self._sync_bus_widgets(self._known_buses, apply_saved=True)
@@ -519,7 +523,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         # endpoint must not disappear again at the following startup.
         self._preset_set("show_all_devices", bool(saved_show_all))
         self._refresh_devices_btn = QtWidgets.QPushButton("Actualiser")
-        self._refresh_devices_btn.setProperty("class", "warning")
+        self._refresh_devices_btn.setProperty("class", "secondary")
         self._refresh_devices_btn.setToolTip(
             "Réinterroger les périphériques audio. Disponible uniquement hors connexion."
         )
@@ -617,126 +621,141 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._out_vu = VuMeter()
         self._return_vu = VuMeter()
 
-        # -- Connection group --
-        conn_box = QtWidgets.QGroupBox("Connexion")
-        conn_box_lay = QtWidgets.QVBoxLayout(conn_box)
-        conn_box_lay.setContentsMargins(10, 8, 10, 8)
-        conn_box_lay.setSpacing(0)
-
-        # Inner: left fields | mid buttons | right options
-        conn_inner = QtWidgets.QHBoxLayout()
-        conn_inner.setSpacing(16)
-
-        # Left: form fields
-        conn_left = QtWidgets.QGridLayout()
-        conn_left.setVerticalSpacing(6)
-        conn_left.setHorizontalSpacing(8)
-        conn_left.addWidget(QtWidgets.QLabel("Serveurs détectés"), 0, 0)
-        conn_left.addWidget(self._discovered_servers, 0, 1)
-        conn_left.addWidget(QtWidgets.QLabel("Adresse serveur"), 1, 0)
-        conn_left.addWidget(self._server_ip, 1, 1)
-        conn_left.addWidget(self._client_id_label, 2, 0)
-        conn_left.addWidget(self._client_id, 2, 1)
-        conn_left.addWidget(QtWidgets.QLabel("Nom"), 3, 0)
-        conn_left.addWidget(self._name, 3, 1)
-        conn_left.setColumnStretch(1, 1)
-
-        # Middle: Connect / Disconnect stacked
-        conn_mid = QtWidgets.QVBoxLayout()
-        conn_mid.setSpacing(6)
-        conn_mid.addWidget(self._connect_btn)
-        conn_mid.addWidget(self._disconnect_btn)
-        conn_mid.addStretch(1)
-
-        # Right: options stacked
-        conn_right = QtWidgets.QVBoxLayout()
-        conn_right.setSpacing(4)
-        conn_right.addWidget(self._autoconnect_cb)
-        conn_right.addWidget(self._start_minimized)
-        conn_right.addStretch(1)
-
-        conn_inner.addLayout(conn_left, 1)
-        conn_inner.addLayout(conn_mid, 0)
-        conn_inner.addLayout(conn_right, 0)
-        conn_box_lay.addLayout(conn_inner)
-
-        # -- Audio devices group --
-        dev_box = QtWidgets.QGroupBox("Périphériques audio")
-        dev_lay = QtWidgets.QGridLayout(dev_box)
-        dev_lay.setContentsMargins(10, 8, 10, 8)
-        dev_lay.setVerticalSpacing(6)
-        dev_lay.setHorizontalSpacing(8)
-        dev_lay.addWidget(QtWidgets.QLabel("Microphone"), 0, 0)
-        dev_lay.addWidget(self._input_device, 0, 1, 1, 3)
-        dev_lay.addWidget(QtWidgets.QLabel("Casque"), 1, 0)
-        dev_lay.addWidget(self._output_device, 1, 1, 1, 3)
-        dev_lay.addWidget(self._show_all_devices, 2, 0)
-        dev_lay.addWidget(self._refresh_devices_btn, 2, 1)
-        dev_lay.addWidget(self._device_status, 2, 2, 1, 2)
-
-        # -- Audio controls group --
-        ctrl_box = QtWidgets.QGroupBox("Contrôles audio")
-        ctrl_lay = QtWidgets.QGridLayout(ctrl_box)
-        ctrl_lay.setContentsMargins(10, 8, 10, 8)
-        ctrl_lay.setVerticalSpacing(6)
-        ctrl_lay.setHorizontalSpacing(8)
-        ctrl_lay.addWidget(self._listen_regie, 0, 0)
-        ctrl_lay.addWidget(self._listen_return_bus, 0, 1)
-        ctrl_lay.addWidget(QtWidgets.QLabel("Gain micro"), 1, 0)
-        ctrl_lay.addWidget(self._mic_gain, 1, 1, 1, 2)
-        ctrl_lay.addWidget(self._mic_gain_lbl, 1, 3)
-        ctrl_lay.addWidget(QtWidgets.QLabel("Gain casque"), 2, 0)
-        ctrl_lay.addWidget(self._hp_gain, 2, 1, 1, 2)
-        ctrl_lay.addWidget(self._hp_gain_lbl, 2, 3)
-        ctrl_lay.addWidget(QtWidgets.QLabel("Gain Return"), 3, 0)
-        ctrl_lay.addWidget(self._return_gain, 3, 1, 1, 2)
-        ctrl_lay.addWidget(self._return_gain_lbl, 3, 3)
-
-        # -- PTT / Routing group --
-        ptt_box = QtWidgets.QGroupBox("PTT / Routage")
-        ptt_lay = QtWidgets.QGridLayout(ptt_box)
-        ptt_lay.setContentsMargins(10, 8, 10, 8)
-        ptt_lay.setVerticalSpacing(6)
-        ptt_lay.addWidget(self._bus_rows_widget, 0, 0, 1, 1)
-
-        # -- Meters group --
-        meters_box = QtWidgets.QGroupBox("Niveaux")
-        meters_lay = QtWidgets.QHBoxLayout(meters_box)
-        meters_lay.setContentsMargins(10, 8, 10, 8)
-        meters_lay.setSpacing(12)
-        lbl_in = QtWidgets.QLabel("Micro")
-        lbl_in.setFixedWidth(44)
-        meters_lay.addWidget(lbl_in)
-        meters_lay.addWidget(self._in_vu, 1)
-        lbl_out = QtWidgets.QLabel("Casque")
-        lbl_out.setFixedWidth(44)
-        meters_lay.addWidget(lbl_out)
-        meters_lay.addWidget(self._out_vu, 1)
-        lbl_ret = QtWidgets.QLabel("Return")
-        lbl_ret.setFixedWidth(44)
-        meters_lay.addWidget(lbl_ret)
-        meters_lay.addWidget(self._return_vu, 1)
-
         self._info_btn = QtWidgets.QToolButton()
         self._info_btn.setText("ℹ")
-        self._info_btn.setFixedSize(26, 26)
+        self._info_btn.setProperty("class", "ghost")
+        self._info_btn.setFixedSize(34, 34)
         self._info_btn.setToolTip("Info / Debug")
         self._info_btn.clicked.connect(self._show_geek_info)
 
-        bottom = QtWidgets.QHBoxLayout()
-        bottom.addStretch(1)
-        bottom.addWidget(self._info_btn)
+        # -- Operational header --
+        hero = QtWidgets.QFrame()
+        hero.setProperty("role", "hero")
+        hero_lay = QtWidgets.QHBoxLayout(hero)
+        hero_lay.setContentsMargins(18, 14, 14, 14)
+        hero_lay.setSpacing(16)
+        hero_copy = QtWidgets.QVBoxLayout()
+        hero_copy.setSpacing(1)
+        eyebrow = QtWidgets.QLabel("PY-INTERCOM")
+        eyebrow.setProperty("role", "heroEyebrow")
+        title = QtWidgets.QLabel("Poste client")
+        title.setProperty("role", "heroTitle")
+        subtitle = QtWidgets.QLabel(
+            "Préparez votre audio, connectez-vous, puis utilisez les touches PTT."
+        )
+        subtitle.setProperty("role", "heroSubtitle")
+        hero_copy.addWidget(eyebrow)
+        hero_copy.addWidget(title)
+        hero_copy.addWidget(subtitle)
+        hero_lay.addLayout(hero_copy, 1)
+        self._connection_state_banner.setMinimumWidth(150)
+        hero_lay.addWidget(self._connection_state_banner)
+        hero_lay.addWidget(self._info_btn)
+
+        # -- Connection preparation --
+        conn_box = QtWidgets.QGroupBox("Connexion")
+        conn_box.setObjectName("connectionCard")
+        conn_box_lay = QtWidgets.QVBoxLayout(conn_box)
+        conn_box_lay.setContentsMargins(16, 12, 16, 14)
+        conn_box_lay.setSpacing(11)
+        conn_fields = QtWidgets.QHBoxLayout()
+        conn_fields.setSpacing(12)
+        conn_fields.addWidget(
+            make_field("SERVEUR DÉTECTÉ", self._discovered_servers, minimum_width=220),
+            2,
+        )
+        conn_fields.addWidget(
+            make_field("ADRESSE SERVEUR", self._server_ip, minimum_width=180),
+            1,
+        )
+        conn_fields.addWidget(
+            make_field("VOTRE NOM", self._name, minimum_width=160),
+            1,
+        )
+        conn_fields.addWidget(self._client_id_label)
+        conn_fields.addWidget(self._client_id)
+        conn_box_lay.addLayout(conn_fields)
+
+        conn_footer = QtWidgets.QHBoxLayout()
+        conn_footer.setSpacing(12)
+        conn_footer.addWidget(self._autoconnect_cb)
+        conn_footer.addWidget(self._start_minimized)
+        conn_footer.addStretch(1)
+        conn_footer.addWidget(self._disconnect_btn)
+        conn_footer.addWidget(self._connect_btn)
+        conn_box_lay.addLayout(conn_footer)
+
+        # -- Audio devices --
+        dev_box = QtWidgets.QGroupBox("Périphériques audio")
+        dev_box.setObjectName("devicesCard")
+        dev_lay = QtWidgets.QVBoxLayout(dev_box)
+        dev_lay.setContentsMargins(16, 12, 16, 14)
+        dev_lay.setSpacing(10)
+        dev_fields = QtWidgets.QHBoxLayout()
+        dev_fields.setSpacing(12)
+        dev_fields.addWidget(make_field("MICROPHONE", self._input_device), 1)
+        dev_fields.addWidget(make_field("CASQUE / SORTIE", self._output_device), 1)
+        dev_lay.addLayout(dev_fields)
+        dev_footer = QtWidgets.QHBoxLayout()
+        dev_footer.setSpacing(10)
+        dev_footer.addWidget(self._show_all_devices)
+        dev_footer.addWidget(self._refresh_devices_btn)
+        self._device_status.setProperty("role", "muted")
+        dev_footer.addWidget(self._device_status, 1)
+        dev_lay.addLayout(dev_footer)
+
+        # -- Monitoring and audio controls --
+        ctrl_box = QtWidgets.QGroupBox("Écoute && niveaux")
+        ctrl_box.setObjectName("monitoringCard")
+        ctrl_lay = QtWidgets.QGridLayout(ctrl_box)
+        ctrl_lay.setContentsMargins(16, 12, 16, 14)
+        ctrl_lay.setVerticalSpacing(11)
+        ctrl_lay.setHorizontalSpacing(10)
+        ctrl_lay.addWidget(self._listen_regie, 0, 0, 1, 2)
+        ctrl_lay.addWidget(self._listen_return_bus, 0, 2, 1, 2)
+        gain_labels = ("Micro", "Casque", "Return")
+        gains = (self._mic_gain, self._hp_gain, self._return_gain)
+        gain_values = (self._mic_gain_lbl, self._hp_gain_lbl, self._return_gain_lbl)
+        meters = (self._in_vu, self._out_vu, self._return_vu)
+        for row, (label_text, gain, value, meter) in enumerate(
+            zip(gain_labels, gains, gain_values, meters),
+            start=1,
+        ):
+            label = QtWidgets.QLabel(label_text)
+            label.setProperty("role", "fieldLabel")
+            ctrl_lay.addWidget(label, row, 0)
+            ctrl_lay.addWidget(gain, row, 1, 1, 2)
+            ctrl_lay.addWidget(value, row, 3)
+            ctrl_lay.addWidget(meter, row, 4)
+        ctrl_lay.setColumnStretch(1, 2)
+        ctrl_lay.setColumnStretch(4, 1)
+        ctrl_lay.setRowStretch(4, 1)
+
+        # -- PTT / routing --
+        ptt_box = QtWidgets.QGroupBox("Parler — PTT")
+        ptt_box.setObjectName("pttCard")
+        ptt_lay = QtWidgets.QVBoxLayout(ptt_box)
+        ptt_lay.setContentsMargins(16, 12, 16, 14)
+        ptt_lay.setSpacing(8)
+        ptt_hint = QtWidgets.QLabel(
+            "Choisissez le mode et le raccourci de chaque destination."
+        )
+        ptt_hint.setProperty("role", "muted")
+        ptt_lay.addWidget(ptt_hint)
+        ptt_lay.addWidget(self._bus_rows_widget, 1)
+
+        live_row = QtWidgets.QHBoxLayout()
+        live_row.setSpacing(12)
+        live_row.addWidget(ctrl_box, 4)
+        live_row.addWidget(ptt_box, 6)
 
         layout = QtWidgets.QVBoxLayout(central)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
-        layout.addWidget(self._connection_state_banner)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+        layout.addWidget(hero)
         layout.addWidget(conn_box)
         layout.addWidget(dev_box)
-        layout.addWidget(ctrl_box)
-        layout.addWidget(ptt_box)
-        layout.addWidget(meters_box)
-        layout.addLayout(bottom)
+        layout.addLayout(live_row, 1)
 
         self._refresh_devices_btn.clicked.connect(self._start_device_refresh)
         self._show_all_devices.stateChanged.connect(self._on_show_all_devices_changed)
@@ -1101,9 +1120,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         headers = ["Bus", "Mode", "État PTT", "VU", "Raccourci PTT"]
         for col, title in enumerate(headers):
             lbl = QtWidgets.QLabel(str(title))
-            f = lbl.font()
-            f.setBold(True)
-            lbl.setFont(f)
+            lbl.setProperty("role", "fieldLabel")
             self._bus_rows_layout.addWidget(lbl, 0, int(col))
 
         row = 1
@@ -1129,6 +1146,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             mode_cb.setEnabled(not bool(self._connected))
 
             state_lbl = QtWidgets.QLabel("")
+            state_lbl.setProperty("role", "statusChip")
             state_lbl.setFixedWidth(76)
             state_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             state_lbl.setAccessibleName(f"État PTT {bus_name}")
@@ -1141,7 +1159,8 @@ class ClientWindow(QtWidgets.QMainWindow):
             )
             clear_btn = QtWidgets.QToolButton()
             clear_btn.setText("✕")
-            clear_btn.setFixedSize(22, 22)
+            clear_btn.setProperty("class", "ghost")
+            clear_btn.setFixedSize(28, 28)
             clear_btn.setAccessibleName(f"Effacer le raccourci PTT {bus_name}")
             clear_btn.setToolTip(f"Effacer le raccourci PTT de {bus_name}")
             clear_btn.clicked.connect(lambda _checked=False, e=edit: e.setKeySequence(QtGui.QKeySequence("")))

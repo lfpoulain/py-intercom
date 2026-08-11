@@ -18,9 +18,11 @@ from ..common.jsonio import JsonFileStatus, atomic_write_json, read_json_file_re
 from ..common.preset_schema import PresetSchemaError, migrate_preset, stamp_preset
 from ..common.constants import AUDIO_UDP_PORT, MAX_GAIN_DB
 from ..common.theme import (
+    EmptyStateTableWidget,
     VuMeter,
     StatusIndicator,
     apply_theme,
+    make_field,
     patch_combo,
     centered_checkbox,
     cell_vu,
@@ -232,10 +234,8 @@ class ServerWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Py-Intercom Server")
-        # Two independently configurable audio tables cannot remain legible
-        # below this footprint. The previous 700x500 minimum caused their
-        # controls and headers to overlap.
-        self.setMinimumSize(800, 650)
+        self.setMinimumSize(1040, 720)
+        self.resize(1280, 820)
         self._set_app_icon()
 
         self._server: Optional[IntercomServer] = None
@@ -277,12 +277,13 @@ class ServerWindow(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget(self)
         self.setCentralWidget(central)
 
-        # -- Server config group --
-        config_box = QtWidgets.QGroupBox("Serveur")
+        # -- Server configuration --
+        config_box = QtWidgets.QGroupBox("Configuration")
+        config_box.setObjectName("serverConfigCard")
         config_lay = QtWidgets.QGridLayout(config_box)
-        config_lay.setContentsMargins(10, 8, 10, 8)
-        config_lay.setVerticalSpacing(6)
-        config_lay.setHorizontalSpacing(8)
+        config_lay.setContentsMargins(16, 12, 16, 14)
+        config_lay.setVerticalSpacing(10)
+        config_lay.setHorizontalSpacing(14)
 
         self._server_name = QtWidgets.QLineEdit("py-intercom")
         self._server_name.setPlaceholderText("Server name")
@@ -308,7 +309,8 @@ class ServerWindow(QtWidgets.QMainWindow):
         )
         self._refresh_devices_btn = QtWidgets.QToolButton()
         self._refresh_devices_btn.setText("\u21bb")
-        self._refresh_devices_btn.setFixedSize(28, 28)
+        self._refresh_devices_btn.setProperty("class", "ghost")
+        self._refresh_devices_btn.setFixedSize(34, 34)
         self._refresh_devices_btn.setAccessibleName("Actualiser les périphériques audio")
         self._refresh_devices_btn.setToolTip(
             "Actualiser les périphériques audio. Disponible uniquement serveur arrêté."
@@ -323,52 +325,34 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._stop_btn.setFixedWidth(120)
         self._stop_btn.setEnabled(False)
 
-        # Left column: Name only
-        left_col = QtWidgets.QVBoxLayout()
-        left_col.setSpacing(6)
-
-        name_lay = QtWidgets.QHBoxLayout()
-        name_lay.setSpacing(8)
-        name_lay.addWidget(QtWidgets.QLabel("Nom"))
-        name_lay.addWidget(self._server_name)
-        left_col.addLayout(name_lay)
-        left_col.addStretch(1)
-
-        # Middle column: Start / Stop stacked
-        mid_col = QtWidgets.QVBoxLayout()
-        mid_col.setSpacing(6)
-        mid_col.addWidget(self._start_btn)
-        mid_col.addWidget(self._stop_btn)
-        mid_col.addStretch(1)
-
-        # Right column: options stacked
-        right_col = QtWidgets.QVBoxLayout()
-        right_col.setSpacing(4)
-        right_col.addWidget(self._discovery_cb)
-        right_col.addWidget(self._autostart_cb)
-        right_col.addWidget(self._start_minimized_cb)
-        right_col.addStretch(1)
-
-        # Combine into one row
-        row_lay = QtWidgets.QHBoxLayout()
-        row_lay.setSpacing(16)
-        row_lay.addLayout(left_col, 1)
-        row_lay.addLayout(mid_col, 0)
-        row_lay.addLayout(right_col, 0)
-        config_lay.addLayout(row_lay, 0, 0, 1, 6)
-        config_lay.addWidget(self._server_state_banner, 1, 0, 1, 6)
+        config_lay.addWidget(
+            make_field("NOM DU SERVEUR", self._server_name, minimum_width=230),
+            0,
+            0,
+            1,
+            2,
+        )
+        config_lay.addWidget(self._discovery_cb, 1, 0)
+        config_lay.addWidget(self._autostart_cb, 1, 1)
+        config_lay.addWidget(self._start_minimized_cb, 2, 0, 1, 2)
+        config_lay.setColumnStretch(0, 1)
+        config_lay.setColumnStretch(1, 1)
 
         # -- Return bus + Régie group (combined) --
-        return_box = QtWidgets.QGroupBox("Return bus")
+        return_box = QtWidgets.QGroupBox("Retour audio")
+        return_box.setObjectName("returnCard")
         return_lay = QtWidgets.QVBoxLayout(return_box)
-        return_lay.setContentsMargins(10, 8, 10, 8)
-        return_lay.setSpacing(6)
+        return_lay.setContentsMargins(16, 12, 16, 14)
+        return_lay.setSpacing(10)
 
         # Row 0 — Enable + Input device
         ret_input_lay = QtWidgets.QHBoxLayout()
         ret_input_lay.setSpacing(8)
         ret_input_lay.addWidget(self._return_enabled)
-        ret_input_lay.addWidget(self._return_input_device, 1)
+        ret_input_lay.addWidget(
+            make_field("ENTRÉE RETURN", self._return_input_device),
+            1,
+        )
         return_lay.addLayout(ret_input_lay)
 
         # Row 1 — VU meters side by side
@@ -384,29 +368,32 @@ class ServerWindow(QtWidgets.QMainWindow):
         vu_lay.addWidget(self._regie_vu, 1)
         return_lay.addLayout(vu_lay)
 
-        # -- Regie group (kept as placeholder, hidden) --
-        regie_box = QtWidgets.QWidget()  # invisible spacer, regie VU moved to return_box
-
         # -- Clients group --
-        clients_box = QtWidgets.QGroupBox("Clients intercom")
+        clients_box = QtWidgets.QGroupBox("Équipe connectée")
+        clients_box.setObjectName("clientsCard")
         clients_lay = QtWidgets.QVBoxLayout(clients_box)
-        clients_lay.setContentsMargins(6, 6, 6, 6)
-        clients_lay.setSpacing(6)
+        clients_lay.setContentsMargins(12, 10, 12, 12)
+        clients_lay.setSpacing(8)
 
         # Base columns: 0=ClientID(hidden), 1=Name, 2=Addr(hidden), 3=Status, 4=Talk gain, 5=VU
-        self._clients = QtWidgets.QTableWidget(0, 6)
+        self._clients = EmptyStateTableWidget(
+            0,
+            6,
+            "Aucun client connecté. Les postes apparaîtront ici dès leur connexion.",
+        )
         self._clients.setHorizontalHeaderLabels(
             ["Client ID", "Nom", "Adresse", "État", "Gain micro", "VU"]
         )
         self._clients.setColumnHidden(0, True)
         self._clients.setColumnHidden(2, True)   # Addr hidden, shown in Info dialog
+        self._clients.setMinimumHeight(180)
         hdr = self._clients.horizontalHeader()
         hdr.setDefaultSectionSize(60)
         hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)   # Name
         hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Status
-        self._clients.setColumnWidth(3, 30)
+        self._clients.setColumnWidth(3, 54)
         hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Talk gain
-        self._clients.setColumnWidth(4, 190)
+        self._clients.setColumnWidth(4, 150)
         hdr.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Stretch)   # VU
         self._clients.verticalHeader().setDefaultSectionSize(32)
         self._clients.verticalHeader().setVisible(False)
@@ -450,11 +437,16 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._bus_gain_labels: Dict[int, QtWidgets.QLabel] = {}
         self._bus_feed_widgets: Dict[int, QtWidgets.QCheckBox] = {}
 
-        self._buses = QtWidgets.QTableWidget(0, 4)
+        self._buses = EmptyStateTableWidget(
+            0,
+            4,
+            "Les bus disponibles apparaîtront au démarrage du serveur.",
+        )
         self._buses.setHorizontalHeaderLabels(
             ["ID", "Nom", "Gain", f"Retour {BUS_BY_ID[REGIE_BUS_ID].name}"]
         )
         self._buses.verticalHeader().setVisible(False)
+        self._buses.setMinimumHeight(180)
         self._buses.verticalHeader().setDefaultSectionSize(32)
         self._buses.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self._buses.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
@@ -462,7 +454,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._buses.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self._buses.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
         self._buses.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        self._buses.setColumnWidth(2, 190)
+        self._buses.setColumnWidth(2, 160)
         self._buses.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
 
         self._add_output_device = QtWidgets.QComboBox()
@@ -475,7 +467,11 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._remove_output_btn.setProperty("class", "danger")
         self._remove_output_btn.setEnabled(False)
 
-        self._outputs = QtWidgets.QTableWidget(0, 6)
+        self._outputs = EmptyStateTableWidget(
+            0,
+            6,
+            "Aucune sortie configurée. Sélectionnez un périphérique et un bus, puis ajoutez-les.",
+        )
         self._outputs.setHorizontalHeaderLabels(
             ["ID", "Périphérique", "Bus", "Gain", "VU", "État"]
         )
@@ -486,63 +482,127 @@ class ServerWindow(QtWidgets.QMainWindow):
         out_hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
         self._outputs.setColumnWidth(2, 75)
         out_hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        self._outputs.setColumnWidth(3, 190)
+        self._outputs.setColumnWidth(3, 160)
         out_hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Stretch)
         out_hdr.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Fixed)
         self._outputs.setColumnWidth(5, 54)
         self._outputs.verticalHeader().setDefaultSectionSize(32)
         self._outputs.verticalHeader().setVisible(False)
+        self._outputs.setMinimumHeight(210)
         self._outputs.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self._outputs.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self._outputs.setAlternatingRowColors(True)
         self._outputs.itemSelectionChanged.connect(self._on_output_selection_changed)
 
-        outputs_box = QtWidgets.QGroupBox("Sorties audio")
+        outputs_box = QtWidgets.QGroupBox("Routage audio")
+        outputs_box.setObjectName("routingCard")
         outputs_layout = QtWidgets.QVBoxLayout(outputs_box)
-        outputs_layout.setContentsMargins(6, 6, 6, 6)
-        outputs_layout.setSpacing(6)
+        outputs_layout.setContentsMargins(12, 10, 12, 12)
+        outputs_layout.setSpacing(8)
 
+        buses_title = QtWidgets.QLabel("BUS DISPONIBLES")
+        buses_title.setProperty("role", "fieldLabel")
+        outputs_layout.addWidget(buses_title)
         outputs_layout.addWidget(self._buses)
 
         outputs_top = QtWidgets.QGridLayout()
-        outputs_top.addWidget(QtWidgets.QLabel("Périphérique"), 0, 0)
-        outputs_top.addWidget(self._add_output_device, 0, 1, 1, 2)
-        outputs_top.addWidget(QtWidgets.QLabel("Bus"), 0, 3)
-        outputs_top.addWidget(self._bus_selector, 0, 4)
-        outputs_top.addWidget(self._add_output_btn, 0, 5)
-        outputs_top.addWidget(self._remove_output_btn, 0, 6)
+        outputs_top.setHorizontalSpacing(10)
+        outputs_top.addWidget(
+            make_field("NOUVELLE SORTIE", self._add_output_device),
+            0,
+            0,
+            1,
+            3,
+        )
+        outputs_top.addWidget(make_field("BUS", self._bus_selector), 0, 3)
+        outputs_top.addWidget(self._add_output_btn, 0, 4)
+        outputs_top.addWidget(self._remove_output_btn, 0, 5)
+        outputs_top.setColumnStretch(0, 1)
         outputs_layout.addLayout(outputs_top)
+        outputs_title = QtWidgets.QLabel("DESTINATIONS ACTIVES")
+        outputs_title.setProperty("role", "fieldLabel")
+        outputs_layout.addWidget(outputs_title)
         outputs_layout.addWidget(self._outputs)
 
         # -- Info button --
         self._info_btn = QtWidgets.QToolButton()
         self._info_btn.setText("ℹ")
-        self._info_btn.setFixedSize(26, 26)
+        self._info_btn.setProperty("class", "ghost")
+        self._info_btn.setFixedSize(34, 34)
         self._info_btn.setToolTip("Info / Debug")
         self._info_btn.clicked.connect(self._show_geek_info)
 
-        bottom = QtWidgets.QHBoxLayout()
-        bottom.addWidget(self._show_all_devices)
-        bottom.addWidget(self._refresh_devices_btn)
-        bottom.addWidget(self._device_status, 1)
-        bottom.addWidget(self._info_btn)
+        device_footer = QtWidgets.QHBoxLayout()
+        device_footer.setSpacing(9)
+        device_footer.addWidget(self._show_all_devices)
+        device_footer.addWidget(self._refresh_devices_btn)
+        self._device_status.setProperty("role", "muted")
+        device_footer.addWidget(self._device_status, 1)
+        outputs_layout.addLayout(device_footer)
 
-        # -- Splitter for clients / outputs --
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        splitter.addWidget(clients_box)
-        splitter.addWidget(outputs_box)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setChildrenCollapsible(False)
+        # -- Operational header --
+        hero = QtWidgets.QFrame()
+        hero.setProperty("role", "hero")
+        hero_lay = QtWidgets.QHBoxLayout(hero)
+        hero_lay.setContentsMargins(18, 14, 14, 14)
+        hero_lay.setSpacing(12)
+        hero_copy = QtWidgets.QVBoxLayout()
+        hero_copy.setSpacing(1)
+        eyebrow = QtWidgets.QLabel("PY-INTERCOM")
+        eyebrow.setProperty("role", "heroEyebrow")
+        title = QtWidgets.QLabel("Régie intercom")
+        title.setProperty("role", "heroTitle")
+        subtitle = QtWidgets.QLabel(
+            "Démarrez le moteur, surveillez l’équipe et routez les retours audio."
+        )
+        subtitle.setProperty("role", "heroSubtitle")
+        hero_copy.addWidget(eyebrow)
+        hero_copy.addWidget(title)
+        hero_copy.addWidget(subtitle)
+        hero_lay.addLayout(hero_copy, 1)
+        self._server_state_banner.setMinimumWidth(130)
+        hero_lay.addWidget(self._server_state_banner)
+        hero_lay.addWidget(self._stop_btn)
+        hero_lay.addWidget(self._start_btn)
+        hero_lay.addWidget(self._info_btn)
+
+        # -- Two-column workspace --
+        left_panel = QtWidgets.QWidget()
+        left_panel.setObjectName("supervisionColumn")
+        left_layout = QtWidgets.QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)
+        left_layout.addWidget(config_box)
+        left_layout.addWidget(return_box)
+        left_layout.addWidget(clients_box, 1)
+
+        right_panel = QtWidgets.QWidget()
+        right_panel.setObjectName("routingColumn")
+        right_layout = QtWidgets.QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(outputs_box, 1)
+
+        self._workspace_splitter = QtWidgets.QSplitter(
+            QtCore.Qt.Orientation.Horizontal
+        )
+        self._workspace_splitter.setObjectName("serverWorkspace")
+        self._workspace_splitter.setAccessibleName(
+            "Répartition supervision et routage audio"
+        )
+        self._workspace_splitter.setChildrenCollapsible(False)
+        self._workspace_splitter.setHandleWidth(8)
+        self._workspace_splitter.addWidget(left_panel)
+        self._workspace_splitter.addWidget(right_panel)
+        self._workspace_splitter.setStretchFactor(0, 4)
+        self._workspace_splitter.setStretchFactor(1, 6)
+        self._workspace_splitter.setSizes([470, 730])
 
         # -- Main layout --
         layout = QtWidgets.QVBoxLayout(central)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
-        layout.addWidget(config_box)
-        layout.addWidget(return_box)
-        layout.addWidget(splitter, 1)
-        layout.addLayout(bottom)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+        layout.addWidget(hero)
+        layout.addWidget(self._workspace_splitter, 1)
 
         self._refresh_devices_btn.clicked.connect(self._start_device_refresh)
         self._show_all_devices.stateChanged.connect(self._on_show_all_devices_changed)

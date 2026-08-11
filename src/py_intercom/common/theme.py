@@ -98,19 +98,21 @@ def set_status_label(
 def apply_theme(app: QtWidgets.QApplication) -> None:
     """Apply project-native Qt theme (no external theme engine)."""
     ui_font_family = _ensure_ui_fonts(app)
-    bg = "#12171f"
-    surface = "#1b2330"
-    surface_alt = "#222c3b"
-    border = "#344256"
-    text = "#e8edf4"
-    muted = "#aab4c3"
-    accent = "#21b0a6"
-    accent_hover = "#2cc7bc"
-    accent_text = "#0a1317"
-    warning = "#f2b632"
-    danger = "#e25d5d"
-    success = "#2eb67d"
-    disabled_fg = "#6f7b8e"
+    bg = "#0b111a"
+    surface = "#111a27"
+    surface_alt = "#182437"
+    elevated = "#1e2c40"
+    border = "#29394f"
+    border_strong = "#3a506c"
+    text = "#f2f5f9"
+    muted = "#95a4b8"
+    accent = "#28c2b4"
+    accent_hover = "#45d4c7"
+    accent_text = "#071311"
+    warning = "#f0b84b"
+    danger = "#ed6a6a"
+    success = "#35bf7f"
+    disabled_fg = "#66758a"
 
     app.setStyle("Fusion")
 
@@ -151,18 +153,22 @@ def apply_theme(app: QtWidgets.QApplication) -> None:
             font-size: 13px;
             color: {text};
         }}
+        QMainWindow, QDialog {{
+            background: {bg};
+        }}
         QToolTip {{
             border: 1px solid {border};
-            padding: 4px 8px;
+            padding: 6px 9px;
             color: {text};
-            background: {surface_alt};
+            background: {elevated};
+            border-radius: 5px;
         }}
         QLineEdit {{
             border: 1px solid {border};
-            background: {surface};
-            padding: 3px 6px;
-            min-height: 24px;
-            border-radius: 3px;
+            background: {bg};
+            padding: 4px 9px;
+            min-height: 30px;
+            border-radius: 7px;
         }}
         QLineEdit:focus {{
             border: 1px solid {accent};
@@ -173,51 +179,51 @@ def apply_theme(app: QtWidgets.QApplication) -> None:
         }}
         QComboBox {{
             border: 1px solid {border};
-            background: {surface_alt};
-            padding: 3px 6px;
-            min-height: 24px;
-            border-radius: 3px;
+            background: {bg};
+            padding: 4px 9px;
+            min-height: 30px;
+            border-radius: 7px;
         }}
         QComboBox::drop-down {{
             border: none;
             width: 20px;
         }}
         QComboBox:hover {{
-            border: 1px solid {accent_hover};
+            border: 1px solid {border_strong};
         }}
         QComboBox:focus {{
             border: 1px solid {accent};
         }}
         QComboBox QAbstractItemView {{
             color: {text};
-            background: {surface};
+            background: {elevated};
             selection-background-color: {accent};
             selection-color: {accent_text};
             outline: none;
+            border: 1px solid {border};
+            padding: 4px;
         }}
         QPushButton {{
-            border: 1px solid {border};
-            background: {surface_alt};
-            padding: 5px 16px;
-            min-height: 28px;
-            border-radius: 4px;
-            font-weight: 500;
+            border: 1px solid {border_strong};
+            background: {elevated};
+            padding: 5px 17px;
+            min-height: 30px;
+            border-radius: 7px;
+            font-weight: 600;
         }}
         QToolButton {{
             border: 1px solid {border};
-            background: {surface_alt};
-            padding: 3px 8px;
-            border-radius: 4px;
+            background: {elevated};
+            padding: 4px 8px;
+            border-radius: 7px;
         }}
         QPushButton:hover {{
-            background-color: {accent};
-            color: {accent_text};
-            border: 1px solid {accent_hover};
+            background-color: {border_strong};
+            border: 1px solid {muted};
         }}
         QToolButton:hover {{
-            background-color: {accent};
-            color: {accent_text};
-            border: 1px solid {accent_hover};
+            background-color: {border_strong};
+            border: 1px solid {muted};
         }}
         QPushButton[class="warning"] {{
             border: 1px solid {warning};
@@ -288,19 +294,79 @@ def apply_theme(app: QtWidgets.QApplication) -> None:
             background-color: {surface};
             font-weight: normal;
         }}
+        QPushButton[class="secondary"] {{
+            background: {surface_alt};
+            border-color: {border};
+            color: {text};
+        }}
+        QPushButton[class="secondary"]:hover {{
+            background: {elevated};
+            border-color: {accent};
+        }}
+        QToolButton[class="ghost"] {{
+            background: transparent;
+            border-color: transparent;
+            color: {muted};
+        }}
+        QToolButton[class="ghost"]:hover {{
+            background: {surface_alt};
+            border-color: {border};
+            color: {text};
+        }}
+        QCheckBox {{
+            spacing: 8px;
+            color: {muted};
+        }}
+        QCheckBox:hover {{
+            color: {text};
+        }}
         QGroupBox {{
             border: 1px solid {border};
-            border-radius: 6px;
-            padding-top: 18px;
-            margin-top: 8px;
+            border-radius: 10px;
+            background: {surface};
+            padding-top: 22px;
+            margin-top: 10px;
+            font-weight: 600;
         }}
         QGroupBox::title {{
             subcontrol-origin: margin;
             subcontrol-position: top left;
-            background-color: {bg};
-            padding: 0 8px;
+            background-color: {surface};
+            padding: 0 10px;
+            left: 10px;
+            color: {text};
+        }}
+        QFrame[role="hero"] {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+        QLabel[role="heroEyebrow"] {{
+            color: {accent};
+            font-size: 11px;
+            font-weight: 700;
+        }}
+        QLabel[role="heroTitle"] {{
+            color: {text};
+            font-size: 21px;
+            font-weight: 700;
+        }}
+        QLabel[role="heroSubtitle"] {{
+            color: {muted};
+            font-size: 12px;
+        }}
+        QLabel[role="fieldLabel"] {{
+            color: {muted};
+            font-size: 11px;
             font-weight: 600;
-            color: {accent_hover};
+        }}
+        QLabel[role="muted"] {{
+            color: {muted};
+        }}
+        QLabel[role="sectionTitle"] {{
+            color: {text};
+            font-size: 14px;
+            font-weight: 700;
         }}
 
         /* --- Slider --- */
@@ -328,16 +394,35 @@ def apply_theme(app: QtWidgets.QApplication) -> None:
         /* --- Table --- */
         QTableWidget {{
             border: 1px solid {border};
-            gridline-color: {border};
+            border-radius: 7px;
+            background: {bg};
+            gridline-color: transparent;
             alternate-background-color: {surface_alt};
+            selection-background-color: {elevated};
+            selection-color: {text};
+            outline: none;
         }}
         QHeaderView::section {{
-            background-color: {surface_alt};
-            color: {accent_hover};
+            background-color: {surface};
+            color: {muted};
             border: none;
-            border-bottom: 2px solid {accent};
-            padding: 4px 6px;
-            font-weight: bold;
+            border-bottom: 1px solid {border};
+            padding: 7px 8px;
+            font-size: 11px;
+            font-weight: 700;
+        }}
+        QScrollBar:vertical {{
+            background: transparent;
+            width: 10px;
+            margin: 3px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: {border_strong};
+            border-radius: 3px;
+            min-height: 24px;
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+            height: 0;
         }}
 
         /* --- Status bar --- */
@@ -371,10 +456,16 @@ def apply_theme(app: QtWidgets.QApplication) -> None:
             font-weight: 500;
         }}
         QLabel[role="statusBanner"] {{
+            background: {bg};
+            border: 1px solid {border};
+            border-radius: 8px;
+            padding: 7px 12px;
+        }}
+        QLabel[role="statusChip"] {{
             background: {surface_alt};
             border: 1px solid {border};
-            border-radius: 4px;
-            padding: 5px 10px;
+            border-radius: 7px;
+            padding: 5px 7px;
         }}
         QLabel[role="statusBanner"][status="online"] {{
             border-color: {success};
@@ -401,6 +492,73 @@ def apply_theme(app: QtWidgets.QApplication) -> None:
         }}
     """
     app.setStyleSheet(patch)
+
+
+def make_field(
+    label_text: str,
+    control: QtWidgets.QWidget,
+    *,
+    minimum_width: int = 0,
+) -> QtWidgets.QWidget:
+    """Build a consistently spaced label/control field for desktop forms."""
+
+    container = QtWidgets.QWidget()
+    container.setProperty("role", "field")
+    layout = QtWidgets.QVBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(5)
+    label = QtWidgets.QLabel(str(label_text))
+    label.setProperty("role", "fieldLabel")
+    label.setBuddy(control)
+    layout.addWidget(label)
+    layout.addWidget(control)
+    if minimum_width > 0:
+        container.setMinimumWidth(int(minimum_width))
+    return container
+
+
+class EmptyStateTableWidget(QtWidgets.QTableWidget):
+    """Table that explains an empty live state instead of showing a blank void."""
+
+    def __init__(
+        self,
+        rows: int,
+        columns: int,
+        empty_text: str,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(rows, columns, parent)
+        self._empty_text = str(empty_text)
+        self.setShowGrid(False)
+        self.setAccessibleDescription(self._empty_text)
+
+    def set_empty_text(self, text: str) -> None:
+        self._empty_text = str(text)
+        self.setAccessibleDescription(self._empty_text)
+        self.viewport().update()
+
+    def empty_text(self) -> str:
+        return self._empty_text
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        if self.rowCount() != 0 or not self._empty_text:
+            return
+        painter = QtGui.QPainter(self.viewport())
+        painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)
+        color = self.palette().color(QtGui.QPalette.ColorRole.PlaceholderText)
+        painter.setPen(color)
+        font = painter.font()
+        font.setPointSizeF(max(9.0, font.pointSizeF()))
+        painter.setFont(font)
+        rect = self.viewport().rect().adjusted(12, 4, -12, -4)
+        painter.drawText(
+            rect,
+            QtCore.Qt.AlignmentFlag.AlignCenter
+            | QtCore.Qt.TextFlag.TextWordWrap,
+            self._empty_text,
+        )
+        painter.end()
 
 
 # ---------------------------------------------------------------------------

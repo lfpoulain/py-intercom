@@ -2,7 +2,7 @@
 
 > Registre vivant du produit. À mettre à jour dans la même modification que chaque correctif, refactorisation ou décision d'architecture.
 >
-> Dernière mise à jour : 7 août 2026
+> Dernière mise à jour : 10 août 2026
 
 ## 1. Vision produit
 
@@ -161,13 +161,17 @@ Critère de sortie : l'état affiché correspond à la chaîne réellement opér
 ### P1.7 UI/UX opérateur — En cours
 
 - [x] Formaliser les états `Déconnecté`, `Connexion`, `En ligne`, `Dégradé`, `Reconnexion`.
-- [ ] Séparer écran de préparation et écran live.
+- [x] Structurer clairement les zones de préparation et d'exploitation live dans les deux applications.
+- [x] Unifier client et serveur avec un design system Qt commun, lisible et accessible.
+- [x] Organiser la régie en deux colonnes redimensionnables : supervision à gauche, routage audio à droite.
+- [x] Remplacer les grands tableaux vides par des états d'attente explicites côté régie.
+- [ ] Étudier une séparation en écrans distincts si les essais opérateur montrent que la hiérarchie actuelle ne suffit pas.
 - [ ] Ajouter un preflight micro/casque/Return/raccourcis/réseau.
 - [x] Verrouiller clairement les réglages dangereux pendant le live et rendre les changements audio transactionnels.
 - [x] Distinguer les endpoints homonymes par nom, API hôte, index et fréquence native ; mémoriser le filtre « tous les périphériques ».
 - [x] Ne sélectionner aucun micro/casque implicitement lorsque la restauration du preset est ambiguë ou impossible.
 - [x] Séparer le rafraîchissement VU rapide des rafraîchissements structurels plus lents.
-- [ ] Revue visuelle sur les résolutions et facteurs DPI de production.
+- [ ] Revue visuelle sur toutes les résolutions et facteurs DPI de production (validation offscreen acquise à 1060×800 client, 1040×720 et 1280×820 serveur).
 
 ### P1.8 Industrialisation — En cours
 
@@ -243,6 +247,17 @@ Validation : compilation Python, imports GUI, `pip check` et recherche de résid
 
 Validation matérielle complète encore requise : connexion réelle, hotplug et endurance avec les casques de production.
 
+### Modernisation UI/UX desktop — Terminée le 10 août 2026 (première passe)
+
+- [x] Palette, typographie, espacements, champs, boutons, cartes et tableaux unifiés dans le thème commun.
+- [x] Client réorganisé en statut, connexion, périphériques puis exploitation écoute/PTT.
+- [x] Régie réorganisée en statut/actions, configuration/Return puis supervision et routage.
+- [x] Espace régie en deux colonnes avec séparateur horizontal ajustable et tables audio agrandies.
+- [x] États vides explicites et descriptions accessibles ajoutés aux tableaux opérateur.
+- [x] Captures client et serveur contrôlées visuellement sans matériel audio.
+
+La validation avec les écrans tactiles, facteurs DPI et résolutions réellement utilisés en production reste inscrite à P1.7.
+
 ## 8. Journal des changements
 
 ### 6 août 2026 — Initialisation V2
@@ -300,6 +315,17 @@ Validation matérielle complète encore requise : connexion réelle, hotplug et 
 - Ordre de démarrage client inversé pour établir le profil micro HFP avant la sortie et erreurs de démarrage traduites avec un diagnostic actionnable.
 - Documentation d'exploitation Bluetooth et tests de non-régression ajoutés.
 - Validation globale : **346 tests réussis en 4,51 s**, `compileall`, `git diff --check` et `pip check` réussis. L'essai duplex réel casque connecté reste inscrit au banc matériel.
+
+### 10 août 2026 — Modernisation UI/UX desktop
+
+- Nouveau design system Qt sombre partagé : hiérarchie typographique, cartes, champs empilés, boutons sémantiques, états et tableaux simplifiés.
+- Client recentré sur le flux opérateur « préparer, connecter, parler » avec les commandes d'écoute, gains, VU et PTT visibles dans une même zone live.
+- Régie recentrée sur le démarrage, la supervision de l'équipe et le routage ; les tables sans ligne expliquent désormais l'action ou l'événement attendu.
+- Disposition serveur affinée en deux colonnes redimensionnables afin de conserver des tables bus/sorties lisibles sans maximiser la fenêtre.
+- Libellés associés à leurs contrôles pour la navigation clavier et tailles minimales relevées afin d'éviter les chevauchements.
+- Captures offscreen vérifiées à 1060×800 et 1220×900 ; tests dédiés au design system ajoutés.
+- Validation globale : **350 tests réussis en 4,72 s**, `compileall` et `git diff --check` réussis.
+- `client.exe` et `server.exe` reconstruits avec PyInstaller 6.19.0 puis smoke-testés via `--help` (codes retour 0).
 
 ### Prochain lot prioritaire
 
