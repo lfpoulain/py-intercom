@@ -6,6 +6,7 @@ MAX_GAIN_DB = 20.0
 
 OPUS_BITRATE = 64000
 OPUS_COMPLEXITY = 5
+OPUS_DECODER_COMPLEXITY = 5  # Enables Deep PLC in a compatible libopus build.
 
 # =============================================================================
 # RÉGLAGES DE LATENCE ET BUFFERS (JITTER, SERVEUR)

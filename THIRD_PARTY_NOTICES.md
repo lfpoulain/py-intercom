@@ -13,9 +13,10 @@ beside the distributed executables.
 | Embedded version string | `libopus 1.6.1` |
 | Official source | `https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz` |
 | Official source SHA-256 | `6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1` |
-| Repository DLL SHA-256 | `354e235c9ddae854b09657a3a97add26d1c7b16269d77c14a16c04fd12f6ade1` |
+| Repository DLL SHA-256 | `7a6c5a059beaad0f46ca0ef0e6a49026ae7e8125a3309d7a92ba79d571161497` |
 | Architecture/configuration | x86-64, Release, hardening enabled, static MSVC runtime |
 | Build recipe | `exe scripts/build_opus.ps1` |
+| Neural features | Deep PLC enabled; DRED and OSCE disabled |
 | Upstream licence family | BSD-3-Clause |
 | Full upstream licence | `licenses/OPUS.txt` / distributed as `OPUS_LICENSE.txt` |
 

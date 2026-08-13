@@ -14,7 +14,7 @@ Il n'existe plus de produit web ni de mode headless public. Les lanceurs démarr
 - Routage centralisé dans un moteur pur, validation fail-closed des routes et mix-minus calculé avant la limitation de crête.
 - Return bus capturé sur une entrée audio locale du serveur et ajouté individuellement aux clients abonnés.
 - Sorties physiques serveur configurables par périphérique, bus et gain.
-- Audio Opus 48 kHz mono, 64 kbit/s, frames nominales de 10 ms.
+- Audio Opus 1.6.1, 48 kHz mono, 64 kbit/s, frames nominales de 10 ms et Deep PLC activé sur tous les décodeurs.
 - Callbacks PortAudio alimentés par des rings PCM préalloués et bornés ; codec et sockets sont exécutés par des workers dédiés.
 - Transport audio **V2** sur UDP : header strict de 32 octets, token de session 64 bits et `bus_mask` attaché à chaque frame.
 - Contrôle **V2** sur TCP : messages JSON délimités par ligne, handshake obligatoire et limites de taille.

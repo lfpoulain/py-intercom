@@ -87,12 +87,14 @@ Un output associe un périphérique `sounddevice`, un `bus_id`, un gain, un éta
 | Sample rate | 48 000 Hz |
 | Canaux | 1, mono |
 | Frame moteur | 480 échantillons, 10 ms |
-| Codec | Opus via `opuslib` et `bin/opus.dll` |
+| Codec | Opus 1.6.1 via `opuslib` et `bin/opus.dll`, construit avec Deep PLC |
 | Bitrate | 64 kbit/s |
 | Complexité | 5 |
 | DSP interne | `numpy.float32` dans `[-1, 1]` |
 
 `common/opus_codec.py` valide la configuration avant d'appeler la bibliothèque native. L'encodeur refuse une forme incorrecte, des valeurs non finies, un payload vide ou un payload supérieur à la limite Opus. Le décodeur expose toujours le contrat de taille demandé : un résultat plus court est complété par du silence et un résultat plus long est tronqué ; les moteurs appliquent en plus leur contrat fixe de 480 échantillons et remplacent une frame invalide par du silence ou la rejettent sans tuer le worker.
+
+Le runtime natif est compilé avec `OPUS_DEEP_PLC=ON`. Chaque décodeur règle et relit sa complexité à 5 lors de sa création, seuil d'activation du Deep PLC ; l'initialisation échoue si le contrôle natif n'est pas disponible ou n'est pas appliqué. DRED et OSCE restent désactivés.
 
 Les tests couvrent avec le backend natif les durées Opus 2,5, 5, 10 et 20 ms, le PLC, les paquets corrompus et les écarts de durée. Le transport de production reste volontairement fixé à 10 ms.
 

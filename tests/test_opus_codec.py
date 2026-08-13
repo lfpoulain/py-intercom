@@ -19,6 +19,7 @@ VALID_48K_FRAME_SAMPLES = (120, 240, 480, 960)
 def fake_opus(monkeypatch):
     encoder_instances = []
     decoder_instances = []
+    decoder_ctl = SimpleNamespace(error=None, calls=[])
 
     class FakeEncoderBackend:
         def __init__(self, sample_rate, channels, application):
@@ -46,6 +47,7 @@ def fake_opus(monkeypatch):
             self.plc_pcm = None
             self.decode_error = None
             self.plc_error = None
+            self.decoder_complexity = None
             self.decode_calls = []
             self.plc_calls = []
             decoder_instances.append(self)
@@ -86,16 +88,36 @@ def fake_opus(monkeypatch):
     api.__path__ = []
     decoder_api = types.ModuleType("opuslib.api.decoder")
     decoder_api.decode = fake_plc_decode
+    ctl_api = types.ModuleType("opuslib.api.ctl")
+    ctl_api.set_complexity = object()
+    ctl_api.get_complexity = object()
+
+    def fake_decoder_ctl(decoder_state, request, *args):
+        decoder_ctl.calls.append((decoder_state, request, args))
+        if decoder_ctl.error is not None:
+            raise decoder_ctl.error
+        if request is ctl_api.set_complexity:
+            decoder_state.decoder_complexity = int(args[0])
+            return None
+        if request is ctl_api.get_complexity:
+            return decoder_state.decoder_complexity
+        raise AssertionError("unexpected decoder CTL request")
+
+    decoder_api.decoder_ctl = fake_decoder_ctl
     opuslib.api = api
     api.decoder = decoder_api
+    api.ctl = ctl_api
 
     monkeypatch.setitem(sys.modules, "opuslib", opuslib)
     monkeypatch.setitem(sys.modules, "opuslib.api", api)
+    monkeypatch.setitem(sys.modules, "opuslib.api.ctl", ctl_api)
     monkeypatch.setitem(sys.modules, "opuslib.api.decoder", decoder_api)
 
     return SimpleNamespace(
         encoder_instances=encoder_instances,
         decoder_instances=decoder_instances,
+        decoder_ctl=decoder_ctl,
+        ctl_api=ctl_api,
     )
 
 
@@ -143,6 +165,7 @@ def test_fake_backend_accepts_required_48k_frame_durations(fake_opus, frame_samp
     assert decoded.shape == (frame_samples,)
     assert decoded.dtype == np.float32
     assert np.isfinite(decoded).all()
+    assert fake_opus.decoder_instances[-1].decoder_complexity == config.decoder_complexity
 
 
 @pytest.mark.parametrize(
@@ -153,12 +176,32 @@ def test_fake_backend_accepts_required_48k_frame_durations(fake_opus, frame_samp
         (OpusConfig(frame_samples=121), ValueError),
         (OpusConfig(bitrate=499), ValueError),
         (OpusConfig(complexity=11), ValueError),
+        (OpusConfig(decoder_complexity=11), ValueError),
     ),
 )
 def test_invalid_opus_configuration_fails_before_native_backend(fake_opus, config, exception):
     with pytest.raises(exception):
         OpusEncoder(config)
     assert fake_opus.encoder_instances == []
+
+
+def test_decoder_configures_and_verifies_deep_plc_complexity(fake_opus):
+    decoder = OpusDecoder(OpusConfig(decoder_complexity=7))
+    backend = fake_opus.decoder_instances[-1]
+
+    assert backend.decoder_complexity == 7
+    assert fake_opus.decoder_ctl.calls == [
+        (backend, fake_opus.ctl_api.set_complexity, (7,)),
+        (backend, fake_opus.ctl_api.get_complexity, ()),
+    ]
+    assert decoder.config.decoder_complexity == 7
+
+
+def test_decoder_fails_closed_when_deep_plc_ctl_is_unavailable(fake_opus):
+    fake_opus.decoder_ctl.error = RuntimeError("unsupported decoder complexity")
+
+    with pytest.raises(RuntimeError, match="Deep PLC Opus decoder"):
+        OpusDecoder()
 
 
 @pytest.mark.parametrize(

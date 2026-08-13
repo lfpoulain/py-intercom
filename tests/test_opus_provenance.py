@@ -33,6 +33,7 @@ def test_opus_build_manifest_matches_bundled_runtime() -> None:
     assert metadata["architecture"] == "x86_64"
     assert metadata["configuration"] == "Release"
     assert metadata["hardening"] is True
+    assert metadata["deep_plc"] is True
     assert metadata["native_tests_passed"] is True
     assert metadata["dll_sha256"] == _sha256(OPUS_DLL)
 
@@ -72,3 +73,10 @@ def test_opus_recipe_checks_the_final_native_process_exit_code() -> None:
 
     assert "$cmakeVersionOutput = & $cmake.Source --version" in recipe
     assert "Assert-LastExitCode 'CMake version query'" in recipe
+
+
+def test_opus_recipe_builds_deep_plc() -> None:
+    recipe = (ROOT / "exe scripts" / "build_opus.ps1").read_text(encoding="utf-8")
+
+    assert "'-DOPUS_DEEP_PLC=ON'" in recipe
+    assert "deep_plc = $true" in recipe

@@ -5,7 +5,14 @@ from dataclasses import dataclass
 import numpy as np
 
 from .audio import float32_to_int16_bytes, int16_bytes_to_float32
-from .constants import CHANNELS, FRAME_SAMPLES, OPUS_BITRATE, OPUS_COMPLEXITY, SAMPLE_RATE
+from .constants import (
+    CHANNELS,
+    FRAME_SAMPLES,
+    OPUS_BITRATE,
+    OPUS_COMPLEXITY,
+    OPUS_DECODER_COMPLEXITY,
+    SAMPLE_RATE,
+)
 
 
 _OPUS_SAMPLE_RATES = frozenset((8_000, 12_000, 16_000, 24_000, 48_000))
@@ -53,6 +60,12 @@ def _validate_config(config: "OpusConfig") -> None:
         raise TypeError("complexity must be an integer")
     if not 0 <= config.complexity <= 10:
         raise ValueError("Opus complexity must be between 0 and 10")
+    if isinstance(config.decoder_complexity, bool) or not isinstance(
+        config.decoder_complexity, int
+    ):
+        raise TypeError("decoder_complexity must be an integer")
+    if not 0 <= config.decoder_complexity <= 10:
+        raise ValueError("Opus decoder complexity must be between 0 and 10")
 
 
 @dataclass
@@ -62,6 +75,7 @@ class OpusConfig:
     frame_samples: int = FRAME_SAMPLES
     bitrate: int = OPUS_BITRATE
     complexity: int = OPUS_COMPLEXITY
+    decoder_complexity: int = OPUS_DECODER_COMPLEXITY
 
 
 class OpusEncoder:
@@ -108,14 +122,34 @@ class OpusDecoder:
         _validate_config(self.config)
         try:
             import opuslib
+            import opuslib.api.ctl as opus_ctl_api
             import opuslib.api.decoder as opus_decoder_api
         except Exception as e:
             raise RuntimeError("opuslib is required") from e
         try:
             self._decoder = opuslib.Decoder(self.config.sample_rate, self.config.channels)
             self._opus_decoder_api = opus_decoder_api
+            decoder_state = getattr(self._decoder, "decoder_state", None)
+            if decoder_state is None:
+                raise RuntimeError("opuslib decoder does not expose its native state")
+            opus_decoder_api.decoder_ctl(
+                decoder_state,
+                opus_ctl_api.set_complexity,
+                self.config.decoder_complexity,
+            )
+            configured_complexity = opus_decoder_api.decoder_ctl(
+                decoder_state,
+                opus_ctl_api.get_complexity,
+            )
+            if int(configured_complexity) != int(self.config.decoder_complexity):
+                raise RuntimeError(
+                    "libopus did not apply the requested decoder complexity"
+                )
         except Exception as e:
-            raise RuntimeError("failed to initialize Opus decoder (libopus missing?)") from e
+            raise RuntimeError(
+                "failed to initialize the Deep PLC Opus decoder "
+                "(libopus 1.5+ built with Deep PLC is required)"
+            ) from e
 
     def decode(self, payload: bytes) -> np.ndarray:
         if not isinstance(payload, (bytes, bytearray, memoryview)):

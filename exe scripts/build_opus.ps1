@@ -111,6 +111,7 @@ $commonConfigureArgs = @(
   '-DOPUS_HARDENING=ON',
   '-DOPUS_STATIC_RUNTIME=ON',
   '-DOPUS_CUSTOM_MODES=OFF',
+  '-DOPUS_DEEP_PLC=ON',
   '-DOPUS_DRED=OFF',
   '-DOPUS_OSCE=OFF'
 )
@@ -190,6 +191,7 @@ $metadata = [ordered]@{
   configuration = 'Release'
   static_msvc_runtime = $true
   hardening = $true
+  deep_plc = $true
   dred = $false
   osce = $false
   native_tests_passed = $true
