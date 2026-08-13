@@ -14,7 +14,9 @@ concurrency:
 
 jobs:
   build-release:
-    runs-on: windows-latest
+    # Keep the runner aligned with the explicitly pinned VS 2022 CMake
+    # generator used by the verified native build recipe.
+    runs-on: windows-2022
 
     steps:
       - name: Checkout

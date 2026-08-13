@@ -55,6 +55,7 @@ def test_release_workflow_builds_verified_opus_before_python_validation() -> Non
     )
 
     assert "PY_INTERCOM_ENABLE_PUBLIC_RELEASE" not in workflow
+    assert "runs-on: windows-2022" in workflow
     assert workflow.index("Build verified Opus runtime") < workflow.index(
         "Validate sources"
     )
