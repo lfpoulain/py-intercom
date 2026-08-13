@@ -36,6 +36,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-dev.txt
 
+      - name: Build verified Opus runtime
+        shell: pwsh
+        run: |
+          & '.\exe scripts\build_opus.ps1' -Clean
+
       - name: Validate sources
         shell: pwsh
         run: |
@@ -75,6 +80,8 @@ jobs:
             '.\dist\server.exe',
             '.\dist\LICENSE',
             '.\dist\THIRD_PARTY_NOTICES.md',
+            '.\dist\OPUS_LICENSE.txt',
+            '.\dist\OPUS_BUILD_INFO.json',
             '.\dist\README.md'
           )
           Compress-Archive -Path $releaseFiles -DestinationPath (Join-Path '.\dist' '${{ steps.meta.outputs.zip_name }}') -Force
@@ -88,13 +95,13 @@ jobs:
             dist/server.exe
             dist/LICENSE
             dist/THIRD_PARTY_NOTICES.md
+            dist/OPUS_LICENSE.txt
+            dist/OPUS_BUILD_INFO.json
             dist/README.md
             dist/${{ steps.meta.outputs.zip_name }}
 
       - name: Publish GitHub release
-        # Public publishing is opt-in while the bundled opus.dll provenance is
-        # still recorded as a release blocker in THIRD_PARTY_NOTICES.md.
-        if: vars.PY_INTERCOM_ENABLE_PUBLIC_RELEASE == 'true' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/'))
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/'))
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
@@ -108,4 +115,6 @@ jobs:
             dist/server.exe
             dist/LICENSE
             dist/THIRD_PARTY_NOTICES.md
+            dist/OPUS_LICENSE.txt
+            dist/OPUS_BUILD_INFO.json
             dist/${{ steps.meta.outputs.zip_name }}

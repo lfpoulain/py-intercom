@@ -2,7 +2,7 @@
 
 > Registre vivant du produit. À mettre à jour dans la même modification que chaque correctif, refactorisation ou décision d'architecture.
 >
-> Dernière mise à jour : 10 août 2026
+> Dernière mise à jour : 13 août 2026
 
 ## 1. Vision produit
 
@@ -180,7 +180,7 @@ Critère de sortie : l'état affiché correspond à la chaîne réellement opér
 - [x] Faire exécuter tests et compilation par le workflow avant toute release.
 - [ ] Ajouter tests d'intégration client/serveur locaux sans matériel.
 - [x] Documenter version, empreinte et licences tierces dans `THIRD_PARTY_NOTICES.md`.
-- [ ] Retrouver et figer la provenance amont reproductible exacte de `bin/opus.dll`.
+- [x] Construire `bin/opus.dll` depuis libopus 1.6.1 officiel avec source/hash figés, licence complète, tests natifs et manifeste de build.
 
 ## 6. Validation audio et réseau
 
@@ -303,7 +303,7 @@ La validation avec les écrans tactiles, facteurs DPI et résolutions réellemen
 - Validation : **327 tests réussis en 4,46 s**, `compileall` réussi et `pip check` sans dépendance cassée.
 - Stabilité concurrence : sous-suite temps réel client/serveur de 51 tests passée cinq fois consécutivement.
 - Packaging : `client.exe` et `server.exe` PyInstaller construits et smoke-testés (code retour 0) ; wheel `py_intercom-2.0.0.dev0` construit.
-- CI Windows exécutée aussi sur les pull requests ; publication GitHub désactivée par défaut et soumise à la variable `PY_INTERCOM_ENABLE_PUBLIC_RELEASE` tant que la provenance d'Opus bloque la redistribution.
+- CI Windows exécutée aussi sur les pull requests ; publication GitHub initialement désactivée tant que la provenance d'Opus bloquait la redistribution.
 - Artefacts locaux `build/` et `dist/` exclus de Git ; les exécutables sont distribués par les artefacts du workflow.
 
 ### 7 août 2026 — Sélection des périphériques Bluetooth
@@ -327,10 +327,21 @@ La validation avec les écrans tactiles, facteurs DPI et résolutions réellemen
 - Validation globale : **350 tests réussis en 4,72 s**, `compileall` et `git diff --check` réussis.
 - `client.exe` et `server.exe` reconstruits avec PyInstaller 6.19.0 puis smoke-testés via `--help` (codes retour 0).
 
+### 13 août 2026 — Runtime Opus officiel et releases réactivées
+
+- Ancienne DLL 1.3.1 sans provenance remplacée par libopus 1.6.1 x64 construit depuis l'archive officielle Xiph verrouillée par SHA-256.
+- Recette PowerShell autonome ajoutée : téléchargement contrôlé, licence vérifiée octet pour octet, build partagé durci et contrôle PE x64.
+- Les cinq tests natifs Xiph sont compilés séparément en statique et doivent tous réussir avant installation de la DLL.
+- Manifeste de build comprenant hashes source/DLL, compilateur, CMake et options produit avec chaque distribution.
+- Licence BSD-3-Clause complète ajoutée aux artefacts et archives.
+- Workflow GitHub configuré pour reconstruire Opus avant les tests Python et publier automatiquement une release depuis `main` ; les pull requests restent limitées au build et aux artefacts.
+- Validation : runtime `libopus 1.6.1`, cinq tests natifs réussis, **354 tests Python réussis en 5,76 s**, `compileall`, `pip check` et `git diff --check` réussis.
+- `client.exe` et `server.exe` reconstruits avec la nouvelle DLL de 624 128 octets effectivement embarquée, notices/manifeste distribués et smoke tests `--help` réussis (codes retour 0).
+
 ### Prochain lot prioritaire
 
 1. banc matériel et réseau : latence P50/P95/P99, dérive, xruns et endurance quatre heures ;
 2. jitter buffer adaptatif borné et correction douce de dérive d'horloge ;
 3. préflight opérateur et export de diagnostic en un clic ;
 4. test d'intégration client/serveur complet sans périphérique physique ;
-5. remplacement de `opus.dll` par un artefact à provenance amont reproductible.
+5. signature Authenticode et procédure de promotion/versionnement des releases.

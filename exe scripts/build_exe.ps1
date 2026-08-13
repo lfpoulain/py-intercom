@@ -130,5 +130,21 @@ foreach ($noticeName in @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'README.md')) {
   }
   Copy-Item -LiteralPath $noticeSource -Destination (Join-Path $distDir $noticeName) -Force
 }
+$opusDistributionFiles = @(
+  @{
+    Source = Join-Path $projectRoot 'licenses\OPUS.txt'
+    Destination = Join-Path $distDir 'OPUS_LICENSE.txt'
+  },
+  @{
+    Source = Join-Path $projectRoot 'bin\opus-build-info.json'
+    Destination = Join-Path $distDir 'OPUS_BUILD_INFO.json'
+  }
+)
+foreach ($opusFile in $opusDistributionFiles) {
+  if (-not (Test-Path -LiteralPath $opusFile.Source)) {
+    throw "Required Opus provenance file not found at $($opusFile.Source)"
+  }
+  Copy-Item -LiteralPath $opusFile.Source -Destination $opusFile.Destination -Force
+}
 Write-Host $clientExe
 Write-Host $serverExe

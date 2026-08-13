@@ -327,17 +327,20 @@ La suite automatise les contrats audio, les durées Opus, le protocole et les to
 ### Exécutables
 
 ```powershell
+& '.\exe scripts\build_opus.ps1' -Clean
 & '.\exe scripts\build_exe.ps1'
 & '.\exe scripts\build_exe.ps1' -Clean
 ```
 
-PyInstaller est verrouillé dans `requirements-build.txt`. Le workflow Windows installe les dépendances, compile les sources, exécute les tests, construit `dist/server.exe` et `dist/client.exe`, puis archive les exécutables avec les notices.
+`build_opus.ps1` télécharge l'archive officielle Xiph 1.6.1 verrouillée par SHA-256, construit une DLL x64 durcie, contrôle son architecture et exécute les cinq tests natifs dans un build statique séparé. Il produit aussi un manifeste avec le hash exact de la DLL et les versions de la chaîne de compilation.
+
+PyInstaller est verrouillé dans `requirements-build.txt`. Le workflow Windows reconstruit Opus, compile les sources, exécute les tests natifs et Python, construit `dist/server.exe` et `dist/client.exe`, puis archive les exécutables avec les notices et le manifeste Opus.
 
 `requirements.txt` verrouille le runtime, `requirements-dev.txt` pytest et `requirements-build.txt` PyInstaller. Les quatre lanceurs Windows partagent `_launch.bat`, qui contrôle Python 3.11+, crée le virtualenv si nécessaire et vérifie l'installation des dépendances.
 
 Le package Python déclare son layout `src`, ses dépendances et ses images dans `pyproject.toml`. Les lanceurs racine restent nécessaires pour charger `opus.dll` avant l'import des modules audio.
 
-Avant toute diffusion externe, lire [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). La provenance de la DLL Opus actuelle est un bloqueur de release publique.
+La provenance, le hash source, la recette de build et la licence complète d'Opus sont enregistrés dans [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), `licenses/OPUS.txt` et le manifeste distribué `OPUS_BUILD_INFO.json`.
 
 ## 14. Workflow opérateur
 
@@ -410,7 +413,7 @@ Pour une exploitation critique, préférer USB/jack. Pour conserver la sortie st
 - pas de FEC Opus ;
 - pas de correction explicite de dérive entre horloges audio ;
 - WASAPI exclusive non pris en charge ;
-- provenance de `bin/opus.dll` non documentée, donc release publique bloquée ;
+- signature Authenticode des exécutables non encore intégrée ;
 - banc matériel, scénarios 2/5/10 clients et endurance d'un live complet non encore qualifiés.
 
 Le suivi détaillé, les critères de sortie et le journal des changements se trouvent dans [roadmap-v2.md](roadmap-v2.md).

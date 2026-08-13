@@ -2,24 +2,28 @@
 
 This inventory belongs to the Windows desktop distribution of py-intercom.
 Versions follow the locked runtime dependencies in `requirements.txt`.
-Before any public release, the corresponding full licence texts must be
-included beside the executables.
+The corresponding full licence texts and native build manifests are included
+beside the distributed executables.
 
 ## Native Opus runtime
 
 | Item | Recorded value |
 |---|---|
 | File | `bin/opus.dll` |
-| Embedded version string | `libopus 1.3.1-18-g923bebde-dirty-fixed` |
-| Size | 441,856 bytes |
-| SHA-256 | `c84da836e8d92421ac305842cfe5a724898ed09d340d46b129e210bdc9448131` |
+| Embedded version string | `libopus 1.6.1` |
+| Official source | `https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz` |
+| Official source SHA-256 | `6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1` |
+| Repository DLL SHA-256 | `354e235c9ddae854b09657a3a97add26d1c7b16269d77c14a16c04fd12f6ade1` |
+| Architecture/configuration | x86-64, Release, hardening enabled, static MSVC runtime |
+| Build recipe | `exe scripts/build_opus.ps1` |
 | Upstream licence family | BSD-3-Clause |
-| Original download/build provenance | **Not recorded — release blocker** |
+| Full upstream licence | `licenses/OPUS.txt` / distributed as `OPUS_LICENSE.txt` |
 
-The binary is reproducibly identified by its hash, but its upstream URL,
-toolchain and build recipe are absent from the repository. It may be used for
-internal qualification, but a distributable release should replace it with a
-traceable upstream artifact or a documented reproducible build.
+The build script downloads only the pinned Xiph source archive, rejects a
+checksum mismatch, verifies the tracked licence byte-for-byte, builds an x64
+DLL with Visual Studio and runs the five upstream native tests in a separate
+static build. Each build generates `OPUS_BUILD_INFO.json` with the actual DLL
+hash and toolchain versions; that manifest is shipped with every release.
 
 ## Python runtime dependencies
 

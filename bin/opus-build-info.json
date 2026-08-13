@@ -1,0 +1,20 @@
+﻿{
+    "schema_version":  1,
+    "library":  "libopus",
+    "version":  "1.6.1",
+    "source_url":  "https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz",
+    "source_sha256":  "6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1",
+    "dll_sha256":  "354e235c9ddae854b09657a3a97add26d1c7b16269d77c14a16c04fd12f6ade1",
+    "architecture":  "x86_64",
+    "generator":  "Visual Studio 17 2022",
+    "compiler":  "MSVC",
+    "compiler_version":  "19.44.35215.0",
+    "cmake_version":  "4.2.3",
+    "configuration":  "Release",
+    "static_msvc_runtime":  true,
+    "hardening":  true,
+    "dred":  false,
+    "osce":  false,
+    "native_tests_passed":  true,
+    "built_utc":  "2026-08-13T07:25:52.2748191Z"
+}

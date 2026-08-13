@@ -51,7 +51,7 @@ Le token lie l'UDP à la session TCP mais ne constitue pas un chiffrement ni une
 - Python 3.11 ou plus récent pour un lancement depuis les sources ;
 - `bin/opus.dll`, chargé par le bootstrap commun de `run_server.py` et `run_client.py`.
 
-L'origine de la DLL Opus actuellement embarquée n'est pas suffisamment traçable pour une redistribution publique. Voir [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) avant toute release externe.
+La DLL fournie est libopus 1.6.1 x64, reconstruite depuis l'archive officielle Xiph dont le SHA-256 est verrouillé. Sa provenance et sa licence figurent dans [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Installation
 
@@ -87,7 +87,15 @@ Les seules options publiques sont `--debug` et `--minimized` :
 
 ## Build Windows
 
-Le build utilise une version verrouillée de PyInstaller et produit deux exécutables `onefile` :
+Pour reconstruire la bibliothèque native depuis les sources officielles, Visual Studio Build Tools 2022 et CMake sont nécessaires :
+
+```powershell
+& '.\exe scripts\build_opus.ps1' -Clean
+```
+
+Le script contrôle le hash de l'archive, compile la DLL x64, exécute les cinq tests natifs Xiph et écrit `bin\opus-build-info.json`.
+
+Le build applicatif utilise une version verrouillée de PyInstaller et produit deux exécutables `onefile` :
 
 ```powershell
 & '.\exe scripts\build_exe.ps1'
@@ -99,7 +107,7 @@ L'option `-Clean` supprime d'abord les dossiers `build/` et `dist/` :
 & '.\exe scripts\build_exe.ps1' -Clean
 ```
 
-Résultats : `dist\client.exe` et `dist\server.exe`, accompagnés de `LICENSE`, `README.md` et `THIRD_PARTY_NOTICES.md`. Le workflow Windows compile les sources et exécute les tests avant le build et la création de l'archive.
+Résultats : `dist\client.exe` et `dist\server.exe`, accompagnés des notices, de `OPUS_LICENSE.txt` et de `OPUS_BUILD_INFO.json`. Le workflow Windows reconstruit Opus, exécute les tests natifs et Python, puis publie automatiquement une release pour `main`.
 
 ## Ports
 
