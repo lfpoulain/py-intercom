@@ -61,3 +61,6 @@ def test_release_workflow_builds_verified_opus_before_python_validation() -> Non
     assert "github.ref == 'refs/heads/main'" in workflow
     assert "dist/OPUS_LICENSE.txt" in workflow
     assert "dist/OPUS_BUILD_INFO.json" in workflow
+    opus_step = workflow[workflow.index("Build verified Opus runtime") :]
+    assert opus_step.index("shell: powershell") < opus_step.index("Validate sources")
+    assert "Verified Opus build failed" in opus_step

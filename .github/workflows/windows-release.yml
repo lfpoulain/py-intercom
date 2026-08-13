@@ -18,10 +18,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.13'
           cache: pip
@@ -37,9 +37,17 @@ jobs:
           python -m pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Build verified Opus runtime
-        shell: pwsh
+        # The native recipe is qualified with the Windows PowerShell 5.1
+        # environment shipped on both operator workstations and hosted runners.
+        shell: powershell
         run: |
-          & '.\exe scripts\build_opus.ps1' -Clean
+          try {
+            & '.\exe scripts\build_opus.ps1' -Clean
+          } catch {
+            $message = $_.Exception.Message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Verified Opus build failed::$message"
+            throw
+          }
 
       - name: Validate sources
         shell: pwsh
