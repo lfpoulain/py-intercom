@@ -41,6 +41,14 @@ class ServerHealthState(str, Enum):
     UNKNOWN = "unknown"
 
 
+class ClientTransportState(str, Enum):
+    OFFLINE = "offline"
+    WAITING_UDP = "waiting_udp"
+    IDLE = "idle"
+    ACTIVE = "active"
+    DEGRADED = "degraded"
+
+
 @dataclass(frozen=True)
 class HealthFacet:
     state: ServerHealthState
@@ -58,6 +66,32 @@ class ServerOperationalHealth:
 
 
 _EXPECTED_SERVER_WORKERS = frozenset({"udp-rx", "udp-tx", "mix", "ctrl-accept"})
+
+
+def derive_client_transport_state(
+    client: Mapping[str, object],
+    *,
+    udp_recent_threshold_s: float = 1.0,
+) -> ClientTransportState:
+    """Separate normal silence from an actual loss of live UDP audio."""
+
+    if client.get("control_connected") is not True:
+        return ClientTransportState.OFFLINE
+    if not client.get("addr"):
+        return ClientTransportState.WAITING_UDP
+
+    ptt_buses_raw = client.get("ptt_buses")
+    ptt_buses = ptt_buses_raw if isinstance(ptt_buses_raw, Mapping) else {}
+    if not any(value is True for value in ptt_buses.values()):
+        return ClientTransportState.IDLE
+
+    try:
+        age_s = float(client.get("age_s"))
+    except (TypeError, ValueError):
+        return ClientTransportState.DEGRADED
+    if age_s <= float(udp_recent_threshold_s):
+        return ClientTransportState.ACTIVE
+    return ClientTransportState.DEGRADED
 
 
 def derive_server_operational_health(
@@ -123,31 +157,63 @@ def derive_server_operational_health(
         waiting_udp = int(stats.get("clients_waiting_udp", 0))
     except (TypeError, ValueError):
         waiting_udp = 0
-    recent_udp = 0
+    connected_snapshots = 0
+    associated_udp = 0
+    active_udp = 0
+    stale_active_udp = 0
     for client in clients.values():
         if client.get("control_connected") is not True:
             continue
-        try:
-            age_s = float(client.get("age_s"))
-        except (TypeError, ValueError):
-            continue
-        addr = client.get("addr")
-        if addr and age_s <= float(udp_recent_threshold_s):
-            recent_udp += 1
-    if waiting_udp > 0 or recent_udp < connected_count:
+        connected_snapshots += 1
+        transport_state = derive_client_transport_state(
+            client,
+            udp_recent_threshold_s=udp_recent_threshold_s,
+        )
+        if transport_state in {
+            ClientTransportState.IDLE,
+            ClientTransportState.ACTIVE,
+            ClientTransportState.DEGRADED,
+        }:
+            associated_udp += 1
+        if transport_state is ClientTransportState.ACTIVE:
+            active_udp += 1
+        elif transport_state is ClientTransportState.DEGRADED:
+            stale_active_udp += 1
+
+    missing_snapshots = max(0, connected_count - connected_snapshots)
+    missing_associations = max(0, connected_count - associated_udp)
+    if (
+        waiting_udp > 0
+        or missing_snapshots > 0
+        or missing_associations > 0
+        or stale_active_udp > 0
+    ):
+        details = []
+        if waiting_udp > 0 or missing_associations > 0:
+            details.append(
+                f"{max(waiting_udp, missing_associations)} client(s) attendent l'association UDP"
+            )
+        if missing_snapshots > 0:
+            details.append(f"{missing_snapshots} état(s) client manquant(s)")
+        if stale_active_udp > 0:
+            details.append(
+                f"{stale_active_udp} client(s) en parole n'envoient plus d'audio récent"
+            )
         udp = HealthFacet(
             ServerHealthState.DEGRADED,
-            f"UDP : {recent_udp}/{connected_count}",
-            f"{waiting_udp} client(s) attendent l'association UDP ; "
-            f"{recent_udp}/{connected_count} ont envoyé un paquet récent.",
+            f"UDP : {associated_udp}/{connected_count}",
+            "; ".join(details) + ".",
         )
     else:
         udp = HealthFacet(
             ServerHealthState.HEALTHY,
-            f"UDP : {recent_udp}",
+            f"UDP : {associated_udp}",
             (
-                f"Audio UDP récent pour {recent_udp} client(s)."
-                if recent_udp
+                (
+                    f"{associated_udp} client(s) associé(s), dont {active_udp} en parole ; "
+                    "les clients silencieux au repos sont nominaux."
+                )
+                if associated_udp
                 else "Transport UDP prêt, aucun client connecté."
             ),
         )
@@ -2025,13 +2091,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             _set_item(2, f"{addr[0]}:{addr[1]}" if addr else "")
 
             # col 3 — independent control/UDP status
-            control_connected = st.get("control_connected") is True
-            disconnected = not control_connected
-            try:
-                udp_age_s = float(st.get("age_s"))
-            except (TypeError, ValueError):
-                udp_age_s = None
-            udp_recent = bool(st.get("addr")) and udp_age_s is not None and udp_age_s <= 1.0
+            transport_state = derive_client_transport_state(st)
             if rebuild:
                 si = StatusIndicator()
                 self._clients.setCellWidget(row, 3, centered_checkbox(si))  # reuse centering helper
@@ -2039,22 +2099,32 @@ class ServerWindow(QtWidgets.QMainWindow):
             si = self._status_widgets.get(int(client_id))
             if si is not None:
                 client_name = str(st.get("name") or client_id)
-                if not control_connected:
+                if transport_state is ClientTransportState.OFFLINE:
                     si.set_state(
                         "offline",
                         description=f"{client_name} : hors ligne",
                     )
-                elif not udp_recent:
+                elif transport_state is ClientTransportState.WAITING_UDP:
+                    si.set_state(
+                        "connecting",
+                        description=f"{client_name} : association audio UDP en attente",
+                    )
+                elif transport_state is ClientTransportState.IDLE:
+                    si.set_state(
+                        "idle",
+                        description=f"{client_name} : en ligne, au repos",
+                    )
+                elif transport_state is ClientTransportState.DEGRADED:
                     si.set_state(
                         "degraded",
                         description=(
-                            f"{client_name} : contrôle connecté, audio UDP absent ou ancien"
+                            f"{client_name} : en parole, audio UDP absent ou ancien"
                         ),
                     )
                 else:
                     si.set_state(
                         "online",
-                        description=f"{client_name} : contrôle et audio UDP actifs",
+                        description=f"{client_name} : en parole, audio UDP actif",
                     )
 
             # col 4 — Talk gain

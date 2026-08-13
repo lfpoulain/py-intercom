@@ -228,6 +228,8 @@ La structure et les statuts sont rafraîchis toutes les 250 ms ; les VU environ 
 
 La GUI distingue quatre facettes : moteur/workers, contrôle TCP, trafic UDP et streams audio. La structure est rafraîchie toutes les 500 ms et les VU/santés toutes les 67 ms. Les infobulles détaillent la cause d'un état dégradé ou en erreur.
 
+Côté serveur, un client connecté dont l'association UDP est établie reste nominal lorsqu'il est silencieux : cet état **au repos** n'est pas une dégradation. L'absence de paquet UDP récent ne devient anormale que pendant une prise de parole active. L'association UDP absente reste, elle, signalée comme en attente.
+
 Les fenêtres de diagnostic exposent notamment l'âge du dernier contrôle et du dernier UDP, l'état des workers et streams, les profondeurs de files, les underflows, les erreurs socket et codec, les paquets invalides et les informations Opus.
 
 ## 10. Presets

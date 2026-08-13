@@ -609,6 +609,7 @@ def centered_checkbox(cb: QtWidgets.QCheckBox) -> QtWidgets.QWidget:
 _STATUS_COLORS = {
     "online": QtGui.QColor(46, 182, 125),
     "healthy": QtGui.QColor(46, 182, 125),
+    "idle": QtGui.QColor(33, 176, 166),
     "connecting": QtGui.QColor(33, 176, 166),
     "degraded": QtGui.QColor(242, 182, 50),
     "error": QtGui.QColor(226, 93, 93),

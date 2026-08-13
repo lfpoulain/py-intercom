@@ -340,6 +340,14 @@ La validation avec les écrans tactiles, facteurs DPI et résolutions réellemen
 - Validation : runtime `libopus 1.6.1`, cinq tests natifs réussis, **354 tests Python réussis en 5,76 s**, `compileall`, `pip check` et `git diff --check` réussis.
 - `client.exe` et `server.exe` reconstruits avec la nouvelle DLL de 624 128 octets effectivement embarquée, notices/manifeste distribués et smoke tests `--help` réussis (codes retour 0).
 
+### 13 août 2026 — Supervision des clients silencieux
+
+- État transport client formalisé côté régie : hors ligne, association UDP en attente, au repos, en parole et dégradé.
+- Un client connecté et associé qui ne parle pas reste désormais nominal même si son dernier paquet audio est ancien.
+- La fraîcheur UDP ne déclenche une dégradation que si le PTT du client est actif ; une association jamais établie reste signalée.
+- Indicateur client au repos distinct et infobulles opérateur clarifiées.
+- Validation : 19 tests d'état opérationnel et suite globale réussis (**351 réussis, 11 tests Deep PLC optionnels ignorés**), `compileall`, `pip check` et `git diff --check` réussis.
+
 ### Prochain lot prioritaire
 
 1. banc matériel et réseau : latence P50/P95/P99, dérive, xruns et endurance quatre heures ;

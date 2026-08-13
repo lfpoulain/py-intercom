@@ -14,9 +14,11 @@ from py_intercom.client.gui import (
     derive_client_operational_status,
 )
 from py_intercom.server.gui import (
+    ClientTransportState,
     SERVER_STRUCTURE_REFRESH_INTERVAL_MS,
     SERVER_VU_REFRESH_INTERVAL_MS,
     ServerHealthState,
+    derive_client_transport_state,
     derive_server_operational_health,
 )
 import py_intercom.server.server as server_mod
@@ -189,6 +191,7 @@ def _healthy_server_clients() -> dict:
             "control_connected": True,
             "addr": ("127.0.0.1", 5000),
             "age_s": 0.02,
+            "ptt_buses": {},
         }
     }
 
@@ -204,6 +207,54 @@ def test_server_is_healthy_only_when_workers_udp_and_outputs_are_healthy() -> No
     assert health.engine.state is ServerHealthState.HEALTHY
     assert health.udp.state is ServerHealthState.HEALTHY
     assert health.audio.state is ServerHealthState.HEALTHY
+
+
+def test_silent_idle_client_with_old_udp_is_healthy() -> None:
+    clients = _healthy_server_clients()
+    clients[42]["age_s"] = 300.0
+
+    health = derive_server_operational_health(
+        _healthy_server_stats(),
+        clients,
+        {0: {"stream_active": True}},
+    )
+
+    assert derive_client_transport_state(clients[42]) is ClientTransportState.IDLE
+    assert health.udp.state is ServerHealthState.HEALTHY
+    assert health.overall.state is ServerHealthState.HEALTHY
+    assert "silencieux au repos" in health.udp.detail
+
+
+def test_client_speaking_without_recent_udp_is_degraded() -> None:
+    clients = _healthy_server_clients()
+    clients[42]["ptt_buses"] = {0: True}
+    clients[42]["age_s"] = 3.0
+
+    health = derive_server_operational_health(
+        _healthy_server_stats(),
+        clients,
+        {0: {"stream_active": True}},
+    )
+
+    assert derive_client_transport_state(clients[42]) is ClientTransportState.DEGRADED
+    assert health.udp.state is ServerHealthState.DEGRADED
+    assert health.overall.state is ServerHealthState.DEGRADED
+    assert "en parole" in health.udp.detail
+
+
+def test_client_speaking_with_recent_udp_is_active_and_healthy() -> None:
+    clients = _healthy_server_clients()
+    clients[42]["ptt_buses"] = {0: True}
+
+    health = derive_server_operational_health(
+        _healthy_server_stats(),
+        clients,
+        {0: {"stream_active": True}},
+    )
+
+    assert derive_client_transport_state(clients[42]) is ClientTransportState.ACTIVE
+    assert health.udp.state is ServerHealthState.HEALTHY
+    assert health.overall.state is ServerHealthState.HEALTHY
 
 
 def test_server_dead_worker_is_a_visible_operational_error() -> None:
