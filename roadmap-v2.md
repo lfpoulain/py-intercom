@@ -336,6 +336,7 @@ La validation avec les écrans tactiles, facteurs DPI et résolutions réellemen
 - Licence BSD-3-Clause complète ajoutée aux artefacts et archives.
 - Workflow GitHub configuré pour reconstruire Opus avant les tests Python et publier automatiquement une release depuis `main` ; les pull requests restent limitées au build et aux artefacts.
 - Runner verrouillé sur Windows Server 2022 afin de garantir le générateur Visual Studio 2022 demandé par la recette native ; étape exécutée sous Windows PowerShell 5.1 avec remontée publique du diagnostic en cas d'échec, et actions GitHub migrées vers leurs runtimes Node actuels.
+- Chaque processus natif, y compris la lecture de version CMake finale, voit son code retour consommé et contrôlé explicitement pour éviter un faux échec du wrapper GitHub Actions.
 - Validation : runtime `libopus 1.6.1`, cinq tests natifs réussis, **354 tests Python réussis en 5,76 s**, `compileall`, `pip check` et `git diff --check` réussis.
 - `client.exe` et `server.exe` reconstruits avec la nouvelle DLL de 624 128 octets effectivement embarquée, notices/manifeste distribués et smoke tests `--help` réussis (codes retour 0).
 

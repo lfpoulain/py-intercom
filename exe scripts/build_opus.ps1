@@ -171,7 +171,9 @@ if ($compilerMetadata) {
     $compilerVersion = $Matches[1]
   }
 }
-$cmakeVersion = (& $cmake.Source --version | Select-Object -First 1) -replace '^cmake version\s+', ''
+$cmakeVersionOutput = & $cmake.Source --version
+Assert-LastExitCode 'CMake version query'
+$cmakeVersion = ($cmakeVersionOutput | Select-Object -First 1) -replace '^cmake version\s+', ''
 
 $metadata = [ordered]@{
   schema_version = 1

@@ -65,3 +65,10 @@ def test_release_workflow_builds_verified_opus_before_python_validation() -> Non
     opus_step = workflow[workflow.index("Build verified Opus runtime") :]
     assert opus_step.index("shell: powershell") < opus_step.index("Validate sources")
     assert "Verified Opus build failed" in opus_step
+
+
+def test_opus_recipe_checks_the_final_native_process_exit_code() -> None:
+    recipe = (ROOT / "exe scripts" / "build_opus.ps1").read_text(encoding="utf-8")
+
+    assert "$cmakeVersionOutput = & $cmake.Source --version" in recipe
+    assert "Assert-LastExitCode 'CMake version query'" in recipe
