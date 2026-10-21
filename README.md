@@ -1,61 +1,145 @@
+<div align="center">
+
+<img src="docs/images/logo.png" width="150" alt="Logo py-intercom">
+
 # py-intercom
 
-Intercom audio temps réel sur réseau local pour les équipes de production live, sous Windows.
+**L'intercom de régie, sur votre réseau local.**<br>
+Push-to-talk, mix-minus et retours plateau en temps réel, avec de simples PC Windows.
 
-- **Serveur Régie** : reçoit les micros, route l'audio sur trois bus (Régie, Plateau, VMix), alimente les sorties physiques et renvoie à chaque opérateur son propre mix-minus.
-- **Client** : capture le micro, gère le push-to-talk par bus et joue le retour au casque.
+[![Dernière version](https://img.shields.io/github/v/release/lfpoulain/py-intercom?style=flat-square&label=version&color=2bb5a0)](https://github.com/lfpoulain/py-intercom/releases/latest)
+[![Build](https://img.shields.io/github/actions/workflow/status/lfpoulain/py-intercom/release.yml?branch=main&style=flat-square&label=build)](https://github.com/lfpoulain/py-intercom/actions/workflows/release.yml)
+![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0b2c45?style=flat-square&logo=windows)
+[![Licence](https://img.shields.io/badge/licence-CC%20BY--NC--ND%204.0-555?style=flat-square)](LICENSE)
 
-Audio Opus 48 kHz mono, trames de 10 ms, files bornées qui privilégient toujours le direct plutôt que l'accumulation de retard.
+<br>
 
-## Télécharger
+[![Télécharger le serveur](https://img.shields.io/badge/T%C3%A9l%C3%A9charger-Serveur%20R%C3%A9gie-d7261e?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/lfpoulain/py-intercom/releases/latest/download/py-intercom-server.exe)
+&nbsp;
+[![Télécharger le client](https://img.shields.io/badge/T%C3%A9l%C3%A9charger-Client-0b2c45?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/lfpoulain/py-intercom/releases/latest/download/py-intercom-client.exe)
 
-Aucune installation : télécharger l'exécutable puis double-cliquer.
+<sub>Aucune installation : un fichier, un double-clic.</sub>
 
-- **Serveur Régie** : [py-intercom-server.exe](https://github.com/lfpoulain/py-intercom/releases/latest/download/py-intercom-server.exe)
-- **Client** : [py-intercom-client.exe](https://github.com/lfpoulain/py-intercom/releases/latest/download/py-intercom-client.exe)
+<br>
 
-Ces liens pointent toujours vers la dernière version. Toutes les versions sont dans les [releases](https://github.com/lfpoulain/py-intercom/releases). Les exécutables ne sont pas signés : si Windows SmartScreen s'affiche, choisir « Informations complémentaires » puis « Exécuter quand même ».
+<img src="docs/images/server.png" alt="Fenêtre du serveur Régie" width="860">
 
-## Lancer depuis les sources
+</div>
 
-Prérequis : Windows et Python 3.11 ou plus récent.
+## ✨ Pourquoi py-intercom
 
-Double-cliquer sur un lanceur du dossier [`launchers/`](launchers) : au premier lancement, il crée l'environnement Python et installe les dépendances. Les variantes `debug` ouvrent en plus une console de diagnostic.
+<table>
+<tr>
+<td width="33%" valign="top">
 
-Ou depuis un terminal :
+### 🎙️ Push-to-talk par bus
+Trois destinations : **Régie**, **Plateau** et **VMix**. Chaque bus a sa touche, en mode PTT, Toggle ou micro ouvert.
+
+</td>
+<td width="33%" valign="top">
+
+### 🎧 Mix-minus automatique
+Chaque opérateur entend l'équipe, jamais sa propre voix. Le programme peut s'ajouter en retour, avec un volume réglable.
+
+</td>
+<td width="33%" valign="top">
+
+### ⚡ Temps réel avant tout
+Opus 48 kHz, trames de 10 ms, files bornées : le retard ne s'accumule jamais, même sur un réseau capricieux.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🔊 Sorties physiques
+Le serveur envoie Plateau et VMix vers les cartes son de votre choix : retours de scène, régie vidéo, enregistrement.
+
+</td>
+<td valign="top">
+
+### 🛡️ Sûr pendant le live
+Aucune prise de parole fantôme : un micro ne s'ouvre que sur une session vérifiée, et tout PTT est relâché au moindre doute.
+
+</td>
+<td valign="top">
+
+### 🩺 État lisible d'un coup d'œil
+En ligne, dégradé, au repos : chaque client et chaque flux est visible, avec ses VU-mètres et ses diagnostics.
+
+</td>
+</tr>
+</table>
+
+## 🎬 Le poste client
+
+<div align="center">
+<img src="docs/images/client.png" alt="Fenêtre du client" width="700">
+</div>
+
+Choisissez le serveur (découvert automatiquement sur le réseau), votre micro et votre casque, puis parlez avec vos raccourcis.
+
+## ⚙️ Comment ça marche
+
+```mermaid
+flowchart LR
+    A["🎧 Cadreur"] <-->|voix| S
+    B["🎧 Plateau"] <-->|voix| S
+    C["🎧 Réalisation"] <-->|voix| S
+    S{{"🎛️ Serveur Régie<br/>routage · mix-minus"}}
+    S -->|bus Plateau| P["🔊 Retours plateau"]
+    S -->|bus VMix| V["🎬 VMix / enregistrement"]
+    R["📺 Programme"] -->|Return| S
+```
+
+Une machine fait tourner le **serveur**, chaque opérateur lance un **client**. L'audio circule en UDP sur le réseau local ; une session de contrôle TCP doit être validée avant que le micro d'un poste ne puisse s'ouvrir.
+
+## 🚀 Démarrer en 3 étapes
+
+1. **Sur la machine Régie** : lancer `py-intercom-server.exe`, ajouter les sorties physiques, cliquer sur **Démarrer**.
+2. **Sur chaque poste** : lancer `py-intercom-client.exe`, choisir le serveur, le micro et le casque, cliquer sur **Connecter**.
+3. **Attendre « En ligne »**, régler les touches PTT, puis faire un tour de micro.
+
+Ports utilisés : UDP 5000 (audio), TCP 5001 (contrôle), UDP 5002 (découverte). Le [guide d'exploitation](docs/guide-exploitation.md) couvre les gains, les casques Bluetooth et le dépannage.
+
+## 📚 Documentation
+
+| | Document | Contenu |
+|---|---|---|
+| 🎚️ | [Guide d'exploitation](docs/guide-exploitation.md) | Mise en place, PTT, gains, Bluetooth, dépannage |
+| 🧭 | [Architecture](docs/architecture.md) | Organisation du code, threads, routage, latence |
+| 📡 | [Protocole](docs/protocole.md) | Paquets audio UDP et contrôle TCP |
+| 🛠️ | [Développement](docs/developpement.md) | Tests, lint, build, publication des versions |
+| 🗺️ | [Roadmap](docs/roadmap.md) | Décisions, travaux ouverts, qualification |
+
+## 🛠️ Lancer depuis les sources
+
+Avec Python 3.11+ sous Windows, double-cliquer sur un lanceur de [`launchers/`](launchers) : l'environnement s'installe tout seul. Ou :
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
-.\.venv\Scripts\python run_server.py
-.\.venv\Scripts\python run_client.py
+.\.venv\Scripts\python run_server.py   # ou run_client.py
 ```
 
-Options : `--debug` (console et logs détaillés) et `--minimized`.
+Chaque push sur `main` est testé, construit et publié automatiquement en nouvelle version : voir [Développement](docs/developpement.md).
 
-## Documentation
-
-| Document | Pour qui | Contenu |
-|---|---|---|
-| [Guide d'exploitation](docs/guide-exploitation.md) | Opérateurs | Mise en place, PTT, gains, Bluetooth, dépannage, fichiers |
-| [Architecture](docs/architecture.md) | Développeurs | Organisation du code, threads, routage, latence |
-| [Protocole](docs/protocole.md) | Développeurs | Paquets audio UDP V2 et contrôle TCP V2 |
-| [Développement](docs/developpement.md) | Développeurs | Tests, lint, build Opus et exécutables, conventions |
-| [Roadmap](docs/roadmap.md) | Tous | Décisions actées, travaux ouverts, qualification |
-
-## Organisation du dépôt
+<details>
+<summary><b>Organisation du dépôt</b></summary>
 
 ```text
 src/py_intercom/   code de l'application (common/, server/, client/)
 tests/             tests automatisés, sans carte son
 launchers/         lanceurs Windows en double-clic
-scripts/           build de la DLL Opus et des exécutables
+scripts/           build des exécutables et de la DLL Opus, captures d'écran
 bin/               opus.dll (libopus 1.6.1) et son manifeste de build
-docs/              documentation
-run_server.py      point d'entrée du serveur
-run_client.py      point d'entrée du client
+docs/              documentation et images
 ```
 
-## Licence
+</details>
 
-Distribué sous licence **CC BY-NC-ND 4.0** : voir [LICENSE](LICENSE). Les dépendances et la provenance de la DLL Opus sont décrites dans [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+## 📄 Licence
+
+Distribué sous licence [CC BY-NC-ND 4.0](LICENSE). Dépendances et provenance de la DLL Opus : [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+<div align="center"><sub>Fait pour les équipes de live. 🎬</sub></div>

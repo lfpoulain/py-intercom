@@ -1153,6 +1153,9 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._connect_btn.setToolTip(
                 "Démarrer les flux audio puis établir la session intercom"
             )
+            if getattr(self, "_selection_hint_shown", False):
+                self._device_status.setText("")
+                self._selection_hint_shown = False
             return
 
         missing: list[str] = []
@@ -1165,6 +1168,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._connect_btn.setToolTip(detail)
         if not refresh_active and not self._last_device_error:
             self._device_status.setText(detail)
+            self._selection_hint_shown = True
 
     def _reset_identity(self) -> None:
         if self._connected:

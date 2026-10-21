@@ -48,6 +48,8 @@ Aucune carte son n'est nécessaire. Les tests GUI tournent hors écran. La suite
 1. à chaque push et pull request : lint, tests, construction des exécutables (téléchargeables comme artefact du run) ;
 2. sur `main` uniquement : publication d'une release GitHub `vX.Y.N`, marquée comme la plus récente.
 
+Un push qui ne touche que la documentation (`*.md`, `docs/`) ne publie pas de nouvelle version.
+
 Le numéro de version est `X.Y` (pris dans `src/py_intercom/__init__.py`) suivi du numéro de build CI. Il s'affiche dans le titre des fenêtres. Pour passer en 2.1 ou en 3.0, modifier `__version__` dans ce fichier.
 
 Contenu de chaque release :
@@ -68,6 +70,14 @@ Les liens `https://github.com/lfpoulain/py-intercom/releases/latest/download/<fi
 ```
 
 Même script que la CI : il produit les quatre fichiers ci-dessus dans `dist\` à partir de [`scripts/py-intercom.spec`](../scripts/py-intercom.spec). `-Version 2.0.42` estampille une version précise.
+
+## Captures d'écran du README
+
+```powershell
+.\.venv\Scripts\python scripts\screenshots.py
+```
+
+Régénère `docs/images/` à partir des vraies fenêtres : un vrai serveur et de vrais clients tournent en local, seules les cartes son sont simulées. Les presets et réglages de l'utilisateur ne sont pas touchés.
 
 ## DLL Opus
 
