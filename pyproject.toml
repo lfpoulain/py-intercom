@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "py-intercom"
-version = "2.0.0.dev0"
+dynamic = ["version"]
 description = "Low-latency desktop intercom for live production teams"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,8 +22,36 @@ dependencies = [
 package-dir = {"" = "src"}
 include-package-data = true
 
+[tool.setuptools.dynamic]
+version = { attr = "py_intercom.__version__" }
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
 py_intercom = ["img/*.ico", "img/*.png"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E4", "E7", "E9",  # pycodestyle errors
+    "F",               # pyflakes
+    "I",               # import order
+    "B",               # bugbear
+    "UP",              # modern syntax for Python 3.11+
+    "S110", "S112",    # no exception silently swallowed
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Entry points and conftest must prepare the DLL search path before importing.
+"run_*.py" = ["E402"]
+"tests/conftest.py" = ["E402"]
+# Tests may swallow exceptions on purpose to assert on side effects.
+"tests/**" = ["S110", "S112", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

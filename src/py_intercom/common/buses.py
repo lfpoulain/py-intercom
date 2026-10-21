@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Final, Mapping
+from typing import Final
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +51,8 @@ BUS_BY_ID: Final[Mapping[int, BusDefinition]] = MappingProxyType(
     {definition.bus_id: definition for definition in FIXED_BUSES}
 )
 FIXED_BUS_IDS: Final[frozenset[int]] = frozenset(BUS_BY_ID)
+# One bit per bus, as carried by the audio packet header.
+FIXED_BUS_MASK: Final[int] = sum(1 << bus_id for bus_id in FIXED_BUS_IDS)
 
 
 def require_bus(bus_id: int) -> BusDefinition:

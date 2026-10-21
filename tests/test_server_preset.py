@@ -3,11 +3,14 @@ import json
 import numpy as np
 import pytest
 
+import py_intercom.common.opus_codec as opus_codec_mod
+import py_intercom.server.models as models_mod
+import py_intercom.server.presets as presets_mod
+import py_intercom.server.server as server_mod
 from py_intercom.common.constants import FRAME_SAMPLES
 from py_intercom.common.control_protocol import CONTROL_PROTOCOL_VERSION, encode_control_message
 from py_intercom.common.identity import client_id_from_uuid
 from py_intercom.common.preset_schema import PRESET_SCHEMA_VERSION
-import py_intercom.server.server as server_mod
 
 
 class _FakeEncoder:
@@ -39,9 +42,9 @@ class _ControlConnection:
 
 
 def _make_server(monkeypatch, preset_path):
-    monkeypatch.setattr(server_mod, "OpusEncoder", lambda *args, **kwargs: _FakeEncoder())
-    monkeypatch.setattr(server_mod, "OpusDecoder", lambda *args, **kwargs: _FakeDecoder())
-    monkeypatch.setattr(server_mod, "list_devices", lambda *args, **kwargs: [])
+    monkeypatch.setattr(opus_codec_mod, "OpusEncoder", lambda *args, **kwargs: _FakeEncoder())
+    monkeypatch.setattr(opus_codec_mod, "OpusDecoder", lambda *args, **kwargs: _FakeDecoder())
+    monkeypatch.setattr(presets_mod, "list_devices", lambda *args, **kwargs: [])
     return server_mod.IntercomServer(
         port=0,
         preset_path=str(preset_path),
@@ -50,8 +53,8 @@ def _make_server(monkeypatch, preset_path):
 
 
 def test_save_preset_does_not_hold_server_lock_while_listing_devices(monkeypatch):
-    monkeypatch.setattr(server_mod, "OpusEncoder", lambda *args, **kwargs: _FakeEncoder())
-    monkeypatch.setattr(server_mod, "OpusDecoder", lambda *args, **kwargs: _FakeDecoder())
+    monkeypatch.setattr(opus_codec_mod, "OpusEncoder", lambda *args, **kwargs: _FakeEncoder())
+    monkeypatch.setattr(opus_codec_mod, "OpusDecoder", lambda *args, **kwargs: _FakeDecoder())
 
     srv = server_mod.IntercomServer(
         port=0,
@@ -71,7 +74,7 @@ def test_save_preset_does_not_hold_server_lock_while_listing_devices(monkeypatch
     def fake_atomic_write_json(path, data):
         written.append((path, data))
 
-    monkeypatch.setattr(server_mod, "list_devices", fake_list_devices)
+    monkeypatch.setattr(presets_mod, "list_devices", fake_list_devices)
     monkeypatch.setattr(server_mod, "atomic_write_json", fake_atomic_write_json)
 
     try:
@@ -170,13 +173,13 @@ def test_corrupt_preset_blocks_all_automatic_overwrites(monkeypatch, tmp_path):
     srv = _make_server(monkeypatch, preset_path)
 
     try:
-        with pytest.raises(server_mod.PresetLoadError) as raised:
+        with pytest.raises(models_mod.PresetLoadError) as raised:
             srv.load_preset()
         assert raised.value.path == preset_path
         assert raised.value.backup_path == preset_path.with_suffix(".json.bak")
 
         srv._autosave_preset()
-        with pytest.raises(server_mod.PresetLoadError):
+        with pytest.raises(models_mod.PresetLoadError):
             srv.save_preset()
     finally:
         srv.stop()
@@ -202,11 +205,11 @@ def test_incompatible_server_preset_is_never_downgraded_or_overwritten(
     srv = _make_server(monkeypatch, preset_path)
 
     try:
-        with pytest.raises(server_mod.PresetLoadError) as raised:
+        with pytest.raises(models_mod.PresetLoadError) as raised:
             srv.load_preset()
-        assert raised.value.status is server_mod.JsonFileStatus.INVALID
+        assert raised.value.status is models_mod.JsonFileStatus.INVALID
         srv._autosave_preset()
-        with pytest.raises(server_mod.PresetLoadError):
+        with pytest.raises(models_mod.PresetLoadError):
             srv.save_preset()
     finally:
         srv.stop()

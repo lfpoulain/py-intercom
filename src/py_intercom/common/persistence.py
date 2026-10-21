@@ -3,11 +3,12 @@ from __future__ import annotations
 import copy
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 from .jsonio import atomic_write_json
-
+from .logging import best_effort
 
 _FACTORY_VALUE = object()
 
@@ -28,9 +29,9 @@ class DebouncedJsonWriter:
         path: Path,
         *,
         delay_s: float = 0.35,
-        data_factory: Optional[Callable[[], Any]] = None,
+        data_factory: Callable[[], Any] | None = None,
         write_func: Callable[[Path, Any], None] = atomic_write_json,
-        on_error: Optional[Callable[[Exception], None]] = None,
+        on_error: Callable[[Exception], None] | None = None,
         thread_name: str = "json-preset-writer",
     ) -> None:
         self._path = Path(path)
@@ -41,7 +42,7 @@ class DebouncedJsonWriter:
         self._thread_name = str(thread_name)
 
         self._condition = threading.Condition()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._closed = False
         self._pending = False
         self._pending_value: Any = _FACTORY_VALUE
@@ -50,10 +51,10 @@ class DebouncedJsonWriter:
         self._settled_revision = 0
         self._writing = False
         self._failed_revision = 0
-        self._last_error: Optional[Exception] = None
+        self._last_error: Exception | None = None
 
     @property
-    def last_error(self) -> Optional[Exception]:
+    def last_error(self) -> Exception | None:
         with self._condition:
             return self._last_error
 
@@ -108,7 +109,7 @@ class DebouncedJsonWriter:
     def close(self, *, raise_on_error: bool = False) -> None:
         """Flush pending data, stop the worker, and join it exactly once."""
 
-        error: Optional[Exception] = None
+        error: Exception | None = None
         try:
             self.flush(raise_on_error=True)
         except Exception as exc:
@@ -156,7 +157,7 @@ class DebouncedJsonWriter:
                 self._pending_value = _FACTORY_VALUE
                 self._writing = True
 
-            error: Optional[Exception] = None
+            error: Exception | None = None
             try:
                 if value is _FACTORY_VALUE:
                     factory = self._data_factory
@@ -179,7 +180,5 @@ class DebouncedJsonWriter:
                 self._condition.notify_all()
 
             if error is not None and self._on_error is not None:
-                try:
+                with best_effort("_on_error()"):
                     self._on_error(error)
-                except Exception:
-                    pass

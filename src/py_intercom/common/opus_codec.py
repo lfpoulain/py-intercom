@@ -14,7 +14,6 @@ from .constants import (
     SAMPLE_RATE,
 )
 
-
 _OPUS_SAMPLE_RATES = frozenset((8_000, 12_000, 16_000, 24_000, 48_000))
 _MAX_OPUS_PACKET_BYTES = 1_275
 
@@ -39,7 +38,7 @@ def _valid_frame_sizes(sample_rate: int) -> frozenset[int]:
     )
 
 
-def _validate_config(config: "OpusConfig") -> None:
+def _validate_config(config: OpusConfig) -> None:
     if isinstance(config.sample_rate, bool) or not isinstance(config.sample_rate, int):
         raise TypeError("sample_rate must be an integer")
     if config.sample_rate not in _OPUS_SAMPLE_RATES:

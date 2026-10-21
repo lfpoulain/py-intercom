@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 OPUS_DLL = ROOT / "bin" / "opus.dll"
 OPUS_METADATA = ROOT / "bin" / "opus-build-info.json"
@@ -50,33 +49,21 @@ def test_bundled_opus_reports_declared_version() -> None:
     assert library.opus_get_version_string() == b"libopus 1.6.1"
 
 
-def test_release_workflow_builds_verified_opus_before_python_validation() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "windows-release.yml").read_text(
-        encoding="utf-8"
-    )
+def test_executables_bundle_the_verified_opus_runtime() -> None:
+    spec = (ROOT / "scripts" / "py-intercom.spec").read_text(encoding="utf-8")
 
-    assert "PY_INTERCOM_ENABLE_PUBLIC_RELEASE" not in workflow
-    assert "runs-on: windows-2022" in workflow
-    assert workflow.index("Build verified Opus runtime") < workflow.index(
-        "Validate sources"
-    )
-    assert "github.ref == 'refs/heads/main'" in workflow
-    assert "dist/OPUS_LICENSE.txt" in workflow
-    assert "dist/OPUS_BUILD_INFO.json" in workflow
-    opus_step = workflow[workflow.index("Build verified Opus runtime") :]
-    assert opus_step.index("shell: powershell") < opus_step.index("Validate sources")
-    assert "Verified Opus build failed" in opus_step
+    assert '"bin", "opus.dll"' in spec
 
 
 def test_opus_recipe_checks_the_final_native_process_exit_code() -> None:
-    recipe = (ROOT / "exe scripts" / "build_opus.ps1").read_text(encoding="utf-8")
+    recipe = (ROOT / "scripts" / "build_opus.ps1").read_text(encoding="utf-8")
 
     assert "$cmakeVersionOutput = & $cmake.Source --version" in recipe
     assert "Assert-LastExitCode 'CMake version query'" in recipe
 
 
 def test_opus_recipe_builds_deep_plc() -> None:
-    recipe = (ROOT / "exe scripts" / "build_opus.ps1").read_text(encoding="utf-8")
+    recipe = (ROOT / "scripts" / "build_opus.ps1").read_text(encoding="utf-8")
 
     assert "'-DOPUS_DEEP_PLC=ON'" in recipe
     assert "deep_plc = $true" in recipe

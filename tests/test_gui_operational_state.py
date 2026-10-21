@@ -5,23 +5,28 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import py_intercom.common.opus_codec as opus_codec_mod
+import py_intercom.server.server as server_mod
 from py_intercom.client.gui import (
     CLIENT_STATE_REFRESH_INTERVAL_MS,
     CLIENT_VU_REFRESH_INTERVAL_MS,
-    ClientOperationalStatus,
-    ClientOperationalState,
     ClientWindow,
+)
+from py_intercom.client.status import (
+    ClientOperationalState,
+    ClientOperationalStatus,
     derive_client_operational_status,
 )
 from py_intercom.server.gui import (
-    ClientTransportState,
     SERVER_STRUCTURE_REFRESH_INTERVAL_MS,
     SERVER_VU_REFRESH_INTERVAL_MS,
+)
+from py_intercom.server.health import (
+    ClientTransportState,
     ServerHealthState,
     derive_client_transport_state,
     derive_server_operational_health,
 )
-import py_intercom.server.server as server_mod
 
 
 def test_vu_refresh_is_decoupled_from_slower_structural_updates() -> None:
@@ -48,8 +53,8 @@ def test_server_snapshot_contract_exposes_ui_audio_health(
         def decode(self, payload) -> np.ndarray:
             return np.zeros((480,), dtype=np.float32)
 
-    monkeypatch.setattr(server_mod, "OpusEncoder", Encoder)
-    monkeypatch.setattr(server_mod, "OpusDecoder", Decoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusEncoder", Encoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusDecoder", Decoder)
     server = server_mod.IntercomServer(
         bind_ip="127.0.0.1",
         port=0,

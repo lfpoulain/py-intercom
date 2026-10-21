@@ -1,310 +1,52 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
-from enum import Enum
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Dict, Mapping, Optional
 
 from loguru import logger
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from .server import IntercomServer, PresetLoadError
+from .. import __version__
 from ..common.buses import BUS_BY_ID, FIXED_BUSES, REGIE_BUS_ID
+from ..common.constants import AUDIO_UDP_PORT, MAX_GAIN_DB
 from ..common.devices import format_device_label, list_devices, resolve_device
 from ..common.gui_utils import DeviceWorker, is_checked
 from ..common.identity import client_id_from_uuid
 from ..common.jsonio import JsonFileStatus, atomic_write_json, read_json_file_result
+from ..common.logging import best_effort
 from ..common.preset_schema import PresetSchemaError, migrate_preset, stamp_preset
-from ..common.constants import AUDIO_UDP_PORT, MAX_GAIN_DB
 from ..common.theme import (
     EmptyStateTableWidget,
-    VuMeter,
     StatusIndicator,
+    VuMeter,
     apply_theme,
+    cell_vu,
+    centered_checkbox,
     make_field,
     patch_combo,
-    centered_checkbox,
-    cell_vu,
     set_status_label,
 )
-
+from .health import (
+    ClientTransportState,
+    derive_client_transport_state,
+    derive_server_operational_health,
+)
+from .server import IntercomServer, PresetLoadError
 
 SERVER_STRUCTURE_REFRESH_INTERVAL_MS = 500
 SERVER_VU_REFRESH_INTERVAL_MS = 67
 
 
-class ServerHealthState(str, Enum):
-    HEALTHY = "healthy"
-    DEGRADED = "degraded"
-    ERROR = "error"
-    UNKNOWN = "unknown"
-
-
-class ClientTransportState(str, Enum):
-    OFFLINE = "offline"
-    WAITING_UDP = "waiting_udp"
-    IDLE = "idle"
-    ACTIVE = "active"
-    DEGRADED = "degraded"
-
-
-@dataclass(frozen=True)
-class HealthFacet:
-    state: ServerHealthState
-    label: str
-    detail: str
-
-
-@dataclass(frozen=True)
-class ServerOperationalHealth:
-    overall: HealthFacet
-    engine: HealthFacet
-    control: HealthFacet
-    udp: HealthFacet
-    audio: HealthFacet
-
-
-_EXPECTED_SERVER_WORKERS = frozenset({"udp-rx", "udp-tx", "mix", "ctrl-accept"})
-
-
-def derive_client_transport_state(
-    client: Mapping[str, object],
-    *,
-    udp_recent_threshold_s: float = 1.0,
-) -> ClientTransportState:
-    """Separate normal silence from an actual loss of live UDP audio."""
-
-    if client.get("control_connected") is not True:
-        return ClientTransportState.OFFLINE
-    if not client.get("addr"):
-        return ClientTransportState.WAITING_UDP
-
-    ptt_buses_raw = client.get("ptt_buses")
-    ptt_buses = ptt_buses_raw if isinstance(ptt_buses_raw, Mapping) else {}
-    if not any(value is True for value in ptt_buses.values()):
-        return ClientTransportState.IDLE
-
-    try:
-        age_s = float(client.get("age_s"))
-    except (TypeError, ValueError):
-        return ClientTransportState.DEGRADED
-    if age_s <= float(udp_recent_threshold_s):
-        return ClientTransportState.ACTIVE
-    return ClientTransportState.DEGRADED
-
-
-def derive_server_operational_health(
-    stats: Mapping[str, object],
-    clients: Mapping[int, Mapping[str, object]],
-    outputs: Mapping[int, Mapping[str, object]],
-    *,
-    udp_recent_threshold_s: float = 1.0,
-) -> ServerOperationalHealth:
-    """Build a conservative operator view from the server health signals."""
-
-    running = stats.get("running") is True
-    worker_alive_raw = stats.get("worker_alive")
-    worker_alive = worker_alive_raw if isinstance(worker_alive_raw, Mapping) else {}
-    worker_errors_raw = stats.get("worker_errors")
-    worker_errors = worker_errors_raw if isinstance(worker_errors_raw, Mapping) else {}
-    dead_workers = sorted(
-        name for name in _EXPECTED_SERVER_WORKERS if worker_alive.get(name) is not True
-    )
-
-    if not running:
-        engine = HealthFacet(
-            ServerHealthState.ERROR,
-            "Moteur : arrêt",
-            "Le moteur ne signale plus son état running.",
-        )
-    elif worker_errors or dead_workers:
-        details = []
-        if dead_workers:
-            details.append("workers absents : " + ", ".join(dead_workers))
-        if worker_errors:
-            details.append(
-                "erreurs : "
-                + "; ".join(f"{name}: {error}" for name, error in worker_errors.items())
-            )
-        engine = HealthFacet(
-            ServerHealthState.ERROR,
-            "Moteur : erreur",
-            "; ".join(details),
-        )
-    else:
-        engine = HealthFacet(
-            ServerHealthState.HEALTHY,
-            "Moteur : OK",
-            "Tous les workers critiques sont actifs.",
-        )
-
-    try:
-        connected_count = int(stats.get("control_connected_clients", 0))
-    except (TypeError, ValueError):
-        connected_count = 0
-    control = HealthFacet(
-        ServerHealthState.HEALTHY,
-        f"Ctrl : {connected_count}",
-        (
-            f"{connected_count} client(s) avec contrôle TCP actif."
-            if connected_count
-            else "Canal de contrôle prêt, aucun client connecté."
-        ),
-    )
-
-    try:
-        waiting_udp = int(stats.get("clients_waiting_udp", 0))
-    except (TypeError, ValueError):
-        waiting_udp = 0
-    connected_snapshots = 0
-    associated_udp = 0
-    active_udp = 0
-    stale_active_udp = 0
-    for client in clients.values():
-        if client.get("control_connected") is not True:
-            continue
-        connected_snapshots += 1
-        transport_state = derive_client_transport_state(
-            client,
-            udp_recent_threshold_s=udp_recent_threshold_s,
-        )
-        if transport_state in {
-            ClientTransportState.IDLE,
-            ClientTransportState.ACTIVE,
-            ClientTransportState.DEGRADED,
-        }:
-            associated_udp += 1
-        if transport_state is ClientTransportState.ACTIVE:
-            active_udp += 1
-        elif transport_state is ClientTransportState.DEGRADED:
-            stale_active_udp += 1
-
-    missing_snapshots = max(0, connected_count - connected_snapshots)
-    missing_associations = max(0, connected_count - associated_udp)
-    if (
-        waiting_udp > 0
-        or missing_snapshots > 0
-        or missing_associations > 0
-        or stale_active_udp > 0
-    ):
-        details = []
-        if waiting_udp > 0 or missing_associations > 0:
-            details.append(
-                f"{max(waiting_udp, missing_associations)} client(s) attendent l'association UDP"
-            )
-        if missing_snapshots > 0:
-            details.append(f"{missing_snapshots} état(s) client manquant(s)")
-        if stale_active_udp > 0:
-            details.append(
-                f"{stale_active_udp} client(s) en parole n'envoient plus d'audio récent"
-            )
-        udp = HealthFacet(
-            ServerHealthState.DEGRADED,
-            f"UDP : {associated_udp}/{connected_count}",
-            "; ".join(details) + ".",
-        )
-    else:
-        udp = HealthFacet(
-            ServerHealthState.HEALTHY,
-            f"UDP : {associated_udp}",
-            (
-                (
-                    f"{associated_udp} client(s) associé(s), dont {active_udp} en parole ; "
-                    "les clients silencieux au repos sont nominaux."
-                )
-                if associated_udp
-                else "Transport UDP prêt, aucun client connecté."
-            ),
-        )
-
-    explicit_output_errors = []
-    inactive_outputs = []
-    unknown_outputs = []
-    for output_id, output in outputs.items():
-        error = str(output.get("stream_error") or output.get("last_error") or "")
-        if error:
-            explicit_output_errors.append(f"sortie {output_id}: {error}")
-        if "stream_active" not in output:
-            unknown_outputs.append(int(output_id))
-        elif output.get("stream_active") is not True:
-            inactive_outputs.append(int(output_id))
-
-    return_enabled = stats.get("return_enabled") is True
-    return_active_known = "return_stream_active" in stats
-    return_inactive = return_enabled and stats.get("return_stream_active") is not True
-    return_error = (
-        str(stats.get("return_stream_error") or "") if return_enabled else ""
-    )
-    if not outputs:
-        audio = HealthFacet(
-            ServerHealthState.DEGRADED,
-            "Audio : aucune",
-            "Aucune sortie audio n'est configurée.",
-        )
-    elif explicit_output_errors or inactive_outputs or return_inactive or return_error:
-        details = list(explicit_output_errors)
-        if inactive_outputs:
-            details.append(
-                "streams inactifs : " + ", ".join(str(i) for i in inactive_outputs)
-            )
-        if return_inactive:
-            details.append("entrée Return inactive")
-        if return_error:
-            details.append(f"Return : {return_error}")
-        audio = HealthFacet(
-            ServerHealthState.ERROR,
-            "Audio : erreur",
-            "; ".join(details),
-        )
-    elif unknown_outputs or (return_enabled and not return_active_known):
-        audio = HealthFacet(
-            ServerHealthState.UNKNOWN,
-            f"Audio : {len(outputs)}",
-            "L'activité de certains streams audio n'est pas encore confirmée.",
-        )
-    else:
-        audio = HealthFacet(
-            ServerHealthState.HEALTHY,
-            f"Audio : {len(outputs)} OK",
-            "Tous les streams audio configurés sont actifs.",
-        )
-
-    facets = (engine, control, udp, audio)
-    if any(facet.state is ServerHealthState.ERROR for facet in facets):
-        overall = HealthFacet(
-            ServerHealthState.ERROR,
-            "Erreur opérationnelle",
-            "Au moins un composant critique est en erreur.",
-        )
-    elif any(
-        facet.state in {ServerHealthState.DEGRADED, ServerHealthState.UNKNOWN}
-        for facet in facets
-    ):
-        overall = HealthFacet(
-            ServerHealthState.DEGRADED,
-            "En service dégradé",
-            "Le serveur fonctionne, mais toute la chaîne audio n'est pas confirmée.",
-        )
-    else:
-        overall = HealthFacet(
-            ServerHealthState.HEALTHY,
-            "En service",
-            "Moteur, transport et sorties audio opérationnels.",
-        )
-    return ServerOperationalHealth(overall, engine, control, udp, audio)
-
-
-
 class ServerWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Py-Intercom Server")
+        self.setWindowTitle(f"Py-Intercom Server {__version__}")
         self.setMinimumSize(1040, 720)
         self.resize(1280, 820)
         self._set_app_icon()
 
-        self._server: Optional[IntercomServer] = None
+        self._server: IntercomServer | None = None
         self._settings = QtCore.QSettings("py-intercom", "server-gui")
 
         # Status bar
@@ -468,11 +210,11 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._clients.setAlternatingRowColors(True)
 
         self._client_row_ids: list[int] = []
-        self._client_uuid_by_id: Dict[int, str] = {}
-        self._input_gain_widgets: Dict[int, QtWidgets.QSlider] = {}
-        self._input_gain_labels: Dict[int, QtWidgets.QLabel] = {}
-        self._vu_widgets: Dict[int, VuMeter] = {}
-        self._status_widgets: Dict[int, StatusIndicator] = {}
+        self._client_uuid_by_id: dict[int, str] = {}
+        self._input_gain_widgets: dict[int, QtWidgets.QSlider] = {}
+        self._input_gain_labels: dict[int, QtWidgets.QLabel] = {}
+        self._vu_widgets: dict[int, VuMeter] = {}
+        self._status_widgets: dict[int, StatusIndicator] = {}
 
         self._forget_client_btn = QtWidgets.QPushButton("Oublier le client")
         self._forget_client_btn.setProperty("class", "danger")
@@ -488,20 +230,20 @@ class ServerWindow(QtWidgets.QMainWindow):
 
         # -- Outputs group --
         self._output_row_ids: list[int] = []
-        self._output_device_widgets: Dict[int, QtWidgets.QComboBox] = {}
-        self._output_bus_widgets: Dict[int, QtWidgets.QComboBox] = {}
-        self._output_gain_widgets: Dict[int, QtWidgets.QSlider] = {}
-        self._output_gain_labels: Dict[int, QtWidgets.QLabel] = {}
-        self._output_vu_widgets: Dict[int, VuMeter] = {}
-        self._output_status_widgets: Dict[int, StatusIndicator] = {}
+        self._output_device_widgets: dict[int, QtWidgets.QComboBox] = {}
+        self._output_bus_widgets: dict[int, QtWidgets.QComboBox] = {}
+        self._output_gain_widgets: dict[int, QtWidgets.QSlider] = {}
+        self._output_gain_labels: dict[int, QtWidgets.QLabel] = {}
+        self._output_vu_widgets: dict[int, VuMeter] = {}
+        self._output_status_widgets: dict[int, StatusIndicator] = {}
         self._output_devices_cache: list[tuple[str, int]] = []
         self._bus_selector = QtWidgets.QComboBox()
         patch_combo(self._bus_selector)
         self._bus_selector_ids: list[int] = []
         self._bus_row_ids: list[int] = []
-        self._bus_gain_widgets: Dict[int, QtWidgets.QSlider] = {}
-        self._bus_gain_labels: Dict[int, QtWidgets.QLabel] = {}
-        self._bus_feed_widgets: Dict[int, QtWidgets.QCheckBox] = {}
+        self._bus_gain_widgets: dict[int, QtWidgets.QSlider] = {}
+        self._bus_gain_labels: dict[int, QtWidgets.QLabel] = {}
+        self._bus_feed_widgets: dict[int, QtWidgets.QCheckBox] = {}
 
         self._buses = EmptyStateTableWidget(
             0,
@@ -689,17 +431,17 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._vu_timer.setInterval(SERVER_VU_REFRESH_INTERVAL_MS)
         self._vu_timer.timeout.connect(self._refresh_vu_and_health)
 
-        self._device_thread: Optional[QtCore.QThread] = None
-        self._device_worker: Optional[DeviceWorker] = None
-        self._device_timeout: Optional[QtCore.QTimer] = None
+        self._device_thread: QtCore.QThread | None = None
+        self._device_worker: DeviceWorker | None = None
+        self._device_timeout: QtCore.QTimer | None = None
         self._last_device_error: str = ""
         self._last_device_count: int = 0
         self._device_refresh_timed_out_flag: bool = False
         self._device_cursor_active: bool = False
         self._close_after_device_refresh: bool = False
         self._is_closing: bool = False
-        self._preset_load_problem: Optional[tuple[JsonFileStatus, str]] = None
-        self._preset_problem_notified: Optional[str] = None
+        self._preset_load_problem: tuple[JsonFileStatus, str] | None = None
+        self._preset_problem_notified: str | None = None
         self._devices_cache: list[object] = []
         self._return_input_devices_cache: list[tuple[str, int]] = []
 
@@ -773,7 +515,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             )
 
     def _set_app_icon(self) -> None:
-        try:
+        with best_effort("set window icon"):
             import sys as _sys
             _base = getattr(_sys, "_MEIPASS", None)
             if _base:
@@ -792,13 +534,9 @@ class ServerWindow(QtWidgets.QMainWindow):
                 app = QtWidgets.QApplication.instance()
                 if app is not None:
                     app.setWindowIcon(icon)
-            try:
+            with best_effort("set Windows AppUserModelID"):
                 import ctypes
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("py-intercom.server")
-            except Exception:
-                pass
-        except Exception:
-            pass
 
     def _update_controls_for_server_state(self) -> None:
         running = self._server is not None
@@ -887,20 +625,16 @@ class ServerWindow(QtWidgets.QMainWindow):
         if not self._device_cursor_active:
             return
         self._device_cursor_active = False
-        try:
+        with best_effort("QtWidgets.QApplication.restoreOverrideCursor()"):
             QtWidgets.QApplication.restoreOverrideCursor()
-        except Exception:
-            pass
 
     def _cleanup_device_refresh(self) -> None:
         if self._device_thread is None and self._device_worker is None:
             return
 
         if self._device_timeout is not None:
-            try:
+            with best_effort("_device_timeout.stop()"):
                 self._device_timeout.stop()
-            except Exception:
-                pass
 
         self._device_timeout = None
 
@@ -923,7 +657,7 @@ class ServerWindow(QtWidgets.QMainWindow):
     def _preset_paths(self) -> Path:
         return Path.home() / "py-intercom" / "server_preset.json"
 
-    def _read_server_preset(self) -> Optional[dict]:
+    def _read_server_preset(self) -> dict | None:
         path = self._preset_paths()
         result = read_json_file_result(path)
         if result.status is JsonFileStatus.MISSING:
@@ -981,7 +715,6 @@ class ServerWindow(QtWidgets.QMainWindow):
         if self._server is not None:
             return
 
-        server_preset = self._preset_paths()
         outputs: list[dict] = []
         buses_raw: dict = {}
         clients_raw: dict = {}
@@ -1020,11 +753,11 @@ class ServerWindow(QtWidgets.QMainWindow):
             direction="input",
         )
 
-        uuid_to_id: Dict[str, int] = {}
+        uuid_to_id: dict[str, int] = {}
         for u in clients_raw.keys():
             try:
                 uuid_to_id[str(u)] = int(client_id_from_uuid(str(u)))
-            except Exception:
+            except (TypeError, ValueError):
                 continue
 
         feed_by_id = {
@@ -1035,7 +768,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         for bus_id_str, b in buses_raw.items():
             try:
                 bid = int(bus_id_str)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if not isinstance(b, dict):
                 continue
@@ -1063,7 +796,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             for definition in FIXED_BUSES
         }
 
-        snap: Dict[int, dict] = {}
+        snap: dict[int, dict] = {}
         for u, c in clients_raw.items():
             cid = uuid_to_id.get(str(u))
             if cid is None:
@@ -1090,7 +823,7 @@ class ServerWindow(QtWidgets.QMainWindow):
                 "control_age_s": None,
             }
 
-        outs: Dict[int, dict] = {}
+        outs: dict[int, dict] = {}
         for oid, o in enumerate(outputs):
             if not isinstance(o, dict):
                 continue
@@ -1143,18 +876,14 @@ class ServerWindow(QtWidgets.QMainWindow):
             return
 
         server_preset = self._preset_paths()
-        try:
+        with best_effort("server_preset.with_suffix()"):
             tmp = server_preset.with_suffix(server_preset.suffix + ".tmp")
             if tmp.exists():
                 tmp.unlink()
-        except Exception:
-            pass
 
-        try:
+        with best_effort("delete server preset"):
             if server_preset.exists():
                 server_preset.unlink()
-        except Exception:
-            pass
 
         self._preset_load_problem = None
         self._preset_problem_notified = None
@@ -1171,20 +900,16 @@ class ServerWindow(QtWidgets.QMainWindow):
     def _reopen_outputs_after_start(self) -> None:
         if self._server is None:
             return
-        try:
+        with best_effort("_server.reopen_outputs()"):
             self._server.reopen_outputs(force=True)
-        except Exception:
-            pass
 
     def _reopen_return_after_start(self) -> None:
         if self._server is None:
             return
-        try:
+        with best_effort("_server.reopen_return_input()"):
             self._server.reopen_return_input()
-        except Exception:
-            pass
 
-    def _refresh_bus_selectors(self, buses: Dict[int, dict]) -> None:
+    def _refresh_bus_selectors(self, buses: dict[int, dict]) -> None:
         sorted_buses = [
             (definition.bus_id, buses.get(definition.bus_id, {}))
             for definition in FIXED_BUSES
@@ -1212,7 +937,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         finally:
             self._bus_selector.blockSignals(False)
 
-    def _refresh_buses_table(self, buses: Dict[int, dict]) -> None:
+    def _refresh_buses_table(self, buses: dict[int, dict]) -> None:
         bus_ids = [
             definition.bus_id
             for definition in FIXED_BUSES
@@ -1229,7 +954,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         for row, bid in enumerate(bus_ids):
             b = buses.get(int(bid), {})
 
-            def _set_item(col: int, text: str) -> None:
+            def _set_item(col: int, text: str, row: int = row) -> None:
                 it = self._buses.item(row, col)
                 if it is None:
                     it = QtWidgets.QTableWidgetItem(text)
@@ -1319,7 +1044,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             return
         self._server.set_bus_gain(int(bus_id), float(value))
 
-    def _refresh_outputs_table(self, outs: Dict[int, dict], buses: Dict[int, dict]) -> None:
+    def _refresh_outputs_table(self, outs: dict[int, dict], buses: dict[int, dict]) -> None:
         output_ids = [oid for oid in sorted(outs.keys())]
         rebuild = output_ids != self._output_row_ids
         if rebuild:
@@ -1348,7 +1073,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         for row, oid in enumerate(output_ids):
             st = outs.get(int(oid), {})
 
-            def _set_item(col: int, text: str) -> None:
+            def _set_item(col: int, text: str, row: int = row) -> None:
                 it = self._outputs.item(row, col)
                 if it is None:
                     it = QtWidgets.QTableWidgetItem(text)
@@ -1450,10 +1175,8 @@ class ServerWindow(QtWidgets.QMainWindow):
                 self._output_status_widgets[int(oid)] = indicator
             vu = self._output_vu_widgets.get(int(oid))
             if vu is not None:
-                try:
+                with best_effort("vu.set_level()"):
                     vu.set_level(float(st.get("vu_dbfs", -60.0)))
-                except Exception:
-                    pass
             indicator = self._output_status_widgets.get(int(oid))
             if indicator is not None:
                 error = str(st.get("stream_error") or st.get("last_error") or "")
@@ -1603,13 +1326,11 @@ class ServerWindow(QtWidgets.QMainWindow):
                     i = dev_cb.findData(selected)
                     if i >= 0:
                         dev_cb.setCurrentIndex(i)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("output {} device list refresh failed: {}", oid, exc)
             finally:
-                try:
+                with best_effort("dev_cb.blockSignals()"):
                     dev_cb.blockSignals(False)
-                except Exception:
-                    pass
 
         self._return_input_device.blockSignals(True)
         try:
@@ -1695,10 +1416,8 @@ class ServerWindow(QtWidgets.QMainWindow):
         data["return_input_device"] = int(device_idx) if device_idx is not None else None
         data["return_input_device_name"] = str(device_name)
         data["return_input_device_hostapi"] = str(device_hostapi)
-        try:
+        with best_effort("atomic_write_json()"):
             atomic_write_json(server_preset, data)
-        except Exception:
-            pass
 
     def _forget_selected_client(self) -> None:
         try:
@@ -1721,7 +1440,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             return
 
         server_preset = self._preset_paths()
-        try:
+        with best_effort("_read_server_preset()"):
             data = self._read_server_preset()
             if data is None:
                 return
@@ -1740,8 +1459,6 @@ class ServerWindow(QtWidgets.QMainWindow):
             data["buses"] = buses
 
             atomic_write_json(server_preset, data)
-        except Exception:
-            pass
 
         self._load_preset_preview()
 
@@ -1845,7 +1562,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._stop_btn.setEnabled(True)
         self._update_controls_for_server_state()
 
-        try:
+        with best_effort("_server.get_clients_snapshot()"):
             snap = self._server.get_clients_snapshot()
             buses = self._server.get_buses_snapshot()
             outs = self._server.get_outputs_snapshot()
@@ -1858,8 +1575,6 @@ class ServerWindow(QtWidgets.QMainWindow):
                 snap,
                 outs,
             )
-        except Exception:
-            pass
 
         self._timer.start()
         self._vu_timer.start()
@@ -2059,7 +1774,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         if box.clickedButton() is reset_btn:
             self._reset_total_config()
 
-    def _set_clients_table(self, snap: Dict[int, dict], buses: Dict[int, dict]) -> None:
+    def _set_clients_table(self, snap: dict[int, dict], buses: dict[int, dict]) -> None:
         client_ids = [client_id for client_id, _st in sorted(snap.items(), key=lambda kv: kv[0])]
         rebuild = client_ids != self._client_row_ids
         if rebuild:
@@ -2072,12 +1787,10 @@ class ServerWindow(QtWidgets.QMainWindow):
 
         for row, client_id in enumerate(client_ids):
             st = snap.get(int(client_id), {})
-            try:
+            with best_effort("record client UUID"):
                 self._client_uuid_by_id[int(client_id)] = str(st.get("client_uuid") or "")
-            except Exception:
-                pass
 
-            def _set_item(col: int, text: str) -> None:
+            def _set_item(col: int, text: str, row: int = row) -> None:
                 it = self._clients.item(row, col)
                 if it is None:
                     it = QtWidgets.QTableWidgetItem(text)
@@ -2169,12 +1882,11 @@ class ServerWindow(QtWidgets.QMainWindow):
                 self._vu_widgets[int(client_id)] = vu
             vu = self._vu_widgets.get(int(client_id))
             if vu is not None:
-                try:
+                with best_effort("vu.set_level()"):
                     vu.set_level(float(st.get("vu_dbfs", -60.0)))
-                except Exception:
-                    pass
 
             # Row styling: dimmed for offline, normal for online
+            disconnected = transport_state is ClientTransportState.OFFLINE
             fg = QtGui.QColor(100, 100, 100) if disconnected else QtGui.QColor(220, 220, 220)
             for col in range(self._clients.columnCount()):
                 it = self._clients.item(row, col)

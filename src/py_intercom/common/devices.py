@@ -3,13 +3,13 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass
-from typing import Iterable, List, Literal, Optional
+from typing import Literal
 
 import sounddevice as sd
 
 from .audio_errors import shared_stream_extra_settings
 from .constants import CHANNELS, SAMPLE_RATE
-
+from .logging import best_effort
 
 _DEVICE_ENUMERATION_LOCK = threading.RLock()
 
@@ -22,8 +22,8 @@ class DeviceInfo:
     max_input_channels: int
     max_output_channels: int
     default_samplerate: int = 0
-    input_compatible: Optional[bool] = None
-    output_compatible: Optional[bool] = None
+    input_compatible: bool | None = None
+    output_compatible: bool | None = None
 
     @property
     def supports_input(self) -> bool:
@@ -43,7 +43,7 @@ class DeviceInfo:
 DeviceDirection = Literal["input", "output"]
 
 
-def _supports_direction(device: DeviceInfo, direction: Optional[DeviceDirection]) -> bool:
+def _supports_direction(device: DeviceInfo, direction: DeviceDirection | None) -> bool:
     if direction == "input":
         return bool(device.supports_input)
     if direction == "output":
@@ -72,26 +72,24 @@ def format_device_label(device: DeviceInfo) -> str:
 
 
 def list_devices(
-    hostapi_substring: Optional[str] = "WASAPI",
+    hostapi_substring: str | None = "WASAPI",
     *,
     hard_refresh: bool = False,
     validate: bool = False,
-) -> List[DeviceInfo]:
+) -> list[DeviceInfo]:
     # PortAudio exposes process-global state. In particular, the private
     # terminate/initialize refresh used on Windows must never overlap another
     # enumeration in this process.
     with _DEVICE_ENUMERATION_LOCK:
         if hard_refresh and os.name == "nt":
-            try:
+            with best_effort("sd._terminate()"):
                 sd._terminate()  # type: ignore[attr-defined]
                 sd._initialize()  # type: ignore[attr-defined]
-            except Exception:
-                pass
 
         hostapis = sd.query_hostapis()
         devices = sd.query_devices()
 
-        out: List[DeviceInfo] = []
+        out: list[DeviceInfo] = []
         for idx, dev in enumerate(devices):
             hostapi_idx = int(dev.get("hostapi", -1))
             hostapi_name = ""
@@ -104,8 +102,8 @@ def list_devices(
 
             max_in = int(dev.get("max_input_channels", 0))
             max_out = int(dev.get("max_output_channels", 0))
-            input_compatible: Optional[bool] = None
-            output_compatible: Optional[bool] = None
+            input_compatible: bool | None = None
+            output_compatible: bool | None = None
             if validate:
                 input_compatible = False
                 output_compatible = False
@@ -168,11 +166,11 @@ def list_devices(
 def resolve_device(
     saved_name: str,
     saved_hostapi: str,
-    fallback_idx: Optional[int],
-    devices: List[DeviceInfo],
+    fallback_idx: int | None,
+    devices: list[DeviceInfo],
     *,
-    direction: Optional[DeviceDirection] = None,
-) -> Optional[int]:
+    direction: DeviceDirection | None = None,
+) -> int | None:
     if direction not in (None, "input", "output"):
         raise ValueError("direction must be 'input', 'output' or None")
 
@@ -214,14 +212,3 @@ def resolve_device(
     return None
 
 
-def format_devices(devices: Iterable[DeviceInfo]) -> str:
-    """Format an inventory for diagnostics and backwards compatibility."""
-
-    lines = []
-    for device in devices:
-        lines.append(
-            f"{device.index:>3} | {device.hostapi} | "
-            f"in:{device.max_input_channels} out:{device.max_output_channels} | "
-            f"{device.name}"
-        )
-    return "\n".join(lines)

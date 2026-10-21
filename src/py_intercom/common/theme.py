@@ -6,7 +6,6 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-
 _SEMANTIC_STATUS_COLORS = {
     "online": "#2eb67d",
     "healthy": "#2eb67d",
@@ -583,7 +582,7 @@ def patch_combo(combo: QtWidgets.QComboBox, item_height: int = 22) -> None:
     combo.setItemDelegate(_CompactItemDelegate(item_height, combo))
 
 
-def cell_vu(vu: "VuMeter", h_margin: int = 4) -> QtWidgets.QWidget:
+def cell_vu(vu: VuMeter, h_margin: int = 4) -> QtWidgets.QWidget:
     """Wrap a VuMeter in a full-width container for use in QTableWidget cells."""
     w = QtWidgets.QWidget()
     lay = QtWidgets.QHBoxLayout(w)
@@ -627,9 +626,6 @@ class StatusIndicator(QtWidgets.QWidget):
         self.setFixedSize(20, 20)
         self.setAccessibleName("État inconnu")
         self.setToolTip("État inconnu")
-
-    def set_online(self, online: bool) -> None:
-        self.set_state("online" if online else "offline")
 
     def set_state(self, state: str, *, description: str = "") -> None:
         semantic_state = str(state or "unknown").lower()
@@ -713,12 +709,6 @@ class VuMeter(QtWidgets.QWidget):
         """Set level in dBFS (range -60 .. 0)."""
         dbfs = max(-60.0, min(0.0, float(dbfs)))
         ratio = (dbfs + 60.0) / 60.0
-        if abs(ratio - self._ratio) > 0.005:
-            self._ratio = ratio
-            self.update()
-
-    def set_ratio(self, ratio: float) -> None:
-        ratio = max(0.0, min(1.0, float(ratio)))
         if abs(ratio - self._ratio) > 0.005:
             self._ratio = ratio
             self.update()

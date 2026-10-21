@@ -2,17 +2,16 @@ from __future__ import annotations
 
 import math
 import operator
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Iterable, Mapping
 
 import numpy as np
 
-from .buses import FIXED_BUSES, FIXED_BUS_IDS, REGIE_BUS_ID
+from .buses import FIXED_BUS_IDS, FIXED_BUS_MASK, FIXED_BUSES, REGIE_BUS_ID
 from .constants import FRAME_SAMPLES
 
-
-VALID_BUS_MASK = sum(1 << definition.bus_id for definition in FIXED_BUSES)
+VALID_BUS_MASK = FIXED_BUS_MASK
 
 
 class RoutingError(ValueError):
@@ -114,10 +113,10 @@ class RoutingConfig:
         unknown_gain_ids = set(self.bus_gain_db) - set(FIXED_BUS_IDS)
         unknown_feed_ids = set(self.feed_to_regie) - set(FIXED_BUS_IDS)
         if unknown_gain_ids:
-            unknown = sorted((repr(value) for value in unknown_gain_ids))
+            unknown = sorted(repr(value) for value in unknown_gain_ids)
             raise RoutingError(f"unknown gain bus ids: {unknown!r}")
         if unknown_feed_ids:
-            unknown = sorted((repr(value) for value in unknown_feed_ids))
+            unknown = sorted(repr(value) for value in unknown_feed_ids)
             raise RoutingError(f"unknown feed bus ids: {unknown!r}")
 
         gains: dict[int, float] = {}

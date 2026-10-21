@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
 
@@ -9,8 +8,10 @@ from py_intercom import __version__
 from py_intercom.common import bootstrap
 
 
-def test_package_exposes_version() -> None:
-    assert __version__ == "2.0.0.dev0"
+def test_package_version_is_major_minor_patch() -> None:
+    # CI rewrites the patch number with its build number before packaging.
+    major, minor, patch = __version__.split(".")
+    assert major.isdigit() and minor.isdigit() and patch.isdigit()
 
 
 def test_prepare_windows_runtime_is_noop_off_windows(monkeypatch, tmp_path) -> None:

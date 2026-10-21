@@ -1,13 +1,13 @@
 import json
 import time
 
+from py_intercom.common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET
 from py_intercom.common.discovery import (
-    DiscoveredServer,
-    DiscoveryListener,
     _BEACON_TYPE,
     _BEACON_VERSION,
+    DiscoveredServer,
+    DiscoveryListener,
 )
-from py_intercom.common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET
 
 
 def _make_beacon(server_name="srv", audio_port=AUDIO_UDP_PORT, version=_BEACON_VERSION) -> bytes:

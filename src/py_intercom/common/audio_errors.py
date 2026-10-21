@@ -1,10 +1,9 @@
 from __future__ import annotations
-from typing import Optional
 
 import sounddevice as sd
 
 
-def _hostapi_name(dev_info: Optional[dict]) -> str:
+def _hostapi_name(dev_info: dict | None) -> str:
     """Return a device's host API name without assuming PortAudio indices are stable."""
     if not isinstance(dev_info, dict):
         return ""
@@ -21,7 +20,7 @@ def _hostapi_name(dev_info: Optional[dict]) -> str:
     return str(hostapi.get("name") or "").strip()
 
 
-def shared_stream_extra_settings(dev_info: Optional[dict]):
+def shared_stream_extra_settings(dev_info: dict | None):
     """Enable Windows' shared-mode format conversion for WASAPI endpoints.
 
     py-intercom deliberately keeps its network/Opus clock at 48 kHz.  A
@@ -40,7 +39,7 @@ def shared_stream_extra_settings(dev_info: Optional[dict]):
         return None
 
 
-def _device_label(dev_info: Optional[dict], fallback: Optional[int]) -> str:
+def _device_label(dev_info: dict | None, fallback: int | None) -> str:
     if isinstance(dev_info, dict):
         name = " ".join(str(dev_info.get("name") or "").split())
         if name:
@@ -50,7 +49,7 @@ def _device_label(dev_info: Optional[dict], fallback: Optional[int]) -> str:
     return f"#{int(fallback)}"
 
 
-def looks_like_bluetooth(dev_info: Optional[dict]) -> bool:
+def looks_like_bluetooth(dev_info: dict | None) -> bool:
     if not isinstance(dev_info, dict):
         return False
     name = str(dev_info.get("name") or "").lower()
@@ -80,8 +79,8 @@ def friendly_audio_open_error(
     err: Exception,
     *,
     kind: str,
-    dev_info: Optional[dict],
-    device: Optional[int],
+    dev_info: dict | None,
+    device: int | None,
     sr: int,
     ch: int,
 ) -> str:

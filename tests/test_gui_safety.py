@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from py_intercom.client.gui import _PttHotkeyState
+from py_intercom.client.hotkeys import PttHotkeyState
 from py_intercom.common import devices as devices_mod
 from py_intercom.common.constants import CHANNELS, SAMPLE_RATE
 
 
 def test_momentary_hotkey_tracks_the_configured_chord() -> None:
-    state = _PttHotkeyState({1: ("ptt", "Ctrl+T")})
+    state = PttHotkeyState({1: ("ptt", "Ctrl+T")})
 
     assert state.press("key:ctrl_l") == []
     assert state.press("char:t") == [(1, True)]
@@ -16,7 +16,7 @@ def test_momentary_hotkey_tracks_the_configured_chord() -> None:
 
 
 def test_toggle_hotkey_ignores_unrelated_keys_while_chord_is_held() -> None:
-    state = _PttHotkeyState({2: ("toggle", "Ctrl+T")})
+    state = PttHotkeyState({2: ("toggle", "Ctrl+T")})
 
     assert state.press("key:ctrl_l") == []
     assert state.press("char:t") == [(2, True)]
@@ -27,7 +27,7 @@ def test_toggle_hotkey_ignores_unrelated_keys_while_chord_is_held() -> None:
 
 
 def test_release_all_deactivates_momentary_and_toggle_buses() -> None:
-    state = _PttHotkeyState(
+    state = PttHotkeyState(
         {
             1: ("ptt", "F1"),
             2: ("toggle", "F2"),

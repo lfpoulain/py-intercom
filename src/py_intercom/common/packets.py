@@ -14,7 +14,6 @@ from .constants import (
     MAX_UDP_PAYLOAD_BYTES,
 )
 
-
 _HEADER_V2_STRUCT = struct.Struct("!4sBBHQIIIHH")
 
 if _HEADER_V2_STRUCT.size != AUDIO_PACKET_V2_HEADER_BYTES:

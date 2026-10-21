@@ -6,7 +6,6 @@ import threading
 from py_intercom.common.jsonio import (
     JsonFileStatus,
     atomic_write_json,
-    read_json_file,
     read_json_file_result,
 )
 
@@ -21,7 +20,6 @@ def test_read_json_file_result_distinguishes_missing_and_invalid(tmp_path) -> No
 
     assert result.status is JsonFileStatus.INVALID
     assert result.error
-    assert read_json_file(path) is None
 
 
 def test_atomic_write_json_keeps_previous_version_as_backup(tmp_path) -> None:
@@ -29,7 +27,7 @@ def test_atomic_write_json_keeps_previous_version_as_backup(tmp_path) -> None:
     atomic_write_json(path, {"revision": 1})
     atomic_write_json(path, {"revision": 2})
 
-    assert read_json_file(path) == {"revision": 2}
+    assert read_json_file_result(path).value == {"revision": 2}
     assert json.loads((tmp_path / "preset.json.bak").read_text(encoding="utf-8")) == {
         "revision": 1
     }

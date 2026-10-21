@@ -56,13 +56,6 @@ def read_json_file_result(path: Path) -> JsonReadResult:
         return JsonReadResult(JsonFileStatus.INVALID, error=str(exc))
 
 
-def read_json_file(path: Path) -> Any:
-    """Compatibility helper returning ``None`` for missing or unreadable files."""
-
-    result = read_json_file_result(path)
-    return result.value if result.status is JsonFileStatus.OK else None
-
-
 def atomic_write_json(path: Path, data: Any, *, backup: bool = True) -> None:
     path = Path(path)
     payload = json.dumps(data, ensure_ascii=False, indent=2) + "\n"

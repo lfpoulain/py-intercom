@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import zlib
 
-
 MAX_CLIENT_UUID_LENGTH = 128
 
 

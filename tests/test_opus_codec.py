@@ -11,7 +11,6 @@ import pytest
 from py_intercom.common.bootstrap import prepare_windows_runtime
 from py_intercom.common.opus_codec import OpusConfig, OpusDecoder, OpusEncoder
 
-
 VALID_48K_FRAME_SAMPLES = (120, 240, 480, 960)
 
 

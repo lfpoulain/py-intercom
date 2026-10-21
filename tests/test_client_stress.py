@@ -7,12 +7,11 @@ import time
 import numpy as np
 import pytest
 
-from py_intercom.client import client as client_mod
+import py_intercom.common.opus_codec as opus_codec_mod
 from py_intercom.client.client import ClientConfig, IntercomClient
 from py_intercom.common.buses import FIXED_BUS_IDS
 from py_intercom.common.constants import FRAME_SAMPLES
 from py_intercom.common.packets import unpack_audio_packet_v2
-
 
 SESSION_TOKEN = 0x123456789ABC0000
 
@@ -29,8 +28,8 @@ class _FakeDecoder:
 
 @pytest.fixture
 def stress_client(monkeypatch):
-    monkeypatch.setattr(client_mod, "OpusEncoder", _FakeEncoder)
-    monkeypatch.setattr(client_mod, "OpusDecoder", _FakeDecoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusEncoder", _FakeEncoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusDecoder", _FakeDecoder)
     udp_server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp_server.bind(("127.0.0.1", 0))
     client = IntercomClient(
@@ -181,7 +180,7 @@ def test_rapid_ptt_and_epoch_changes_never_send_an_old_frame(
     client._sock.close()
     recording_socket = _RecordingSocket()
     client._sock = recording_socket
-    monkeypatch.setattr(client_mod, "OpusEncoder", _EpochEncoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusEncoder", _EpochEncoder)
     bus_ids = sorted(int(bus_id) for bus_id in FIXED_BUS_IDS)
     _activate_audio(client, token=SESSION_TOKEN, bus_id=bus_ids[0])
     tx_thread = threading.Thread(

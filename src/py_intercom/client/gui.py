@@ -1,24 +1,22 @@
 from __future__ import annotations
 
 import sys
-import threading
 import uuid
-from dataclasses import dataclass
-from enum import Enum
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping, Optional
 
 from loguru import logger
 from PySide6 import QtCore, QtGui, QtWidgets
-from pynput import keyboard
 
+from .. import __version__
 from ..common.buses import BUS_BY_ID, FIXED_BUSES, REGIE_BUS_ID
 from ..common.constants import AUDIO_UDP_PORT, MAX_GAIN_DB
-from ..common.devices import format_device_label, list_devices, resolve_device
+from ..common.devices import format_device_label, resolve_device
+from ..common.discovery import DiscoveryListener
 from ..common.gui_utils import DeviceWorker, is_checked
 from ..common.identity import client_id_from_uuid
-from ..common.discovery import DiscoveryListener
 from ..common.jsonio import JsonFileStatus, atomic_write_json, read_json_file_result
+from ..common.logging import best_effort
 from ..common.persistence import DebouncedJsonWriter
 from ..common.preset_schema import (
     PRESET_SCHEMA_VERSION,
@@ -34,7 +32,14 @@ from ..common.theme import (
     set_status_label,
 )
 from .client import ClientConfig, IntercomClient
-
+from .hotkeys import (
+    GlobalPttHotkeys,
+)
+from .status import (
+    ClientOperationalState,
+    ClientOperationalStatus,
+    derive_client_operational_status,
+)
 
 CLIENT_STATE_REFRESH_INTERVAL_MS = 250
 CLIENT_VU_REFRESH_INTERVAL_MS = 67
@@ -67,109 +72,9 @@ def _preset_requires_all_devices(preset: Mapping[str, object]) -> bool:
     return False
 
 
-class ClientOperationalState(str, Enum):
-    DISCONNECTED = "disconnected"
-    CONNECTING = "connecting"
-    ONLINE = "online"
-    DEGRADED = "degraded"
-    RECONNECTING = "reconnecting"
-
-
-@dataclass(frozen=True)
-class ClientOperationalStatus:
-    state: ClientOperationalState
-    label: str
-    detail: str
-
-
-def _workers_are_alive(value: object) -> bool:
-    if isinstance(value, Mapping):
-        return bool(value) and all(bool(alive) for alive in value.values())
-    return value is True
-
-
-def derive_client_operational_status(
-    *,
-    session_requested: bool,
-    ever_online: bool,
-    stats: Mapping[str, object],
-    udp_recent_threshold_s: float = 1.0,
-) -> ClientOperationalStatus:
-    """Derive the operator-facing state from independent control/audio signals."""
-
-    if not session_requested:
-        return ClientOperationalStatus(
-            ClientOperationalState.DISCONNECTED,
-            "Déconnecté",
-            "Aucune session intercom demandée.",
-        )
-
-    control_connected = stats.get("control_connected") is True
-    welcome_received = stats.get("control_welcome_received") is True
-    control_ready = stats.get("control_ready") is True
-
-    if not (control_connected and welcome_received and control_ready):
-        missing = []
-        if not control_connected:
-            missing.append("contrôle TCP")
-        elif not welcome_received:
-            missing.append("accueil serveur")
-        elif not control_ready:
-            missing.append("configuration audio")
-        state = (
-            ClientOperationalState.RECONNECTING
-            if ever_online
-            else ClientOperationalState.CONNECTING
-        )
-        return ClientOperationalStatus(
-            state,
-            "Reconnexion…" if ever_online else "Connexion…",
-            f"En attente : {', '.join(missing)}.",
-        )
-
-    workers_ok = _workers_are_alive(stats.get("network_workers_alive"))
-    input_stream_ok = stats.get(
-        "input_stream_active", stats.get("in_stream_active")
-    ) is True
-    output_stream_ok = stats.get(
-        "output_stream_active", stats.get("out_stream_active")
-    ) is True
-    try:
-        udp_age_s = float(stats.get("udp_rx_age_s"))
-    except (TypeError, ValueError):
-        udp_age_s = None
-    udp_ok = udp_age_s is not None and udp_age_s <= float(udp_recent_threshold_s)
-
-    failures = []
-    if not workers_ok:
-        failures.append("workers réseau indisponibles")
-    if not input_stream_ok:
-        failures.append("micro inactif")
-    if not output_stream_ok:
-        failures.append("casque inactif")
-    if not udp_ok:
-        if udp_age_s is None:
-            failures.append("aucun audio UDP reçu")
-        else:
-            failures.append(f"audio UDP ancien ({udp_age_s:.1f} s)")
-
-    if failures:
-        return ClientOperationalStatus(
-            ClientOperationalState.DEGRADED,
-            "Dégradé",
-            "; ".join(failures) + ". PTT désarmé.",
-        )
-
-    return ClientOperationalStatus(
-        ClientOperationalState.ONLINE,
-        "En ligne",
-        "Contrôle, transport UDP et flux audio opérationnels.",
-    )
-
-
 class _ShortcutKeySequenceEdit(QtWidgets.QKeySequenceEdit):
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # noqa: N802
-        try:
+        with best_effort("handle shortcut editor key"):
             if event.key() == int(QtCore.Qt.Key.Key_Escape):
                 self.clearFocus()
                 return
@@ -177,238 +82,18 @@ class _ShortcutKeySequenceEdit(QtWidgets.QKeySequenceEdit):
                 self.setKeySequence(QtGui.QKeySequence(""))
                 self.clearFocus()
                 return
-        except Exception:
-            pass
         super().keyPressEvent(event)
-
-
-def _norm_key(k) -> Optional[str]:
-    try:
-        if isinstance(k, keyboard.Key):
-            return f"key:{k.name}"
-        if isinstance(k, keyboard.KeyCode):
-            if k.char:
-                return f"char:{str(k.char).lower()}"
-            if k.vk is not None:
-                vk = int(k.vk)
-                # Map A-Z VK codes (65-90) to char: so Shift+letter matches on all layouts
-                if 65 <= vk <= 90:
-                    return f"char:{chr(vk).lower()}"
-                # Map 0-9 VK codes (48-57)
-                if 48 <= vk <= 57:
-                    return f"char:{chr(vk)}"
-                return f"vk:{vk}"
-    except Exception:
-        return None
-    return None
-
-
-def _parse_qt_shortcut(seq_text: str) -> list[set[str]]:
-    if not seq_text:
-        return []
-
-    tokens = [t.strip() for t in str(seq_text).split("+") if t.strip()]
-    groups: list[set[str]] = []
-
-    def _mod_group(name: str) -> set[str]:
-        n = str(name).lower()
-        if n in ("ctrl", "control"):
-            return {"key:ctrl", "key:ctrl_l", "key:ctrl_r"}
-        if n == "shift":
-            return {"key:shift", "key:shift_l", "key:shift_r"}
-        if n in ("alt", "option"):
-            return {"key:alt", "key:alt_l", "key:alt_r", "key:alt_gr"}
-        if n in ("meta", "win", "super", "cmd", "command"):
-            return {"key:cmd", "key:cmd_l", "key:cmd_r"}
-        return set()
-
-    special = {
-        "space": {"key:space"},
-        "tab": {"key:tab"},
-        "enter": {"key:enter"},
-        "return": {"key:enter"},
-        "esc": {"key:esc"},
-        "escape": {"key:esc"},
-        "backspace": {"key:backspace"},
-        "delete": {"key:delete"},
-        "insert": {"key:insert"},
-        "home": {"key:home"},
-        "end": {"key:end"},
-        "pageup": {"key:page_up"},
-        "pagedown": {"key:page_down"},
-        "up": {"key:up"},
-        "down": {"key:down"},
-        "left": {"key:left"},
-        "right": {"key:right"},
-    }
-
-    for t in tokens:
-        mg = _mod_group(t)
-        if mg:
-            groups.append(mg)
-            continue
-
-        low = str(t).lower()
-        if low in special:
-            groups.append(set(special[low]))
-            continue
-
-        if low.startswith("f") and low[1:].isdigit():
-            groups.append({f"key:{low}"})
-            continue
-
-        if len(low) == 1:
-            groups.append({f"char:{low}"})
-            continue
-
-        groups.append({f"char:{low}"})
-
-    return groups
-
-
-class _PttHotkeyState:
-    """Thread-safe, Qt-free state machine used by the global key listener."""
-
-    def __init__(
-        self,
-        bindings: dict[int, tuple[str, str]],
-        toggle_states: Optional[dict[int, bool]] = None,
-    ) -> None:
-        self._lock = threading.RLock()
-        self._bindings: dict[int, tuple[str, tuple[frozenset[str], ...]]] = {}
-        for bus_id, (mode, sequence) in bindings.items():
-            groups = tuple(frozenset(group) for group in _parse_qt_shortcut(sequence))
-            self._bindings[int(bus_id)] = (str(mode), groups)
-        self._pressed: set[str] = set()
-        self._combo_was_active: dict[int, bool] = {}
-        self._active_buses: dict[int, bool] = {}
-        self._toggle_states = {
-            int(bus_id): bool(state) for bus_id, state in (toggle_states or {}).items()
-        }
-
-    def _combo_active(self, groups: tuple[frozenset[str], ...]) -> bool:
-        return bool(groups) and all(any(key in self._pressed for key in group) for group in groups)
-
-    def _update(self) -> list[tuple[int, bool]]:
-        changes: list[tuple[int, bool]] = []
-        for bus_id, (mode, groups) in self._bindings.items():
-            if mode == "always_on":
-                continue
-
-            active = self._combo_active(groups)
-            was_active = bool(self._combo_was_active.get(int(bus_id), False))
-            self._combo_was_active[int(bus_id)] = bool(active)
-
-            if mode == "toggle":
-                # Toggle only on the inactive -> active edge of the configured
-                # chord. Pressing an unrelated key while the chord is held no
-                # longer toggles the bus a second time.
-                if active and not was_active:
-                    new_state = not bool(self._toggle_states.get(int(bus_id), False))
-                    self._toggle_states[int(bus_id)] = bool(new_state)
-                    changes.append((int(bus_id), bool(new_state)))
-                continue
-
-            previous = bool(self._active_buses.get(int(bus_id), False))
-            if bool(active) != previous:
-                self._active_buses[int(bus_id)] = bool(active)
-                changes.append((int(bus_id), bool(active)))
-        return changes
-
-    def press(self, key: str) -> list[tuple[int, bool]]:
-        with self._lock:
-            if key in self._pressed:
-                return []
-            self._pressed.add(str(key))
-            return self._update()
-
-    def release(self, key: str) -> list[tuple[int, bool]]:
-        with self._lock:
-            self._pressed.discard(str(key))
-            return self._update()
-
-    def release_all(self) -> list[tuple[int, bool]]:
-        with self._lock:
-            changes: list[tuple[int, bool]] = []
-            self._pressed.clear()
-            self._combo_was_active.clear()
-            for bus_id, active in list(self._active_buses.items()):
-                if active:
-                    changes.append((int(bus_id), False))
-            self._active_buses.clear()
-            for bus_id, active in list(self._toggle_states.items()):
-                if active:
-                    changes.append((int(bus_id), False))
-            self._toggle_states = {bus_id: False for bus_id in self._toggle_states}
-            return changes
-
-    def active_buses(self) -> dict[int, bool]:
-        with self._lock:
-            return dict(self._active_buses)
-
-
-class _GlobalPttHotkeys(QtCore.QObject):
-    ptt_changed = QtCore.Signal(int, bool)
-
-    def __init__(
-        self,
-        bindings: dict[int, tuple[str, str]],
-        toggle_states: Optional[dict[int, bool]] = None,
-        parent: Optional[QtCore.QObject] = None,
-    ) -> None:
-        super().__init__(parent)
-        self._listener: Optional[keyboard.Listener] = None
-        self._state = _PttHotkeyState(bindings, toggle_states)
-
-    def start(self) -> None:
-        if self._listener is not None:
-            return
-        self._listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
-        self._listener.daemon = True
-        self._listener.start()
-
-    def stop(self) -> None:
-        listener = self._listener
-        self._listener = None
-        if listener is not None:
-            try:
-                listener.stop()
-                listener.join(timeout=1.0)
-            except Exception:
-                pass
-        self.release_all()
-
-    def release_all(self) -> None:
-        for bus_id, active in self._state.release_all():
-            self.ptt_changed.emit(int(bus_id), bool(active))
-
-    def active_buses(self) -> dict[int, bool]:
-        return self._state.active_buses()
-
-    def _emit_changes(self, changes: list[tuple[int, bool]]) -> None:
-        for bus_id, active in changes:
-            self.ptt_changed.emit(int(bus_id), bool(active))
-
-    def _on_press(self, key) -> None:
-        k = _norm_key(key)
-        if k:
-            self._emit_changes(self._state.press(k))
-
-    def _on_release(self, key) -> None:
-        k = _norm_key(key)
-        if k:
-            self._emit_changes(self._state.release(k))
 
 
 class ClientWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Py-Intercom Client")
+        self.setWindowTitle(f"Py-Intercom Client {__version__}")
         self.setMinimumSize(860, 680)
         self.resize(1060, 800)
         self._set_app_icon()
 
-        self._client: Optional[IntercomClient] = None
+        self._client: IntercomClient | None = None
         self._connected: bool = False
         self._ever_online: bool = False
         self._operational_status = ClientOperationalStatus(
@@ -441,7 +126,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         )
 
         self._preset_write_blocked = False
-        self._preset_load_problem: Optional[tuple[JsonFileStatus, str]] = None
+        self._preset_load_problem: tuple[JsonFileStatus, str] | None = None
         self._preset_writer = DebouncedJsonWriter(
             self._preset_path(),
             delay_s=0.35,
@@ -462,7 +147,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._discovered_servers.addItem("(manual)", None)
         self._discovered_servers.currentIndexChanged.connect(self._on_discovered_server_selected)
 
-        self._discovery_listener: Optional[DiscoveryListener] = None
+        self._discovery_listener: DiscoveryListener | None = None
         self._discovery_pending_update: bool = False
         self._discovery_signal = QtCore.QTimer(self)
         self._discovery_signal.setInterval(100)
@@ -541,35 +226,27 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._disconnect_btn.setToolTip("Désarmer le PTT et quitter la session intercom")
 
         self._start_minimized = QtWidgets.QCheckBox("Démarrer réduit")
-        try:
+        with best_effort("_start_minimized.setChecked()"):
             self._start_minimized.setChecked(bool(self._preset_get("start_minimized", False)))
-        except Exception:
-            pass
         self._start_minimized.stateChanged.connect(self._on_start_minimized_changed)
 
         self._autoconnect_cb = QtWidgets.QCheckBox("Connexion automatique")
         self._autoconnect_cb.setToolTip("Se connecter automatiquement au démarrage")
-        try:
+        with best_effort("_autoconnect_cb.setChecked()"):
             self._autoconnect_cb.setChecked(bool(self._preset_get("autoconnect", False)))
-        except Exception:
-            pass
         self._autoconnect_cb.stateChanged.connect(self._on_autoconnect_changed)
 
         self._listen_regie = QtWidgets.QCheckBox(
             f"Écouter {BUS_BY_ID[REGIE_BUS_ID].name}"
         )
         self._listen_regie.setEnabled(False)
-        try:
+        with best_effort("_listen_regie.setChecked()"):
             self._listen_regie.setChecked(bool(self._preset_get("listen_regie", True)))
-        except Exception:
-            pass
 
         self._listen_return_bus = QtWidgets.QCheckBox("Écouter le bus Return")
         self._listen_return_bus.setEnabled(False)
-        try:
+        with best_effort("_listen_return_bus.setChecked()"):
             self._listen_return_bus.setChecked(bool(self._preset_get("listen_return_bus", False)))
-        except Exception:
-            pass
 
         self._mic_gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self._mic_gain.setMinimum(-60)
@@ -718,7 +395,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         gain_values = (self._mic_gain_lbl, self._hp_gain_lbl, self._return_gain_lbl)
         meters = (self._in_vu, self._out_vu, self._return_vu)
         for row, (label_text, gain, value, meter) in enumerate(
-            zip(gain_labels, gains, gain_values, meters),
+            zip(gain_labels, gains, gain_values, meters, strict=False),
             start=1,
         ):
             label = QtWidgets.QLabel(label_text)
@@ -778,9 +455,9 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._vu_timer.setInterval(CLIENT_VU_REFRESH_INTERVAL_MS)
         self._vu_timer.timeout.connect(self._refresh_vu_meters)
 
-        self._device_thread: Optional[QtCore.QThread] = None
-        self._device_worker: Optional[DeviceWorker] = None
-        self._device_timeout: Optional[QtCore.QTimer] = None
+        self._device_thread: QtCore.QThread | None = None
+        self._device_worker: DeviceWorker | None = None
+        self._device_timeout: QtCore.QTimer | None = None
         self._last_device_error: str = ""
         self._last_device_count: int = 0
         self._device_refresh_timed_out_flag: bool = False
@@ -791,7 +468,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._kick_notified: bool = False
         self._ptt_start_failed: bool = False
 
-        self._global_ptt: Optional[_GlobalPttHotkeys] = None
+        self._global_ptt: GlobalPttHotkeys | None = None
 
         QtCore.QTimer.singleShot(0, self._start_device_refresh)
         if self._preset_load_problem is not None:
@@ -941,10 +618,8 @@ class ClientWindow(QtWidgets.QMainWindow):
                     active = bool(self._ptt_bus_toggle_state.get(int(bid), False))
                 else:
                     active = bool(active_buses.get(int(bid), False))
-            try:
+            with best_effort("cli.set_ptt_bus()"):
                 cli.set_ptt_bus(int(bid), bool(active))
-            except Exception:
-                pass
 
     def _update_toggle_state_label(self, lbl: QtWidgets.QLabel, bus_id: int, mode: str) -> None:
         online = self._operational_status.state is ClientOperationalState.ONLINE
@@ -994,7 +669,7 @@ class ClientWindow(QtWidgets.QMainWindow):
     def _start_global_ptt(self) -> None:
         if self._global_ptt is not None:
             return
-        hotkeys = _GlobalPttHotkeys(
+        hotkeys = GlobalPttHotkeys(
             self._hotkey_bindings_snapshot(),
             dict(self._ptt_bus_toggle_state),
             self,
@@ -1020,10 +695,8 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._ptt_bus_toggle_state[int(bus_id)] = bool(active)
         cli = self._client
         if cli is not None:
-            try:
+            with best_effort("cli.set_ptt_bus()"):
                 cli.set_ptt_bus(int(bus_id), bool(active))
-            except Exception:
-                pass
         self._refresh_state_labels()
 
     def _on_ptt_bus_mode_changed(self, bus_id: int) -> None:
@@ -1047,7 +720,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         for bid, b in buses.items():
             try:
                 bus_id = int(bid)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             definition = BUS_BY_ID.get(int(bus_id))
             if definition is None:
@@ -1087,26 +760,18 @@ class ClientWindow(QtWidgets.QMainWindow):
         old_modes: dict[int, str] = dict(self._ptt_bus_modes)
 
         if apply_saved:
-            try:
+            with best_effort("restore saved PTT keys"):
                 saved_keys = self._preset_get("ptt_bus_keys", {})
                 if isinstance(saved_keys, dict):
                     for k, v in saved_keys.items():
-                        try:
+                        with best_effort("parse saved PTT key"):
                             old_keys[int(k)] = str(v or "")
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            try:
+            with best_effort("restore saved PTT modes"):
                 saved_modes = self._preset_get("ptt_bus_modes", {})
                 if isinstance(saved_modes, dict):
                     for k, v in saved_modes.items():
-                        try:
+                        with best_effort("parse saved PTT mode"):
                             old_modes[int(k)] = str(v or "ptt")
-                        except Exception:
-                            pass
-            except Exception:
-                pass
 
         self._clear_layout(self._bus_rows_layout)
         self._shortcut_widgets = []
@@ -1169,10 +834,8 @@ class ClientWindow(QtWidgets.QMainWindow):
             clear_btn.setEnabled(bool(key_enabled))
 
             seq = str(old_keys.get(int(bus_id), "") or "")
-            try:
+            with best_effort("edit.setKeySequence()"):
                 edit.setKeySequence(QtGui.QKeySequence(seq))
-            except Exception:
-                pass
             edit.keySequenceChanged.connect(lambda _seq, bid=int(bus_id): self._on_ptt_bus_key_changed(bid))
 
             vu_meter = VuMeter()
@@ -1196,10 +859,8 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._bus_rows_signature = tuple((int(bid), str(parsed[bid].get("name"))) for bid in sorted(parsed.keys()))
 
         if self._operational_status.state is ClientOperationalState.ONLINE:
-            try:
+            with best_effort("_apply_ptt_modes_to_client()"):
                 self._apply_ptt_modes_to_client()
-            except Exception:
-                pass
 
     def _start_discovery_listener(self) -> None:
         if self._discovery_listener is not None:
@@ -1272,29 +933,21 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         # Fully stop persistent client (releases audio devices)
         if self._client is not None:
-            try:
+            with best_effort("_client.stop()"):
                 self._client.stop()
-            except Exception:
-                pass
             self._client = None
 
         p = self._preset_path()
-        try:
+        with best_effort("_preset_writer.cancel_pending()"):
             self._preset_writer.cancel_pending()
             self._preset_writer.flush(raise_on_error=False)
-        except Exception:
-            pass
-        try:
+        with best_effort("p.with_suffix()"):
             tmp = p.with_suffix(p.suffix + ".tmp")
             if tmp.exists():
                 tmp.unlink()
-        except Exception:
-            pass
-        try:
+        with best_effort("delete client preset"):
             if p.exists():
                 p.unlink()
-        except Exception:
-            pass
 
         client_uuid = str(uuid.uuid4())
         self._preset = new_client_preset(client_uuid)
@@ -1313,11 +966,9 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._return_gain.setValue(0)
         self._return_gain_lbl.setText("0 dB")
 
-        try:
+        with best_effort("clear PTT shortcut editors"):
             for edit in self._ptt_bus_keys.values():
                 edit.setKeySequence(QtGui.QKeySequence(""))
-        except Exception:
-            pass
 
         self._client_id.setText(str(stable_id))
 
@@ -1442,11 +1093,9 @@ class ClientWindow(QtWidgets.QMainWindow):
         except Exception:
             return
 
-        try:
+        with best_effort("_ptt_bus_keys[int(bus_id)].clearFocus()"):
             self._ptt_bus_keys[int(bus_id)].clearFocus()
             self.centralWidget().setFocus()
-        except Exception:
-            pass
 
         if self._connected and self._global_ptt is None:
             self._apply_ptt_modes_to_client()
@@ -1614,26 +1263,18 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         self._is_closing = True
         # Full stop: network + audio streams
-        try:
+        with best_effort("_stop_discovery_listener()"):
             self._stop_discovery_listener()
-        except Exception:
-            pass
-        try:
+        with best_effort("_timer.stop()"):
             self._timer.stop()
             self._vu_timer.stop()
-        except Exception:
-            pass
-        try:
+        with best_effort("stop global PTT hotkeys"):
             if self._global_ptt is not None:
                 self._global_ptt.stop()
-        except Exception:
-            pass
         self._global_ptt = None
         if self._client is not None:
-            try:
+            with best_effort("_client.stop()"):
                 self._client.stop()
-            except Exception:
-                pass
             self._client = None
         self._connected = False
         try:
@@ -1703,20 +1344,16 @@ class ClientWindow(QtWidgets.QMainWindow):
         if not self._device_cursor_active:
             return
         self._device_cursor_active = False
-        try:
+        with best_effort("QtWidgets.QApplication.restoreOverrideCursor()"):
             QtWidgets.QApplication.restoreOverrideCursor()
-        except Exception:
-            pass
 
     def _cleanup_device_refresh(self) -> None:
         if self._device_thread is None and self._device_worker is None:
             return
 
         if self._device_timeout is not None:
-            try:
+            with best_effort("_device_timeout.stop()"):
                 self._device_timeout.stop()
-            except Exception:
-                pass
         self._device_timeout = None
 
         self._device_thread = None
@@ -1889,7 +1526,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             and self._client.config.output_device == cfg.output_device
         )
 
-        new_client: Optional[IntercomClient] = None
+        new_client: IntercomClient | None = None
         try:
             if can_reuse:
                 # Update config fields that may have changed
@@ -1910,24 +1547,18 @@ class ClientWindow(QtWidgets.QMainWindow):
             else:
                 # Full stop of old client if devices changed
                 if self._client is not None:
-                    try:
+                    with best_effort("_client.stop()"):
                         self._client.stop()
-                    except Exception:
-                        pass
                 new_client = IntercomClient(client_id=client_id, config=cfg)
                 new_client.start()
                 self._client = new_client
         except Exception as e:
             if new_client is not None:
-                try:
+                with best_effort("new_client.stop()"):
                     new_client.stop()
-                except Exception:
-                    pass
             elif self._client is not None:
-                try:
+                with best_effort("_client.stop()"):
                     self._client.stop()
-                except Exception:
-                    pass
             self._client = None
             self._connected = False
             QtWidgets.QMessageBox.critical(self, "Connect failed", str(e))
@@ -1946,21 +1577,17 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         # No PTT (including Always On) is armed until the control handshake is
         # confirmed by the client's live statistics.
-        try:
+        with best_effort("release all PTT buses"):
             for bus_id in self._ptt_bus_keys:
                 self._client.set_ptt_bus(int(bus_id), False)
-        except Exception:
-            pass
 
-        try:
+        with best_effort("disable PTT shortcut editors"):
             for edit in self._ptt_bus_keys.values():
                 edit.setEnabled(False)
             for b in self._ptt_bus_clear.values():
                 b.setEnabled(False)
             for mode_widget in self._ptt_bus_mode_widgets.values():
                 mode_widget.setEnabled(False)
-        except Exception:
-            pass
 
         self._name.setReadOnly(True)
         self._server_ip.setReadOnly(True)
@@ -1990,18 +1617,14 @@ class ClientWindow(QtWidgets.QMainWindow):
         try:
             self._timer.stop()
             self._vu_timer.stop()
-            try:
+            with best_effort("release PTT on close"):
                 if self._client is not None:
                     for bid in self._ptt_bus_keys.keys():
                         self._client.set_ptt_bus(int(bid), False)
-            except Exception:
-                pass
 
-            try:
+            with best_effort("stop global PTT hotkeys"):
                 if self._global_ptt is not None:
                     self._global_ptt.stop()
-            except Exception:
-                pass
             self._global_ptt = None
 
             # Only disconnect network, keep audio streams alive for fast reconnect
@@ -2036,12 +1659,10 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._out_vu.set_level(-60.0)
             self._return_vu.set_level(-60.0)
             for vu_w in self._ptt_bus_vu.values():
-                try:
+                with best_effort("vu_w.set_level()"):
                     vu_w.set_level(-60.0)
-                except Exception:
-                    pass
 
-            try:
+            with best_effort("apply PTT modes"):
                 for bid in self._ptt_bus_keys.keys():
                     edit = self._ptt_bus_keys.get(int(bid))
                     clear_btn = self._ptt_bus_clear.get(int(bid))
@@ -2052,45 +1673,35 @@ class ClientWindow(QtWidgets.QMainWindow):
                     mode_widget = self._ptt_bus_mode_widgets.get(int(bid))
                     if mode_widget is not None:
                         mode_widget.setEnabled(True)
-            except Exception:
-                pass
 
     def _on_listen_regie_changed(self, state: int) -> None:
         enabled = is_checked(state)
-        try:
+        with best_effort("save listen_regie"):
             self._preset_set("listen_regie", bool(enabled))
-        except Exception:
-            pass
         if self._client is None:
             return
         self._client.set_listen_regie(bool(enabled))
 
     def _on_listen_return_bus_changed(self, state: int) -> None:
         enabled = is_checked(state)
-        try:
+        with best_effort("save listen_return_bus"):
             self._preset_set("listen_return_bus", bool(enabled))
-        except Exception:
-            pass
         if self._client is None:
             return
         self._client.set_listen_return_bus(bool(enabled))
 
     def _on_mic_gain_changed(self, value: int) -> None:
         self._mic_gain_lbl.setText(f"{value} dB")
-        try:
+        with best_effort("save input_gain_db"):
             self._preset_set("input_gain_db", float(value))
-        except Exception:
-            pass
         if self._client is None:
             return
         self._client.set_input_gain_db(float(value))
 
     def _on_hp_gain_changed(self, value: int) -> None:
         self._hp_gain_lbl.setText(f"{value} dB")
-        try:
+        with best_effort("save output_gain_db"):
             self._preset_set("output_gain_db", float(value))
-        except Exception:
-            pass
         if self._client is None:
             return
         self._client.set_output_gain_db(float(value))
@@ -2101,27 +1712,19 @@ class ClientWindow(QtWidgets.QMainWindow):
         except Exception:
             val = 0
         self._return_gain_lbl.setText(f"{int(val)} dB")
-        try:
+        with best_effort("save return_gain_db"):
             self._preset_set("return_gain_db", int(val))
-        except Exception:
-            pass
         if self._client is not None:
-            try:
+            with best_effort("_client.set_return_gain_db()"):
                 self._client.set_return_gain_db(float(val))
-            except Exception:
-                pass
 
     def _on_start_minimized_changed(self, state: int) -> None:
-        try:
+        with best_effort("save start_minimized"):
             self._preset_set("start_minimized", bool(is_checked(state)))
-        except Exception:
-            pass
 
     def _on_autoconnect_changed(self, state: int) -> None:
-        try:
+        with best_effort("save autoconnect"):
             self._preset_set("autoconnect", bool(is_checked(state)))
-        except Exception:
-            pass
 
     def _maybe_autoconnect(self) -> None:
         if (
@@ -2163,10 +1766,8 @@ class ClientWindow(QtWidgets.QMainWindow):
             finally:
                 self._mic_gain.blockSignals(False)
             self._mic_gain_lbl.setText(f"{int(shared_input_gain)} dB")
-            try:
+            with best_effort("save server input gain"):
                 self._preset_set("input_gain_db", float(shared_input_gain))
-            except Exception:
-                pass
 
         buses_raw = st.get("buses")
         parsed_buses: dict[int, dict] = {}
@@ -2179,7 +1780,7 @@ class ClientWindow(QtWidgets.QMainWindow):
                 except Exception:
                     try:
                         bid = int(b.get("bus_id"))
-                    except Exception:
+                    except (TypeError, ValueError):
                         continue
                 definition = BUS_BY_ID.get(int(bid))
                 if definition is None:
@@ -2197,7 +1798,7 @@ class ClientWindow(QtWidgets.QMainWindow):
                     continue
                 try:
                     bid = int(b.get("bus_id"))
-                except Exception:
+                except (TypeError, ValueError):
                     continue
                 definition = BUS_BY_ID.get(int(bid))
                 if definition is None:
@@ -2213,10 +1814,8 @@ class ClientWindow(QtWidgets.QMainWindow):
         if parsed_buses:
             self._sync_bus_widgets(parsed_buses)
 
-        try:
+        with best_effort("_refresh_state_labels()"):
             self._refresh_state_labels()
-        except Exception:
-            pass
 
     def _refresh_vu_meters(self) -> None:
         if self._client is None or not self._connected:
@@ -2236,15 +1835,13 @@ class ClientWindow(QtWidgets.QMainWindow):
 
     def changeEvent(self, event: QtCore.QEvent) -> None:  # noqa: N802
         super().changeEvent(event)
-        try:
+        with best_effort("release PTT on window deactivation"):
             if event.type() == QtCore.QEvent.Type.WindowDeactivate:
                 if self._global_ptt is not None:
                     self._global_ptt.release_all()
-        except Exception:
-            pass
 
     def _set_app_icon(self) -> None:
-        try:
+        with best_effort("set window icon"):
             import sys as _sys
             _base = getattr(_sys, "_MEIPASS", None)
             if _base:
@@ -2263,13 +1860,10 @@ class ClientWindow(QtWidgets.QMainWindow):
                 app = QtWidgets.QApplication.instance()
                 if app is not None:
                     app.setWindowIcon(icon)
-            try:
+            with best_effort("set Windows AppUserModelID"):
                 import ctypes
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("py-intercom.client")
-            except Exception:
-                pass
-        except Exception:
-            pass
+
 
 def run_gui(minimized: bool = False) -> int:
     app = QtWidgets.QApplication(sys.argv)

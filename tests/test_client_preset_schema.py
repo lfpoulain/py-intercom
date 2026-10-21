@@ -7,10 +7,10 @@ from types import SimpleNamespace
 import pytest
 from PySide6 import QtGui
 
+import py_intercom.common.theme as theme_mod
 from py_intercom.client.gui import ClientWindow, new_client_preset
 from py_intercom.common.jsonio import JsonFileStatus
 from py_intercom.common.preset_schema import PRESET_SCHEMA_VERSION
-import py_intercom.common.theme as theme_mod
 
 
 def _load_fake(path):

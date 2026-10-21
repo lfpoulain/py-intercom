@@ -8,6 +8,7 @@ import time
 import numpy as np
 import pytest
 
+import py_intercom.common.opus_codec as opus_codec_mod
 from py_intercom.client import client as client_mod
 from py_intercom.client.client import ClientConfig, IntercomClient
 from py_intercom.common.constants import FRAME_SAMPLES
@@ -23,7 +24,6 @@ from py_intercom.common.packets import (
     pack_audio_packet_v2,
     unpack_audio_packet_v2,
 )
-
 
 SESSION_TOKEN = 0x0123456789ABCDEF
 
@@ -55,8 +55,8 @@ class _FakeDecoder:
 
 @pytest.fixture
 def client_factory(monkeypatch):
-    monkeypatch.setattr(client_mod, "OpusEncoder", _FakeEncoder)
-    monkeypatch.setattr(client_mod, "OpusDecoder", _FakeDecoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusEncoder", _FakeEncoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusDecoder", _FakeDecoder)
     clients: list[IntercomClient] = []
 
     def make(*, server_port: int, control_port: int = 1) -> IntercomClient:
@@ -453,7 +453,7 @@ def test_tx_worker_exclusively_owns_encoder_probe_sequence_and_socket(
     client._sock.close()
     recording_socket = _RecordingSocket()
     encoder = _ConcurrencyDetectingEncoder()
-    monkeypatch.setattr(client_mod, "OpusEncoder", lambda: encoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusEncoder", lambda: encoder)
     client._sock = recording_socket
     client._stop = threading.Event()
     client._udp_ready = threading.Event()
@@ -538,7 +538,7 @@ def test_audio_frame_keeps_ptt_mask_captured_before_encoding(
 
     client._sock.close()
     client._sock = _RecordingSocket()
-    monkeypatch.setattr(client_mod, "OpusEncoder", _PttMutatingEncoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusEncoder", _PttMutatingEncoder)
     client._stop = threading.Event()
     client._udp_ready = threading.Event()
     client._udp_ready.set()
@@ -741,7 +741,7 @@ def test_playout_worker_exclusively_decodes_before_output_callback(
 
     decoder = _RecordingDecoder()
     client._jb = _SingleFrameJitterBuffer()
-    monkeypatch.setattr(client_mod, "OpusDecoder", lambda: decoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusDecoder", lambda: decoder)
     client._stop = threading.Event()
     client._udp_ready = threading.Event()
     client._udp_ready.set()
@@ -839,7 +839,7 @@ def test_tx_worker_recreates_encoder_for_each_authenticated_epoch(
 
     client._sock.close()
     client._sock = _RecordingSocket()
-    monkeypatch.setattr(client_mod, "OpusEncoder", _EpochEncoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusEncoder", _EpochEncoder)
     client._stop = threading.Event()
     client._udp_ready = threading.Event()
     client._udp_ready.set()
@@ -930,7 +930,7 @@ def test_playout_worker_recreates_decoder_for_each_authenticated_epoch(
 
     jitter = _FrameQueueJitterBuffer()
     client._jb = jitter
-    monkeypatch.setattr(client_mod, "OpusDecoder", _EpochDecoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusDecoder", _EpochDecoder)
     client._stop = threading.Event()
     client._udp_ready = threading.Event()
     client._udp_ready.set()
@@ -991,7 +991,7 @@ def test_codec_reset_failure_is_fail_closed(client_factory, monkeypatch):
 
     client._sock.close()
     client._sock = _RecordingSocket()
-    monkeypatch.setattr(client_mod, "OpusEncoder", _failed_encoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusEncoder", _failed_encoder)
     client._stop = threading.Event()
     client._udp_ready = threading.Event()
     client._udp_ready.set()
@@ -1045,7 +1045,7 @@ def test_decoder_reset_failure_publishes_no_pcm(client_factory, monkeypatch):
         raise RuntimeError("decoder reset unavailable")
 
     client._jb = _SingleFrameJitterBuffer()
-    monkeypatch.setattr(client_mod, "OpusDecoder", _failed_decoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusDecoder", _failed_decoder)
     client._stop = threading.Event()
     client._udp_ready = threading.Event()
     client._udp_ready.set()

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
-
 from PySide6 import QtCore
 
 from .devices import list_devices
@@ -10,7 +8,7 @@ from .devices import list_devices
 class DeviceWorker(QtCore.QObject):
     finished = QtCore.Signal(object, str)
 
-    def __init__(self, hostapi_filter: Optional[str], *, hard_refresh: bool = True):
+    def __init__(self, hostapi_filter: str | None, *, hard_refresh: bool = True):
         super().__init__()
         self._hostapi_filter = hostapi_filter
         self._hard_refresh = bool(hard_refresh)

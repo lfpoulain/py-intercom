@@ -4,8 +4,8 @@ import json
 import socket
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Optional
 
 from loguru import logger
 
@@ -16,6 +16,7 @@ from .constants import (
     DISCOVERY_EXPIRY_S,
     DISCOVERY_PORT_OFFSET,
 )
+from .logging import best_effort
 
 _BEACON_TYPE = "py-intercom-beacon"
 _BEACON_VERSION = 1
@@ -53,7 +54,7 @@ class DiscoveryBeacon:
         self._bind_ip = bind_ip
         self._interval_s = interval_s
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
 
     @property
     def running(self) -> bool:
@@ -83,7 +84,7 @@ class DiscoveryBeacon:
         return json.dumps(data, ensure_ascii=False).encode("utf-8")
 
     def _run(self) -> None:
-        sock: Optional[socket.socket] = None
+        sock: socket.socket | None = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -101,10 +102,8 @@ class DiscoveryBeacon:
             logger.error("discovery beacon thread error: {}", e)
         finally:
             if sock is not None:
-                try:
+                with best_effort("sock.close()"):
                     sock.close()
-                except Exception:
-                    pass
             logger.debug("discovery beacon stopped")
 
 
@@ -120,21 +119,21 @@ class DiscoveryListener:
         audio_port: int = AUDIO_UDP_PORT,
         *,
         expiry_s: float = DISCOVERY_EXPIRY_S,
-        on_update: Optional[Callable[[Dict[str, DiscoveredServer]], None]] = None,
+        on_update: Callable[[dict[str, DiscoveredServer]], None] | None = None,
     ) -> None:
         self._discovery_port = audio_port + DISCOVERY_PORT_OFFSET
         self._expiry_s = expiry_s
         self._on_update = on_update
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._servers: Dict[str, DiscoveredServer] = {}
+        self._servers: dict[str, DiscoveredServer] = {}
 
     @property
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def get_servers(self) -> Dict[str, DiscoveredServer]:
+    def get_servers(self) -> dict[str, DiscoveredServer]:
         with self._lock:
             self._purge_expired()
             return dict(self._servers)
@@ -161,7 +160,7 @@ class DiscoveryListener:
             del self._servers[k]
 
     def _run(self) -> None:
-        sock: Optional[socket.socket] = None
+        sock: socket.socket | None = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -175,7 +174,7 @@ class DiscoveryListener:
             while not self._stop.is_set():
                 try:
                     data, addr = sock.recvfrom(2048)
-                except socket.timeout:
+                except TimeoutError:
                     self._check_expiry()
                     continue
                 except OSError:
@@ -187,10 +186,8 @@ class DiscoveryListener:
             logger.error("discovery listener thread error: {}", e)
         finally:
             if sock is not None:
-                try:
+                with best_effort("sock.close()"):
                     sock.close()
-                except Exception:
-                    pass
             logger.debug("discovery listener stopped")
 
     def _handle_beacon(self, data: bytes, sender_ip: str) -> None:

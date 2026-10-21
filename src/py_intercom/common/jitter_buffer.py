@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Final, Iterable, Optional
-
 import threading
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Final
 
 
 def _seq_distance(a: int, b: int) -> int:
@@ -67,8 +67,8 @@ class OpusPacketJitterBuffer:
         self.start_frames = int(max(1, start_frames))
         self.max_frames = int(max(self.start_frames + 1, max_frames))
 
-        self._buf: Dict[int, JitterFrame] = {}
-        self._expected_seq: Optional[int] = None
+        self._buf: dict[int, JitterFrame] = {}
+        self._expected_seq: int | None = None
         self._started: bool = False
         self.stats = JitterStats()
         self._lock = threading.Lock()
@@ -79,7 +79,7 @@ class OpusPacketJitterBuffer:
             return int(len(self._buf))
 
     @property
-    def expected_seq(self) -> Optional[int]:
+    def expected_seq(self) -> int | None:
         with self._lock:
             return None if self._expected_seq is None else int(self._expected_seq)
 
@@ -94,7 +94,7 @@ class OpusPacketJitterBuffer:
         self,
         seq: int,
         payload: bytes,
-        metadata: Optional[JitterFrameMetadata] = None,
+        metadata: JitterFrameMetadata | None = None,
     ) -> None:
         s = int(seq) & 0xFFFFFFFF
         if metadata is not None and not isinstance(metadata, JitterFrameMetadata):
@@ -148,13 +148,13 @@ class OpusPacketJitterBuffer:
                         key = _sequence_order(self._buf.keys())[0]
                         del self._buf[int(key)]
 
-    def pop(self) -> Optional[bytes]:
+    def pop(self) -> bytes | None:
         """Return only payload bytes for compatibility with existing callers."""
 
         frame = self.pop_frame()
         return None if frame is None else frame.payload
 
-    def pop_frame(self) -> Optional[JitterFrame]:
+    def pop_frame(self) -> JitterFrame | None:
         """Return a payload and its immutable, sequence-aligned metadata."""
 
         with self._lock:

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import operator
 import threading
 import time
-from typing import Final, Optional
+from dataclasses import dataclass
+from typing import Final
 
 import numpy as np
 import numpy.typing as npt
-
 
 Float32Frame = npt.NDArray[np.float32]
 
@@ -145,7 +144,7 @@ class FrameRingBuffer:
             self._pushed += 1
             self._condition.notify()
 
-    def _pop_locked(self, output: Float32Frame) -> Optional[int]:
+    def _pop_locked(self, output: Float32Frame) -> int | None:
         if self._depth == 0:
             return None
 
@@ -158,7 +157,7 @@ class FrameRingBuffer:
         self._popped += 1
         return metadata
 
-    def pop_into(self, output: Float32Frame) -> Optional[int]:
+    def pop_into(self, output: Float32Frame) -> int | None:
         """Copy the oldest frame into ``output`` and return its metadata.
 
         ``None`` means that the ring was empty. Empty non-blocking pops count as
@@ -176,9 +175,9 @@ class FrameRingBuffer:
         self,
         output: Float32Frame,
         *,
-        stop_event: Optional[threading.Event] = None,
-        timeout: Optional[float] = None,
-    ) -> Optional[int]:
+        stop_event: threading.Event | None = None,
+        timeout: float | None = None,
+    ) -> int | None:
         """Wait for a frame, then copy it into ``output``.
 
         A set ``stop_event`` interrupts the wait and takes priority over queued

@@ -14,6 +14,5 @@ prepare_windows_runtime(_root)
 
 from py_intercom.server.main import main
 
-
 if __name__ == "__main__":
     run_application(main, component="server", frozen=_is_frozen)

@@ -4,7 +4,6 @@ import copy
 from dataclasses import dataclass
 from typing import Any, Literal
 
-
 PRESET_SCHEMA_VERSION = 2
 PresetType = Literal["client", "server"]
 

@@ -158,7 +158,7 @@ def _show_crash_message(component: str, crash_path: Path) -> None:
             f"py-intercom {component}",
             0x10,
         )
-    except Exception:
+    except Exception:  # noqa: S110 - crash path: logging may be unavailable
         # The original application exception is still active at this point.
         pass
 

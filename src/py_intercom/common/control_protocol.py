@@ -5,7 +5,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-
 CONTROL_PROTOCOL_VERSION = 2
 MAX_CONTROL_LINE_BYTES = 64 * 1024
 MAX_CONTROL_BUFFER_BYTES = 128 * 1024

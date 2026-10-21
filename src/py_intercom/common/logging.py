@@ -2,9 +2,25 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from loguru import logger
+
+
+@contextmanager
+def best_effort(action: str) -> Iterator[None]:
+    """Run a non-critical operation whose failure must not propagate.
+
+    Use it for cleanup and cosmetic work (closing a socket, refreshing a
+    label). The failure is still logged so nothing disappears silently. Never
+    use it inside a PortAudio callback: count errors there instead.
+    """
+    try:
+        yield
+    except Exception as exc:
+        logger.debug("{} failed: {}: {}", action, type(exc).__name__, exc)
 
 
 def _log_directory() -> Path:
@@ -15,10 +31,7 @@ def _log_directory() -> Path:
 
 
 def setup_logging(debug: bool, component: str = "app") -> Path:
-    try:
-        logger.remove()
-    except Exception:
-        pass
+    logger.remove()
 
     level = "DEBUG" if debug else "WARNING"
     sink = sys.stderr if getattr(sys, "stderr", None) is not None else None

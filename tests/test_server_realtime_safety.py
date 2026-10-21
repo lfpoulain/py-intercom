@@ -7,9 +7,14 @@ import time
 import numpy as np
 import pytest
 
+import py_intercom.common.opus_codec as opus_codec_mod
+import py_intercom.server.control as control_mod
+import py_intercom.server.mixer as mixer_mod
+import py_intercom.server.models as models_mod
+import py_intercom.server.server as server_mod
 from py_intercom.common.buses import (
-    FIXED_BUSES,
     FIXED_BUS_IDS,
+    FIXED_BUSES,
     PLATEAU_BUS_ID,
     REGIE_BUS_ID,
     VMIX_BUS_ID,
@@ -22,16 +27,14 @@ from py_intercom.common.control_protocol import (
     encode_control_message,
     parse_session_token,
 )
-from py_intercom.common.jitter_buffer import JitterFrame, JitterFrameMetadata, OpusPacketJitterBuffer
 from py_intercom.common.identity import client_id_from_uuid
+from py_intercom.common.jitter_buffer import JitterFrame, JitterFrameMetadata, OpusPacketJitterBuffer
 from py_intercom.common.packets import (
     AudioPacketDirection,
     pack_audio_packet_v2,
     unpack_audio_packet_v2,
 )
 from py_intercom.common.routing import RoutedSource, RoutingResult
-import py_intercom.server.server as server_mod
-
 
 SESSION_TOKEN = 0x0123456789ABCDEF
 
@@ -174,8 +177,8 @@ class _TrackedAudioStream:
 
 @pytest.fixture
 def server(monkeypatch, tmp_path):
-    monkeypatch.setattr(server_mod, "OpusEncoder", _FakeEncoder)
-    monkeypatch.setattr(server_mod, "OpusDecoder", _FakeDecoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusEncoder", _FakeEncoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusDecoder", _FakeDecoder)
     srv = server_mod.IntercomServer(
         bind_ip="127.0.0.1",
         port=0,
@@ -190,7 +193,7 @@ def server(monkeypatch, tmp_path):
 
 def _client_state(*, addr=("127.0.0.1", 41000), now=None, decoder=None):
     current = time.monotonic() if now is None else float(now)
-    return server_mod.ClientState(
+    return models_mod.ClientState(
         addr=addr,
         last_packet_monotonic=current,
         decoder=decoder or _FakeDecoder(),
@@ -291,14 +294,14 @@ def test_mix_loop_delegates_fixed_bus_routing_to_pure_engine(server, monkeypatch
         server._buses[VMIX_BUS_ID].feed_to_regie = True
         server._outputs.update(
             {
-                10: server_mod.OutputState(10, 0, REGIE_BUS_ID),
-                11: server_mod.OutputState(11, 0, PLATEAU_BUS_ID),
-                12: server_mod.OutputState(12, 0, VMIX_BUS_ID),
+                10: models_mod.OutputState(10, 0, REGIE_BUS_ID),
+                11: models_mod.OutputState(11, 0, PLATEAU_BUS_ID),
+                12: models_mod.OutputState(12, 0, VMIX_BUS_ID),
             }
         )
 
-    real_route_sources = server_mod.route_sources
-    real_build_destination_mix = server_mod.build_destination_mix
+    real_route_sources = mixer_mod.route_sources
+    real_build_destination_mix = mixer_mod.build_destination_mix
     route_calls = []
     destination_calls = []
 
@@ -313,8 +316,8 @@ def test_mix_loop_delegates_fixed_bus_routing_to_pure_engine(server, monkeypatch
         destination_calls.append((args, kwargs))
         return real_build_destination_mix(*args, **kwargs)
 
-    monkeypatch.setattr(server_mod, "route_sources", route_spy)
-    monkeypatch.setattr(server_mod, "build_destination_mix", destination_spy)
+    monkeypatch.setattr(mixer_mod, "route_sources", route_spy)
+    monkeypatch.setattr(mixer_mod, "build_destination_mix", destination_spy)
 
     server._mix_loop()
 
@@ -330,7 +333,7 @@ def test_mix_loop_delegates_fixed_bus_routing_to_pure_engine(server, monkeypatch
     assert len(destination_calls) == 1
 
     envelope = server._mix_queue.get_nowait()
-    assert isinstance(envelope, server_mod._RoutingEnvelope)
+    assert isinstance(envelope, models_mod._RoutingEnvelope)
     assert envelope.routing_epoch == server._routing_epoch
     result = envelope.result
     assert isinstance(result, RoutingResult)
@@ -364,16 +367,16 @@ def test_mix_queue_drops_oldest_frame_when_full(server):
 
 
 def test_routing_epoch_invalidates_queued_and_device_audio(server):
-    output = server_mod.OutputState(
+    output = models_mod.OutputState(
         output_id=3,
         device=0,
         bus_id=PLATEAU_BUS_ID,
     )
     output.ring.push(np.full((FRAME_SAMPLES,), 0.25, dtype=np.float32))
-    routed = server_mod.route_sources([])
+    routed = mixer_mod.route_sources([])
     old_epoch = server._routing_epoch
     server._mix_queue.put_nowait(
-        server_mod._RoutingEnvelope(routing_epoch=old_epoch, result=routed)
+        models_mod._RoutingEnvelope(routing_epoch=old_epoch, result=routed)
     )
 
     with server._lock:
@@ -442,7 +445,7 @@ def test_forget_client_atomically_revokes_session_and_queued_audio(server):
     state = _client_state()
     state.client_uuid = client_uuid
     connection = _ScriptedConnection()
-    routed = server_mod.route_sources(
+    routed = mixer_mod.route_sources(
         [
             RoutedSource(
                 client_id,
@@ -451,15 +454,15 @@ def test_forget_client_atomically_revokes_session_and_queued_audio(server):
             )
         ]
     )
-    output = server_mod.OutputState(8, 0, PLATEAU_BUS_ID)
+    output = models_mod.OutputState(8, 0, PLATEAU_BUS_ID)
     output.ring.push(np.full((FRAME_SAMPLES,), 0.25, dtype=np.float32))
     with server._lock:
         server._clients[client_id] = state
-        server._client_profiles[client_uuid] = server_mod.ClientProfile(client_uuid)
+        server._client_profiles[client_uuid] = models_mod.ClientProfile(client_uuid)
         server._outputs[output.output_id] = output
         old_epoch = server._routing_epoch
         server._mix_queue.put_nowait(
-            server_mod._RoutingEnvelope(old_epoch, routed)
+            models_mod._RoutingEnvelope(old_epoch, routed)
         )
     with server._ctrl_lock:
         server._ctrl_sessions[client_id] = connection
@@ -482,7 +485,7 @@ def test_output_callback_uses_preallocated_frame_and_silences_underflow(
     server,
     monkeypatch,
 ):
-    state = server_mod.OutputState(
+    state = models_mod.OutputState(
         output_id=3,
         device=0,
         bus_id=PLATEAU_BUS_ID,
@@ -512,7 +515,7 @@ def test_output_callback_uses_preallocated_frame_and_silences_underflow(
 
 
 def test_output_ring_drops_oldest_frame_instead_of_accumulating_latency(server):
-    state = server_mod.OutputState(4, 0, PLATEAU_BUS_ID)
+    state = models_mod.OutputState(4, 0, PLATEAU_BUS_ID)
     state.ring = server_mod.FrameRingBuffer(capacity=2, frame_samples=FRAME_SAMPLES)
     for value in (0.1, 0.2, 0.3):
         state.ring.push(np.full((FRAME_SAMPLES,), value, dtype=np.float32))
@@ -642,7 +645,7 @@ def test_output_device_switch_starts_candidate_before_atomic_swap(
     events = []
     candidates = []
     old_stream = _TrackedAudioStream(events, "old", active=True)
-    old_state = server_mod.OutputState(5, 1, PLATEAU_BUS_ID, gain_db=-3.0)
+    old_state = models_mod.OutputState(5, 1, PLATEAU_BUS_ID, gain_db=-3.0)
     old_state.stream = old_stream
     with server._lock:
         server._outputs[5] = old_state
@@ -684,7 +687,7 @@ def test_output_device_switch_starts_candidate_before_atomic_swap(
 def test_output_device_switch_failure_preserves_live_stream(server, monkeypatch):
     events = []
     old_stream = _TrackedAudioStream(events, "old", active=True)
-    old_state = server_mod.OutputState(6, 1, VMIX_BUS_ID)
+    old_state = models_mod.OutputState(6, 1, VMIX_BUS_ID)
     old_state.stream = old_stream
     with server._lock:
         server._outputs[6] = old_state
@@ -1361,7 +1364,7 @@ def test_codec_epoch_failure_does_not_revoke_working_session(server, monkeypatch
         def __init__(self, *args, **kwargs):
             raise RuntimeError("codec unavailable")
 
-    monkeypatch.setattr(server_mod, "OpusDecoder", _CodecInitFailure)
+    monkeypatch.setattr(opus_codec_mod, "OpusDecoder", _CodecInitFailure)
     replacement = _ScriptedConnection(
         encode_control_message(
             {
@@ -1384,7 +1387,7 @@ def test_codec_epoch_failure_does_not_revoke_working_session(server, monkeypatch
 
 
 def test_control_session_times_out_without_hello(server, monkeypatch):
-    monkeypatch.setattr(server_mod, "CONTROL_HELLO_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(control_mod, "CONTROL_HELLO_TIMEOUT_S", 0.01)
 
     class _SilentConnection(_ScriptedConnection):
         def recv(self, size):
@@ -1442,14 +1445,14 @@ def test_server_broadcast_uses_pure_mix_minus_return_and_v2_envelope(
     server._sock.close()
     recording_socket = _RecordingSocket()
     server._sock = recording_socket
-    routed = server_mod.route_sources(
+    routed = mixer_mod.route_sources(
         [
             RoutedSource(7, np.full((FRAME_SAMPLES,), 0.25, dtype=np.float32), 1),
             RoutedSource(8, np.full((FRAME_SAMPLES,), 0.50, dtype=np.float32), 1),
         ]
     )
     server._mix_queue.put_nowait(
-        server_mod._RoutingEnvelope(
+        models_mod._RoutingEnvelope(
             routing_epoch=server._routing_epoch,
             result=routed,
         )
@@ -1457,14 +1460,14 @@ def test_server_broadcast_uses_pure_mix_minus_return_and_v2_envelope(
     server._return_enabled = True
     server._return_frames.push(np.full((FRAME_SAMPLES,), 0.25, dtype=np.float32))
 
-    real_build_destination_mix = server_mod.build_destination_mix
+    real_build_destination_mix = mixer_mod.build_destination_mix
     destination_calls = []
 
     def destination_spy(*args, **kwargs):
         destination_calls.append((args, kwargs))
         return real_build_destination_mix(*args, **kwargs)
 
-    monkeypatch.setattr(server_mod, "build_destination_mix", destination_spy)
+    monkeypatch.setattr(mixer_mod, "build_destination_mix", destination_spy)
 
     broadcaster = threading.Thread(target=server._broadcast_loop, daemon=True)
     broadcaster.start()
@@ -1506,12 +1509,12 @@ def test_broadcast_epoch_check_is_atomic_with_udp_send(server, monkeypatch):
     server._sock.close()
     recording_socket = _RecordingSocket()
     server._sock = recording_socket
-    routed = server_mod.route_sources(
+    routed = mixer_mod.route_sources(
         [RoutedSource(8, np.full((FRAME_SAMPLES,), 0.25, dtype=np.float32), 1)]
     )
     old_epoch = server._routing_epoch
-    server._mix_queue.put_nowait(server_mod._RoutingEnvelope(old_epoch, routed))
-    real_pack = server_mod.pack_audio_packet_v2
+    server._mix_queue.put_nowait(models_mod._RoutingEnvelope(old_epoch, routed))
+    real_pack = mixer_mod.pack_audio_packet_v2
 
     def revoke_during_packet_build(**kwargs):
         with server._lock:
@@ -1519,7 +1522,7 @@ def test_broadcast_epoch_check_is_atomic_with_udp_send(server, monkeypatch):
         server._stop.set()
         return real_pack(**kwargs)
 
-    monkeypatch.setattr(server_mod, "pack_audio_packet_v2", revoke_during_packet_build)
+    monkeypatch.setattr(mixer_mod, "pack_audio_packet_v2", revoke_during_packet_build)
 
     server._broadcast_loop()
 
@@ -1532,7 +1535,7 @@ def test_engine_snapshots_expose_output_and_return_stream_health(server):
     class _ActiveStream:
         active = True
 
-    output = server_mod.OutputState(output_id=4, device=2, bus_id=1)
+    output = models_mod.OutputState(output_id=4, device=2, bus_id=1)
     output.stream = _ActiveStream()
     with server._lock:
         server._outputs[4] = output

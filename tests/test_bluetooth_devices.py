@@ -4,7 +4,6 @@ from dataclasses import replace
 
 from py_intercom.common import devices as devices_mod
 
-
 HFP_NAME = "Casque (G435 Bluetooth Gaming Headset Hands-Free)"
 A2DP_NAME = "Casque (G435 Bluetooth Gaming Headset Stereo)"
 
