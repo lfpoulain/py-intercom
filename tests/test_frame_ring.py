@@ -207,3 +207,34 @@ def test_stop_event_takes_priority_over_queued_audio() -> None:
     assert ring.wait_pop_into(output, stop_event=stop_event) is None
     assert ring.depth == 1
     assert ring.stats.underflows == 0
+
+
+def test_latency_cap_bounds_a_slightly_faster_producer() -> None:
+    ring = FrameRingBuffer(capacity=20, frame_samples=4, trim_above=2, trim_after=50)
+    frame = np.zeros(4, dtype=np.float32)
+    out = np.empty(4, dtype=np.float32)
+    depths = []
+    for i in range(3000):
+        ring.push(frame)
+        if i % 100 == 0:
+            ring.push(frame)
+        ring.pop_into(out)
+        depths.append(ring.depth)
+
+    assert max(depths[500:]) <= 3
+    assert ring.stats.trimmed > 0
+    assert ring.stats.dropped == 0
+
+
+def test_latency_cap_is_disabled_by_default() -> None:
+    ring = FrameRingBuffer(capacity=20, frame_samples=4)
+    frame = np.zeros(4, dtype=np.float32)
+    out = np.empty(4, dtype=np.float32)
+    for _ in range(5):
+        ring.push(frame)
+    for _ in range(200):
+        ring.push(frame)
+        ring.pop_into(out)
+
+    assert ring.depth == 5
+    assert ring.stats.trimmed == 0

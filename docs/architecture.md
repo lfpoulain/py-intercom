@@ -125,7 +125,7 @@ Le catalogue `common/buses.py` est la source unique des bus. Chaque paquet audio
 4. sommer en linéaire, sans limiter le mix partagé ;
 5. construire le monitoring Régie sans compter deux fois un client ;
 6. pour chaque destinataire, soustraire sa propre contribution (mix-minus) ;
-7. ajouter son Return personnel ;
+7. ajouter son Return personnel, atténué par le ducking si le client l'a demandé (`common/ducking.py`) ;
 8. limiter uniquement le signal final de chaque destination.
 
 ## Latence
@@ -142,7 +142,8 @@ Le test d'intégration vérifie qu'en boucle locale, sans carte son, la voix d'u
 
 **Toutes les files sont bornées et jettent leur trame la plus ancienne quand elles sont pleines** (constantes dans `common/constants.py`) : le retard ne peut jamais dépasser leur capacité, au prix d'une coupure brève. Le jitter buffer démarre sur la fenêtre la plus récente et saute en avant sur un grand trou.
 
-Limite connue : il n'y a pas de correction de dérive entre les horloges des cartes son. Une horloge légèrement plus rapide remplit la file en face jusqu'à son plafond (300 ms pour le jitter buffer) avant que des trames ne soient jetées. Voir la [roadmap](roadmap.md).
+**Plafond de latence.** Deux horloges ne battent jamais exactement au même rythme : carte son du client, horloge du serveur, carte son d'une sortie. Une rafale réseau peut aussi laisser des trames en trop. Le jitter buffer et les rings de lecture surveillent donc leur profondeur : si elle reste au-dessus de sa cible pendant 0,5 s (`LATENCY_TRIM_AFTER_FRAMES`), une trame de 10 ms est retirée. La latence revient ainsi toujours vers la cible (~50 ms de jitter buffer, ≤ 20 ms par ring), et un retard ne peut jamais s'installer. Chaque retrait est compté (`jb_trimmed`, `playout_ring_trimmed`, `queue_trimmed`, `return_queue_trimmed`).
+
 
 ## Audio et Opus
 
@@ -177,6 +178,6 @@ Le serveur garde des `ClientProfile` légers pour les clients hors ligne ; codec
 
 - Trois bus fixes, un flux mono par client, pas de matrice dynamique.
 - Pas de chiffrement ni d'authentification forte.
-- Jitter buffer de profondeur fixe, pas de FEC Opus, pas de correction de dérive d'horloge.
+- Jitter buffer à cible fixe (pas d'adaptation à la gigue mesurée), pas de FEC Opus.
 - WASAPI exclusif non pris en charge.
 - Pas encore de banc matériel ni d'endurance qualifiés : voir la [roadmap](roadmap.md).

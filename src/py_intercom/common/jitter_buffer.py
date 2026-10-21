@@ -5,6 +5,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final
 
+from .constants import JB_MAX_FRAMES, JB_START_FRAMES, JB_TRIM_ABOVE_FRAMES, LATENCY_TRIM_AFTER_FRAMES
+
 
 def _seq_distance(a: int, b: int) -> int:
     return int(((int(a) - int(b) + (1 << 31)) & 0xFFFFFFFF) - (1 << 31))
@@ -18,6 +20,7 @@ class JitterStats:
     missing: int = 0
     concealed: int = 0
     resets: int = 0
+    trimmed: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,9 +66,18 @@ class OpusPacketJitterBuffer:
         *,
         start_frames: int = 3,
         max_frames: int = 50,
+        trim_above: int | None = None,
+        trim_after: int = 50,
     ) -> None:
+        """``trim_above`` enables the latency cap: when more than that many
+        frames stay buffered for ``trim_after`` consecutive pops, the oldest
+        one is skipped. This absorbs sender/receiver clock drift and the extra
+        delay left behind by a network burst, so latency can only go down."""
         self.start_frames = int(max(1, start_frames))
         self.max_frames = int(max(self.start_frames + 1, max_frames))
+        self.trim_above = None if trim_above is None else int(max(self.start_frames, trim_above))
+        self.trim_after = int(max(1, trim_after))
+        self._excess_pops = 0
 
         self._buf: dict[int, JitterFrame] = {}
         self._expected_seq: int | None = None
@@ -88,6 +100,7 @@ class OpusPacketJitterBuffer:
             self._buf.clear()
             self._expected_seq = None
             self._started = False
+            self._excess_pops = 0
             self.stats.resets += 1
 
     def push(
@@ -180,6 +193,7 @@ class OpusPacketJitterBuffer:
                 frame = self._buf.pop(exp)
                 self._expected_seq = (exp + 1) & 0xFFFFFFFF
                 self.stats.played += 1
+                self._trim_excess_locked()
                 return frame
 
             if len(self._buf) == 0:
@@ -220,3 +234,28 @@ class OpusPacketJitterBuffer:
                 )
 
             return None
+
+    def _trim_excess_locked(self) -> None:
+        if self.trim_above is None:
+            return
+        if len(self._buf) <= self.trim_above:
+            self._excess_pops = 0
+            return
+        self._excess_pops += 1
+        if self._excess_pops < self.trim_after or self._expected_seq is None:
+            return
+        self._excess_pops = 0
+        skipped = int(self._expected_seq) & 0xFFFFFFFF
+        if self._buf.pop(skipped, None) is not None:
+            self._expected_seq = (skipped + 1) & 0xFFFFFFFF
+            self.stats.trimmed += 1
+
+
+def new_realtime_jitter_buffer() -> OpusPacketJitterBuffer:
+    """Jitter buffer with the engine's pre-buffer, hard cap and latency cap."""
+    return OpusPacketJitterBuffer(
+        start_frames=JB_START_FRAMES,
+        max_frames=JB_MAX_FRAMES,
+        trim_above=JB_TRIM_ABOVE_FRAMES,
+        trim_after=LATENCY_TRIM_AFTER_FRAMES,
+    )

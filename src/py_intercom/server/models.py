@@ -13,14 +13,15 @@ import sounddevice as sd
 from ..common import opus_codec
 from ..common.constants import (
     FRAME_SAMPLES,
-    JB_MAX_FRAMES,
-    JB_START_FRAMES,
+    LATENCY_TRIM_AFTER_FRAMES,
     MAX_GAIN_DB,
+    PCM_RING_TRIM_ABOVE_FRAMES,
     SAMPLE_RATE,
     SERVER_OUT_MAX_BUFFER_S,
 )
+from ..common.ducking import ReturnDucker
 from ..common.frame_ring import FrameRingBuffer
-from ..common.jitter_buffer import OpusPacketJitterBuffer
+from ..common.jitter_buffer import OpusPacketJitterBuffer, new_realtime_jitter_buffer
 from ..common.jsonio import JsonFileStatus
 from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.routing import RoutingResult
@@ -98,7 +99,7 @@ class ClientState:
     decoder: OpusDecoder = field(default_factory=lambda: opus_codec.OpusDecoder(), repr=False)
     encoder: OpusEncoder = field(default_factory=lambda: opus_codec.OpusEncoder(), repr=False)
     jb: OpusPacketJitterBuffer = field(
-        default_factory=lambda: OpusPacketJitterBuffer(start_frames=JB_START_FRAMES, max_frames=JB_MAX_FRAMES),
+        default_factory=new_realtime_jitter_buffer,
         repr=False,
     )
     vu_dbfs: float = -60.0
@@ -116,6 +117,9 @@ class ClientState:
     listen_return_bus: bool = False
     listen_regie: bool = True
     return_gain_db: float = 0.0
+    duck_return: bool = False
+    # Owned by the broadcast worker only.
+    ducker: ReturnDucker = field(default_factory=ReturnDucker, repr=False)
 
 
 @dataclass
@@ -138,6 +142,8 @@ class OutputState:
         default_factory=lambda: FrameRingBuffer(
             capacity=_OUTPUT_RING_CAPACITY_FRAMES,
             frame_samples=FRAME_SAMPLES,
+            trim_above=PCM_RING_TRIM_ABOVE_FRAMES,
+            trim_after=LATENCY_TRIM_AFTER_FRAMES,
         ),
         repr=False,
     )

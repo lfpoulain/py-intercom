@@ -209,3 +209,60 @@ def test_push_rejects_mutable_or_untyped_metadata():
     jb = OpusPacketJitterBuffer(start_frames=1, max_frames=3)
     with pytest.raises(TypeError, match="JitterFrameMetadata"):
         jb.push(1, b"payload", {"bus_mask": 1})
+
+
+def _drifting_sender(jb, *, pops: int, extra_every: int) -> list[int]:
+    """Sender ~1/extra_every faster than the receiver; returns depth after each pop."""
+    seq = 0
+    depths = []
+    for _ in range(4):
+        jb.push(seq, b"x")
+        seq += 1
+    for i in range(pops):
+        jb.push(seq, b"x")
+        seq += 1
+        if i % extra_every == 0:
+            jb.push(seq, b"x")
+            seq += 1
+        assert jb.pop_frame() is not None
+        depths.append(jb.buffered_frames)
+    return depths
+
+
+def test_without_latency_cap_clock_drift_accumulates_delay() -> None:
+    jb = OpusPacketJitterBuffer(start_frames=4, max_frames=30)
+
+    depths = _drifting_sender(jb, pops=2000, extra_every=100)
+
+    assert depths[-1] >= 20
+
+
+def test_latency_cap_absorbs_clock_drift() -> None:
+    jb = OpusPacketJitterBuffer(start_frames=4, max_frames=30, trim_above=5, trim_after=50)
+
+    depths = _drifting_sender(jb, pops=2000, extra_every=100)
+
+    assert max(depths[500:]) <= 6
+    assert jb.stats.trimmed > 0
+
+
+def test_latency_cap_recovers_after_a_network_burst() -> None:
+    jb = OpusPacketJitterBuffer(start_frames=4, max_frames=30, trim_above=5, trim_after=50)
+    seq = 0
+    for _ in range(14):  # pre-buffer plus a 10-frame burst
+        jb.push(seq, b"x")
+        seq += 1
+    for _ in range(600):
+        jb.push(seq, b"x")
+        seq += 1
+        jb.pop_frame()
+
+    assert jb.buffered_frames <= 5
+
+
+def test_latency_cap_never_trims_a_stable_stream() -> None:
+    jb = OpusPacketJitterBuffer(start_frames=4, max_frames=30, trim_above=5, trim_after=50)
+
+    _drifting_sender(jb, pops=2000, extra_every=10**9)
+
+    assert jb.stats.trimmed == 0

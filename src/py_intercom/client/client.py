@@ -15,13 +15,14 @@ from ..common.constants import (
     AUDIO_UDP_PORT,
     CONTROL_PORT_OFFSET,
     FRAME_SAMPLES,
-    JB_MAX_FRAMES,
     JB_START_FRAMES,
+    LATENCY_TRIM_AFTER_FRAMES,
     MAX_GAIN_DB,
+    PCM_RING_TRIM_ABOVE_FRAMES,
     SAMPLE_RATE,
 )
 from ..common.frame_ring import FrameRingBuffer
-from ..common.jitter_buffer import OpusPacketJitterBuffer
+from ..common.jitter_buffer import new_realtime_jitter_buffer
 from ..common.logging import best_effort
 from .audio_io import AudioIOMixin
 from .control import ControlMixin
@@ -52,6 +53,7 @@ class ClientConfig:
 
     listen_return_bus: bool = False
     listen_regie: bool = True
+    duck_return: bool = False
 
 
 class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
@@ -81,7 +83,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         self._enc = opus_codec.OpusEncoder()
         self._dec = opus_codec.OpusDecoder()
 
-        self._jb = OpusPacketJitterBuffer(start_frames=JB_START_FRAMES, max_frames=JB_MAX_FRAMES)
+        self._jb = new_realtime_jitter_buffer()
 
         self._opus_ok: bool = True
         self._opus_err: str = ""
@@ -111,6 +113,8 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         self._playout_ring = FrameRingBuffer(
             capacity=_PLAYOUT_RING_CAPACITY,
             frame_samples=int(FRAME_SAMPLES),
+            trim_above=PCM_RING_TRIM_ABOVE_FRAMES,
+            trim_after=LATENCY_TRIM_AFTER_FRAMES,
         )
         self._capture_work = np.empty((int(FRAME_SAMPLES),), dtype=np.float32)
         self._capture_abs_work = np.empty((int(FRAME_SAMPLES),), dtype=np.float32)
@@ -200,6 +204,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         self._ptt_buses: dict[int, bool] = {}
         self._listen_return_bus: bool = bool(self.config.listen_return_bus)
         self._listen_regie: bool = bool(self.config.listen_regie)
+        self._duck_return: bool = bool(self.config.duck_return)
 
     def get_stats_snapshot(self) -> dict:
         with self._state_lock:
@@ -211,6 +216,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
                 jitter_buffered_frames = int(self._jb.buffered_frames)
             except Exception:
                 jitter_buffered_frames = 0
+            jitter_trimmed = int(self._jb.stats.trimmed)
 
             ctrl_age_s = (
                 max(0.0, time.monotonic() - float(self._ctrl_last_rx_monotonic)) if self._ctrl_connected else None
@@ -264,6 +270,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
                 "capture_samples": int(capture_samples),
                 "playback_samples": int(playback_samples),
                 "jitter_buffered_frames": int(jitter_buffered_frames),
+                "jitter_trimmed": jitter_trimmed,
                 "tx_ring_depth": int(tx_ring_stats.depth),
                 "tx_ring_pushed": int(tx_ring_stats.pushed),
                 "tx_ring_popped": int(tx_ring_stats.popped),
@@ -273,6 +280,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
                 "playout_ring_pushed": int(playout_ring_stats.pushed),
                 "playout_ring_popped": int(playout_ring_stats.popped),
                 "playout_ring_dropped": int(playout_ring_stats.dropped),
+                "playout_ring_trimmed": int(playout_ring_stats.trimmed),
                 "playout_ring_underflows": int(playout_ring_stats.underflows),
                 "tx_packets": int(self._tx_packets),
                 "tx_udp_sent": int(self._tx_udp_sent),
@@ -326,6 +334,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
                 "bus_vu_dbfs": dict(self._bus_vu_dbfs),
                 "listen_return_bus": bool(self._listen_return_bus),
                 "listen_regie": bool(self._listen_regie),
+                "duck_return": bool(self._duck_return),
                 "buses": {
                     str(int(bid)): {
                         "bus_id": int(bid),
@@ -346,6 +355,11 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
     def set_listen_return_bus(self, enabled: bool) -> None:
         with self._state_lock:
             self._listen_return_bus = bool(enabled)
+        self._control_send_state()
+
+    def set_duck_return(self, enabled: bool) -> None:
+        with self._state_lock:
+            self._duck_return = bool(enabled)
         self._control_send_state()
 
     def set_listen_regie(self, enabled: bool) -> None:

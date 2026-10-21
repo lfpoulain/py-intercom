@@ -45,7 +45,7 @@ Chaque opérateur entend l'équipe, jamais sa propre voix. Le programme peut s'a
 <td width="33%" valign="top">
 
 ### ⚡ Temps réel avant tout
-Opus 48 kHz, trames de 10 ms, files bornées : le retard ne s'accumule jamais, même sur un réseau capricieux.
+Opus 48 kHz, trames de 10 ms. Une dérive d'horloge ou une rafale réseau est rattrapée toute seule : le retard ne s'accumule jamais.
 
 </td>
 </tr>
@@ -78,6 +78,30 @@ En ligne, dégradé, au repos : chaque client et chaque flux est visible, avec s
 </div>
 
 Choisissez le serveur (découvert automatiquement sur le réseau), votre micro et votre casque, puis parlez avec vos raccourcis.
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### ✅ Tester avant le live
+Le bouton **Tester…** vérifie en 15 secondes le réseau, les raccourcis PTT, le micro et le casque. Ce qui passe le test s'ouvrira à la connexion.
+
+</td>
+<td width="50%" valign="top">
+
+<img src="docs/images/preflight.png" alt="Préflight du client">
+
+</td>
+</tr>
+<tr>
+<td colspan="2">
+
+### 🔉 Le programme s'efface quand on vous parle
+Option à cocher : pendant qu'on vous parle, le Return (le programme) baisse de 15 dB dans votre casque, puis remonte en douceur.
+
+</td>
+</tr>
+</table>
 
 ## ⚙️ Comment ça marche
 

@@ -20,6 +20,19 @@ JB_MAX_FRAMES = 30  # jitter buffer hard cap (~300 ms)
 SERVER_MIX_QUEUE_MAX = 20  # mixer -> broadcast queue (~200 ms)
 SERVER_RETURN_FRAMES_MAX = 20  # Return bus input queue (~200 ms)
 SERVER_OUT_MAX_BUFFER_S = 0.2  # queue in front of each physical output
+# Latency cap: when a queue stays above its target for this many consecutive
+# frames (0.5 s), one frame is dropped. Clock drift between sound cards and
+# network bursts can therefore never leave a lasting delay behind.
+LATENCY_TRIM_AFTER_FRAMES = 50
+JB_TRIM_ABOVE_FRAMES = JB_START_FRAMES + 1
+PCM_RING_TRIM_ABOVE_FRAMES = 2
+
+# --- Return ducking (optional, per client) ---------------------------------
+RETURN_DUCK_DEPTH_DB = -15.0  # Return attenuation while voices are heard
+RETURN_DUCK_THRESHOLD_DBFS = -45.0  # voice level that triggers ducking
+RETURN_DUCK_ATTACK_DB_PER_FRAME = 5.0  # full depth in 30 ms
+RETURN_DUCK_HOLD_FRAMES = 30  # keep ducked through 300 ms pauses between words
+RETURN_DUCK_RELEASE_DB_PER_FRAME = 0.5  # back to full level in 300 ms
 
 # --- Control plane (TCP) ----------------------------------------------------
 CTRL_LIVENESS_TIMEOUT_S = 6.0  # session expires after this long without traffic

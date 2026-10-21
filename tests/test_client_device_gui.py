@@ -74,6 +74,7 @@ class _FakeWindow:
         self._input_device = _FakeCombo()
         self._output_device = _FakeCombo()
         self._connect_btn = _FakeButton()
+        self._preflight_btn = _FakeButton()
         self._device_status = _FakeLabel()
         self.refresh_requests = 0
 

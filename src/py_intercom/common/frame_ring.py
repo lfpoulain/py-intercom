@@ -25,6 +25,7 @@ class FrameRingStats:
     popped: int
     dropped: int
     underflows: int
+    trimmed: int = 0
 
 
 class FrameRingBuffer:
@@ -42,7 +43,18 @@ class FrameRingBuffer:
     the short critical sections also make individual operations thread-safe.
     """
 
-    def __init__(self, *, capacity: int, frame_samples: int) -> None:
+    def __init__(
+        self,
+        *,
+        capacity: int,
+        frame_samples: int,
+        trim_above: int | None = None,
+        trim_after: int = 50,
+    ) -> None:
+        """``trim_above`` enables the latency cap: when the depth left after a
+        pop stays above it for ``trim_after`` consecutive pops, one extra frame
+        is discarded. Producer and consumer clocks never agree exactly; without
+        this, a slightly faster producer would slowly fill the whole ring."""
         self.capacity = self._positive_index(capacity, name="capacity")
         self.frame_samples = self._positive_index(
             frame_samples,
@@ -63,6 +75,11 @@ class FrameRingBuffer:
         self._popped = 0
         self._dropped = 0
         self._underflows = 0
+        self._trimmed = 0
+
+        self._trim_above = None if trim_above is None else max(0, int(trim_above))
+        self._trim_after = self._positive_index(trim_after, name="trim_after")
+        self._excess_pops = 0
 
         self._condition = threading.Condition(threading.Lock())
 
@@ -117,6 +134,7 @@ class FrameRingBuffer:
                 popped=int(self._popped),
                 dropped=int(self._dropped),
                 underflows=int(self._underflows),
+                trimmed=int(self._trimmed),
             )
 
     def push(self, frame: Float32Frame, metadata: int = 0) -> None:
@@ -155,7 +173,21 @@ class FrameRingBuffer:
         self._read_index = (slot + 1) % self.capacity
         self._depth -= 1
         self._popped += 1
+        self._trim_excess_locked()
         return metadata
+
+    def _trim_excess_locked(self) -> None:
+        if self._trim_above is None:
+            return
+        if self._depth <= self._trim_above:
+            self._excess_pops = 0
+            return
+        self._excess_pops += 1
+        if self._excess_pops >= self._trim_after:
+            self._read_index = (self._read_index + 1) % self.capacity
+            self._depth -= 1
+            self._trimmed += 1
+            self._excess_pops = 0
 
     def pop_into(self, output: Float32Frame) -> int | None:
         """Copy the oldest frame into ``output`` and return its metadata.
@@ -233,4 +265,5 @@ class FrameRingBuffer:
             self._read_index = 0
             self._write_index = 0
             self._depth = 0
+            self._excess_pops = 0
             return cleared

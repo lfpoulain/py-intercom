@@ -10,7 +10,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from .. import __version__
 from ..common.buses import BUS_BY_ID, FIXED_BUSES, REGIE_BUS_ID
-from ..common.constants import AUDIO_UDP_PORT, MAX_GAIN_DB
+from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, MAX_GAIN_DB
 from ..common.devices import format_device_label, resolve_device
 from ..common.discovery import DiscoveryListener
 from ..common.gui_utils import DeviceWorker, is_checked
@@ -35,6 +35,7 @@ from .client import ClientConfig, IntercomClient
 from .hotkeys import (
     GlobalPttHotkeys,
 )
+from .preflight import PreflightDialog
 from .status import (
     ClientOperationalState,
     ClientOperationalStatus,
@@ -54,6 +55,7 @@ def new_client_preset(client_uuid: str) -> dict:
             "ptt_bus_keys": {},
             "listen_regie": True,
             "listen_return_bus": False,
+            "duck_return": False,
             "input_gain_db": 0.0,
             "output_gain_db": 0.0,
             "show_all_devices": False,
@@ -212,6 +214,12 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._refresh_devices_btn.setToolTip(
             "Réinterroger les périphériques audio. Disponible uniquement hors connexion."
         )
+        self._preflight_btn = QtWidgets.QPushButton("Tester…")
+        self._preflight_btn.setProperty("class", "secondary")
+        self._preflight_btn.setToolTip(
+            "Vérifier réseau, raccourcis, micro et casque avant de se connecter."
+        )
+        self._preflight_btn.setEnabled(False)
         self._device_status = QtWidgets.QLabel("")
 
         self._connect_btn = QtWidgets.QPushButton("▶  Connecter")
@@ -247,6 +255,14 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._listen_return_bus.setEnabled(False)
         with best_effort("_listen_return_bus.setChecked()"):
             self._listen_return_bus.setChecked(bool(self._preset_get("listen_return_bus", False)))
+
+        self._duck_return = QtWidgets.QCheckBox("Baisser le Return quand on me parle")
+        self._duck_return.setToolTip(
+            "Le programme baisse automatiquement de 15 dB dans votre casque "
+            "pendant que quelqu'un vous parle, puis remonte."
+        )
+        with best_effort("restore duck_return"):
+            self._duck_return.setChecked(bool(self._preset_get("duck_return", False)))
 
         self._mic_gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self._mic_gain.setMinimum(-60)
@@ -377,6 +393,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         dev_footer.setSpacing(10)
         dev_footer.addWidget(self._show_all_devices)
         dev_footer.addWidget(self._refresh_devices_btn)
+        dev_footer.addWidget(self._preflight_btn)
         self._device_status.setProperty("role", "muted")
         dev_footer.addWidget(self._device_status, 1)
         dev_lay.addLayout(dev_footer)
@@ -404,9 +421,10 @@ class ClientWindow(QtWidgets.QMainWindow):
             ctrl_lay.addWidget(gain, row, 1, 1, 2)
             ctrl_lay.addWidget(value, row, 3)
             ctrl_lay.addWidget(meter, row, 4)
+        ctrl_lay.addWidget(self._duck_return, 4, 0, 1, 5)
         ctrl_lay.setColumnStretch(1, 2)
         ctrl_lay.setColumnStretch(4, 1)
-        ctrl_lay.setRowStretch(4, 1)
+        ctrl_lay.setRowStretch(5, 1)
 
         # -- PTT / routing --
         ptt_box = QtWidgets.QGroupBox("Parler — PTT")
@@ -441,6 +459,8 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         self._listen_regie.stateChanged.connect(self._on_listen_regie_changed)
         self._listen_return_bus.stateChanged.connect(self._on_listen_return_bus_changed)
+        self._preflight_btn.clicked.connect(self._open_preflight)
+        self._duck_return.stateChanged.connect(self._on_duck_return_changed)
         self._mic_gain.valueChanged.connect(self._on_mic_gain_changed)
         self._hp_gain.valueChanged.connect(self._on_hp_gain_changed)
         self._return_gain.valueChanged.connect(self._on_return_gain_changed)
@@ -1148,6 +1168,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             and not refresh_active
         )
         self._connect_btn.setEnabled(ready)
+        self._preflight_btn.setEnabled(ready)
 
         if input_selected and output_selected:
             self._connect_btn.setToolTip(
@@ -1520,6 +1541,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             return_gain_db=float(self._return_gain.value()),
             ptt_bus_keys=dict(self._preset_get("ptt_bus_keys", {}) or {}),
             listen_return_bus=bool(self._listen_return_bus.isChecked()),
+            duck_return=bool(self._duck_return.isChecked()),
             listen_regie=bool(self._listen_regie.isChecked()),
         )
 
@@ -1546,6 +1568,7 @@ class ClientWindow(QtWidgets.QMainWindow):
                 self._client.set_output_gain_db(cfg.output_gain_db)
                 self._client.set_return_gain_db(cfg.return_gain_db)
                 self._client.set_listen_return_bus(bool(cfg.listen_return_bus))
+                self._client.set_duck_return(bool(cfg.duck_return))
                 self._client.set_listen_regie(bool(cfg.listen_regie))
                 self._client.reconnect_network()
             else:
@@ -1602,6 +1625,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._refresh_devices_btn.setEnabled(False)
 
         self._connect_btn.setEnabled(False)
+        self._preflight_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
         self._listen_regie.setEnabled(True)
         self._listen_return_bus.setEnabled(True)
@@ -1693,6 +1717,31 @@ class ClientWindow(QtWidgets.QMainWindow):
         if self._client is None:
             return
         self._client.set_listen_return_bus(bool(enabled))
+
+    def _open_preflight(self) -> None:
+        input_device = self._input_device.currentData()
+        output_device = self._output_device.currentData()
+        if self._connected or input_device is None or output_device is None:
+            return
+        dialog = PreflightDialog(
+            self,
+            server_host=self._server_ip.text().strip(),
+            control_port=int(AUDIO_UDP_PORT) + int(CONTROL_PORT_OFFSET),
+            input_device=int(input_device),
+            output_device=int(output_device),
+            shortcuts={
+                int(bus_id): edit.keySequence().toString()
+                for bus_id, edit in self._ptt_bus_keys.items()
+            },
+        )
+        dialog.exec()
+
+    def _on_duck_return_changed(self, state: int) -> None:
+        enabled = is_checked(state)
+        with best_effort("save duck_return"):
+            self._preset_set("duck_return", bool(enabled))
+        if self._client is not None:
+            self._client.set_duck_return(bool(enabled))
 
     def _on_mic_gain_changed(self, value: int) -> None:
         self._mic_gain_lbl.setText(f"{value} dB")

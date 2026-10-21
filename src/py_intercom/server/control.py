@@ -16,8 +16,6 @@ from ..common.buses import (
 )
 from ..common.constants import (
     CONTROL_PORT_OFFSET,
-    JB_MAX_FRAMES,
-    JB_START_FRAMES,
     MAX_GAIN_DB,
 )
 from ..common.control_protocol import (
@@ -34,7 +32,7 @@ from ..common.identity import (
     ClientIdentityError,
     validate_client_identity,
 )
-from ..common.jitter_buffer import OpusPacketJitterBuffer
+from ..common.jitter_buffer import new_realtime_jitter_buffer
 from ..common.logging import best_effort
 from .models import ClientProfile, ClientState
 
@@ -279,6 +277,7 @@ class ControlMixin:
                             "listen_return_bus",
                             "listen_regie",
                             "applies_input_gain_locally",
+                            "duck_return",
                         ):
                             raw_value = msg.get(field_name)
                             if raw_value is not None and not isinstance(raw_value, bool):
@@ -333,6 +332,11 @@ class ControlMixin:
                                     st.listen_return_bus = listen_return_bus
                                 if listen_regie is not None:
                                     st.listen_regie = listen_regie
+                                duck_return = parsed_flags["duck_return"]
+                                if duck_return is not None and bool(duck_return) != bool(st.duck_return):
+                                    st.duck_return = bool(duck_return)
+                                    if not st.duck_return:
+                                        st.ducker.reset()
                                 if return_gain_db is not None:
                                     st.return_gain_db = float(return_gain_db)
                                 if input_gain_db is not None:
@@ -419,10 +423,7 @@ class ControlMixin:
                     try:
                         next_decoder = opus_codec.OpusDecoder()
                         next_encoder = opus_codec.OpusEncoder()
-                        next_jitter = OpusPacketJitterBuffer(
-                            start_frames=JB_START_FRAMES,
-                            max_frames=JB_MAX_FRAMES,
-                        )
+                        next_jitter = new_realtime_jitter_buffer()
                     except Exception as exc:
                         self._ctrl_codec_init_errors += 1
                         raise ControlProtocolError(

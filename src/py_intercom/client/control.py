@@ -39,6 +39,7 @@ class ControlMixin:
             ptt_buses = dict(self._ptt_buses)
             listen_return_bus = bool(self._listen_return_bus)
             listen_regie = bool(self._listen_regie)
+            duck_return = bool(self._duck_return)
             return_gain_db = float(self._return_gain_db)
         msg: dict[str, object] = {
             "type": "state",
@@ -48,6 +49,7 @@ class ControlMixin:
             "ptt_buses": ptt_buses,
             "listen_return_bus": listen_return_bus,
             "listen_regie": listen_regie,
+            "duck_return": duck_return,
             "return_gain_db": return_gain_db,
         }
         try:

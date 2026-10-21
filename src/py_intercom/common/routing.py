@@ -262,6 +262,24 @@ def route_sources(
     )
 
 
+def heard_voice_dbfs(
+    regie_linear: np.ndarray,
+    own_regie_contribution: np.ndarray | None,
+    *,
+    listen_regie: bool,
+) -> float:
+    """Level of the voices one destination hears (its Régie mix-minus), in dBFS."""
+    if not bool(listen_regie):
+        return -120.0
+    voice = _strict_frame(regie_linear, name="regie_linear", copy=True)
+    if own_regie_contribution is not None:
+        np.subtract(voice, _strict_frame(own_regie_contribution, name="own_regie_contribution", copy=False), out=voice)
+    mean_square = float(np.dot(voice, voice)) / float(voice.size)
+    if not math.isfinite(mean_square) or mean_square <= 0.0:
+        return -120.0
+    return 10.0 * math.log10(mean_square)
+
+
 def build_destination_mix(
     regie_linear: np.ndarray,
     own_regie_contribution: np.ndarray | None,

@@ -120,13 +120,24 @@ def _listen(client: IntercomClient, duration_s: float) -> np.ndarray:
 
 @pytest.fixture
 def server(tmp_path):
-    srv = IntercomServer(
-        bind_ip="127.0.0.1",
-        port=_free_port_pair(),
-        preset_path=str(tmp_path / "server_preset.json"),
-        discovery_enabled=False,
-    )
-    srv.start()
+    # Another process can grab the probed port pair before the server binds
+    # it; retry on a fresh pair rather than failing the test.
+    for attempt in range(5):
+        srv = None
+        try:
+            srv = IntercomServer(
+                bind_ip="127.0.0.1",
+                port=_free_port_pair(),
+                preset_path=str(tmp_path / f"server_preset_{attempt}.json"),
+                discovery_enabled=False,
+            )
+            srv.start()
+            break
+        except OSError:
+            if srv is not None:
+                srv.stop()
+    else:
+        pytest.fail("could not start a loopback server on a free port")
     yield srv
     srv.stop()
 
@@ -257,3 +268,81 @@ def test_client_reconnects_with_a_fresh_session(server, connect):
     with _Microphone(alice):
         _listen(bob, 0.3)
         assert _rms_dbfs(_listen(bob, 0.5)) > SPEECH_DBFS
+
+
+class _ProgramFeed:
+    """Plays a 2 kHz program tone into the server's Return bus in real time."""
+
+    FREQUENCY_HZ = 2000.0
+
+    def __init__(self, server: IntercomServer) -> None:
+        self._server = server
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        phase = 0
+        next_tick = time.monotonic()
+        while not self._stop.is_set():
+            t = (np.arange(FRAME_SAMPLES) + phase) / SAMPLE_RATE
+            phase += FRAME_SAMPLES
+            self._server._return_frames.push((0.3 * np.sin(2.0 * np.pi * self.FREQUENCY_HZ * t)).astype(np.float32))
+            next_tick += FRAME_PERIOD_S
+            time.sleep(max(0.0, next_tick - time.monotonic()))
+
+    def __enter__(self) -> _ProgramFeed:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2.0)
+
+
+def _tone_level_db(samples: np.ndarray, frequency_hz: float) -> float:
+    spectrum = np.abs(np.fft.rfft(samples * np.hanning(samples.size)))
+    freqs = np.fft.rfftfreq(samples.size, 1.0 / SAMPLE_RATE)
+    band = (freqs > frequency_hz - 50) & (freqs < frequency_hz + 50)
+    return 20.0 * np.log10(float(spectrum[band].max()) + 1e-12)
+
+
+def test_return_ducking_lowers_the_program_while_someone_talks(server, connect):
+    server.set_return_enabled(True)
+    alice = connect("Alice")
+    bob = connect("Bob")
+    bob.set_listen_return_bus(True)
+    bob.set_duck_return(True)
+    assert _wait_until(lambda: server.get_clients_snapshot()[bob.client_id]["duck_return"])
+
+    with _ProgramFeed(server):
+        _listen(bob, 0.4)
+        program_alone = _tone_level_db(_listen(bob, 0.5), _ProgramFeed.FREQUENCY_HZ)
+
+        alice.set_ptt_bus(REGIE_BUS_ID, True)
+        with _Microphone(alice):
+            _listen(bob, 0.4)
+            program_ducked = _tone_level_db(_listen(bob, 0.5), _ProgramFeed.FREQUENCY_HZ)
+        alice.set_ptt_bus(REGIE_BUS_ID, False)
+
+        _listen(bob, 1.0)  # hold, then release
+        program_restored = _tone_level_db(_listen(bob, 0.5), _ProgramFeed.FREQUENCY_HZ)
+
+    assert program_alone - program_ducked > 10.0
+    assert abs(program_restored - program_alone) < 3.0
+
+
+def test_return_is_not_ducked_when_the_option_is_off(server, connect):
+    server.set_return_enabled(True)
+    alice = connect("Alice")
+    bob = connect("Bob")
+    bob.set_listen_return_bus(True)
+
+    with _ProgramFeed(server):
+        _listen(bob, 0.4)
+        program_alone = _tone_level_db(_listen(bob, 0.5), _ProgramFeed.FREQUENCY_HZ)
+        alice.set_ptt_bus(REGIE_BUS_ID, True)
+        with _Microphone(alice):
+            _listen(bob, 0.4)
+            program_with_voice = _tone_level_db(_listen(bob, 0.5), _ProgramFeed.FREQUENCY_HZ)
+
+    assert abs(program_alone - program_with_voice) < 3.0

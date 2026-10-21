@@ -29,6 +29,7 @@ from ..common.routing import (
     RoutingConfig,
     RoutingError,
     build_destination_mix,
+    heard_voice_dbfs,
     route_sources,
 )
 from .models import ClientState, _RoutingEnvelope
@@ -390,6 +391,7 @@ class MixerMixin:
                         bool(st.listen_regie),
                         float(st.return_gain_db),
                         int(st.session_token),
+                        st.ducker if st.duck_return else None,
                     )
                 )
             return destinations
@@ -494,7 +496,7 @@ class MixerMixin:
                     if bool(np.isfinite(_return_scratch).all()):
                         return_frame = _return_scratch
 
-            for client_id, addr, enc, listen_return, listen_regie, return_gain_db, session_token in dests:
+            for client_id, addr, enc, listen_return, listen_regie, return_gain_db, session_token, ducker in dests:
                 try:
                     udp_port = int(addr[1])
                 except Exception:
@@ -514,6 +516,8 @@ class MixerMixin:
                         self._silent_dest_logged.pop(int(client_id), None)
                 try:
                     c = contrib.get(int(client_id))
+                    if ducker is not None and listen_return:
+                        return_gain_db += ducker.update(heard_voice_dbfs(raw_mix, c, listen_regie=bool(listen_regie)))
                     mix_minus = build_destination_mix(
                         raw_mix,
                         c,

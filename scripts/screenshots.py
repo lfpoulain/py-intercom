@@ -35,6 +35,7 @@ from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from py_intercom.client.client import ClientConfig, IntercomClient  # noqa: E402
 from py_intercom.client.gui import ClientWindow  # noqa: E402
+from py_intercom.client.preflight import PreflightDialog  # noqa: E402
 from py_intercom.common.buses import PLATEAU_BUS_ID, REGIE_BUS_ID, VMIX_BUS_ID  # noqa: E402
 from py_intercom.common.constants import FRAME_SAMPLES, SAMPLE_RATE  # noqa: E402
 from py_intercom.common.identity import client_id_from_uuid  # noqa: E402
@@ -146,6 +147,47 @@ def save(window: QtWidgets.QWidget, name: str) -> None:
     print(f"wrote {path.relative_to(ROOT)}")
 
 
+class _SpeakingMicrophone:
+    level_dbfs = peak_dbfs = -14.0
+
+    def __init__(self, device: int) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class _SilentTone:
+    def __init__(self, device: int) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def save_preflight(app: QtWidgets.QApplication) -> None:
+    import py_intercom.client.preflight as preflight
+
+    preflight.MIC_LISTEN_S = 0.2
+    dialog = PreflightDialog(
+        None,
+        server_host="127.0.0.1",
+        control_port=5001,
+        input_device=0,
+        output_device=1,
+        shortcuts={REGIE_BUS_ID: "F1", PLATEAU_BUS_ID: "F2", VMIX_BUS_ID: "F3"},
+        microphone_factory=_SpeakingMicrophone,
+        tone_factory=_SilentTone,
+    )
+    dialog.show()
+    dialog.start()
+    wait_for(lambda: dialog._heard_btn.isVisible())
+    dialog._heard_btn.click()
+    pump(0.3)
+    save(dialog, "preflight.png")
+    dialog.close()
+
+
 def main() -> None:
     QtCore.QSettings.setDefaultFormat(QtCore.QSettings.Format.IniFormat)
     QtCore.QSettings.setPath(QtCore.QSettings.Format.IniFormat, QtCore.QSettings.Scope.UserScope, str(SANDBOX))
@@ -170,6 +212,7 @@ def main() -> None:
     client_window = ClientWindow()
     client_window._name.setText("Réalisation")
     client_window._server_ip.setText("127.0.0.1")
+    client_window._duck_return.setChecked(True)
     for bus_id, key in ((REGIE_BUS_ID, "F1"), (PLATEAU_BUS_ID, "F2"), (VMIX_BUS_ID, "F3")):
         client_window._ptt_bus_keys[bus_id].setKeySequence(QtGui.QKeySequence(key))
     client_window.show()
@@ -189,6 +232,8 @@ def main() -> None:
     logo = QtGui.QImage(str(ROOT / "src" / "py_intercom" / "img" / "logo.png"))
     logo.scaledToWidth(240, QtCore.Qt.TransformationMode.SmoothTransformation).save(str(OUT / "logo.png"))
     save(client_window, "client.png")
+
+    save_preflight(app)
 
     client_window.close()
     for client in clients:

@@ -33,7 +33,7 @@ Objets JSON UTF-8, un par ligne (`\n`).
 | `hello` | client → serveur | `version`, `client_id`, `client_uuid`, `name`, `udp_port`, `applies_input_gain_locally` |
 | `welcome` | serveur → client | `version`, `session_token` (16 caractères hexadécimaux minuscules), `server_time_ms` |
 | `update` | serveur → client | `config` : `client_id`, `input_gain_db`, `buses`, `return_vu_dbfs` |
-| `state` | client → serveur | `ptt_buses`, `listen_regie`, `listen_return_bus`, `input_gain_db`, `return_gain_db` |
+| `state` | client → serveur | `ptt_buses`, `listen_regie`, `listen_return_bus`, `duck_return`, `input_gain_db`, `return_gain_db` |
 | `ping` / `pong` | les deux | vivacité ; le `pong` porte le VU du Return |
 | `kick` | serveur → client | éjection demandée par l'opérateur |
 
