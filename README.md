@@ -96,6 +96,9 @@ Le bouton **Tester…** vérifie en 15 secondes le réseau, les raccourcis PTT, 
 <tr>
 <td colspan="2">
 
+### 🎛️ Pilotable depuis un Stream Deck
+Option **Contrôle HTTP** : `POST /ptt/regie/on`, `/off`, `/toggle` et `GET /status` pour Stream Deck, Bitfocus Companion ou vos scripts. Voir le [protocole](docs/protocole.md#contrôle-à-distance-http-du-client).
+
 ### 🔉 Le programme s'efface quand on vous parle
 Option à cocher : pendant qu'on vous parle, le Return (le programme) baisse de 15 dB dans votre casque, puis remonte en douceur.
 

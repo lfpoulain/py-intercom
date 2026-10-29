@@ -21,6 +21,7 @@ Un intercom LAN desktop fiable pour le live : latence bornée, comportement fail
 - Architecture (P1) : catalogue de bus, routeur pur, protocole V2, profils séparés des sessions, presets versionnés et atomiques, logs tournants, santé par facette, design system Qt commun, runtime Opus reproductible.
 - Octobre 2026 : test d'intégration client/serveur de bout en bout, moteurs et GUI découpés par responsabilité, lint ruff en CI, plus aucune exception avalée sans trace.
 - Octobre 2026 : plafond de latence (dérive d'horloge et rafales absorbées), préflight opérateur, ducking du Return en option.
+- Octobre 2026 : contrôle HTTP du PTT côté client (Stream Deck, Companion, scripts).
 
 ## Travaux ouverts
 

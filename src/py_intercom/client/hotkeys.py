@@ -174,6 +174,11 @@ class PttHotkeyState:
         with self._lock:
             return dict(self._active_buses)
 
+    def set_toggle_state(self, bus_id: int, active: bool) -> None:
+        """Align a Toggle bus with a change made elsewhere (e.g. HTTP remote)."""
+        with self._lock:
+            self._toggle_states[int(bus_id)] = bool(active)
+
 
 class GlobalPttHotkeys(QtCore.QObject):
     ptt_changed = QtCore.Signal(int, bool)
@@ -210,6 +215,9 @@ class GlobalPttHotkeys(QtCore.QObject):
 
     def active_buses(self) -> dict[int, bool]:
         return self._state.active_buses()
+
+    def set_toggle_state(self, bus_id: int, active: bool) -> None:
+        self._state.set_toggle_state(bus_id, active)
 
     def _emit_changes(self, changes: list[tuple[int, bool]]) -> None:
         for bus_id, active in changes:

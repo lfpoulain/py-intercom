@@ -166,8 +166,11 @@ def test_every_non_online_ui_state_forces_all_ptt_routes_off(state) -> None:
         _ptt_bus_keys={0: object(), 1: object(), 2: object()},
         _ptt_bus_modes={0: "always_on", 1: "toggle", 2: "ptt"},
         _ptt_bus_toggle_state={1: True},
+        _ptt_remote_active={2: True},  # a remote hold must not survive either
         _operational_status=ClientOperationalStatus(state, state.value, ""),
     )
+    fake_window._ptt_bus_active = lambda bus_id: ClientWindow._ptt_bus_active(fake_window, bus_id)
+    fake_window._apply_ptt_bus = lambda bus_id: ClientWindow._apply_ptt_bus(fake_window, bus_id)
 
     ClientWindow._apply_ptt_modes_to_client(fake_window)
 

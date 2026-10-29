@@ -83,6 +83,54 @@ UDP ne crée jamais de client et ne modifie jamais l'adresse déclarée. Chaque 
 
 Le client n'accepte l'audio qu'après `welcome` et la première configuration. Il vérifie l'adresse et le port du serveur, la direction, son `client_id`, le token courant, le stream et le masque. À chaque perte de contrôle ou reconnexion, token, jitter buffer et files sont vidés.
 
+## Contrôle à distance (HTTP) du client
+
+Désactivé par défaut. Activé dans le client, il écoute sur `127.0.0.1:5080` (port réglable), ou sur toutes les interfaces si « Depuis le réseau » est coché. Toutes les réponses sont du JSON UTF-8.
+
+| Méthode | Chemin | Effet |
+|---|---|---|
+| `POST` | `/ptt/<bus>/on` | Active le bus |
+| `POST` | `/ptt/<bus>/off` | Désactive le bus |
+| `POST` | `/ptt/<bus>/toggle` | Inverse le bus |
+| `POST` | `/ptt/all/off` | Relâche tous les bus |
+| `GET` | `/status` | État courant |
+
+`<bus>` : `regie`, `plateau`, `vmix` ou `0`, `1`, `2`, insensible à la casse. Corps de requête vide.
+
+Réponse de `/status` et des commandes réussies :
+
+```json
+{
+  "state": "En ligne",
+  "online": true,
+  "buses": {
+    "regie":   {"mode": "ptt",       "active": true},
+    "plateau": {"mode": "toggle",    "active": false},
+    "vmix":    {"mode": "always_on", "active": true}
+  }
+}
+```
+
+| Code | Cas |
+|---|---|
+| `200` | Commande appliquée ; l'état à jour est renvoyé |
+| `409` | Client pas « En ligne » (PTT désarmé), ou `off` sur un bus en mode Always On |
+| `404` | Bus ou route inconnus |
+| `405` | Mauvaise méthode (commande PTT en `GET`) |
+| `403` | Requête de navigateur (en-tête `Origin` ou `Referer`) |
+| `503` | Interface occupée, réessayer |
+
+Les erreurs ont la forme `{"error": "message"}` ; le `409` hors ligne inclut aussi l'état complet.
+
+Sémantique :
+
+- **Mode PTT** : `on`/`off` maintiennent ou relâchent un appui distant, qui s'ajoute au raccourci clavier. Un `off` distant ne coupe pas une touche tenue par l'opérateur.
+- **Mode Toggle** : `on`/`off`/`toggle` fixent l'état de bascule, synchronisé avec le raccourci.
+- **Mode Always On** : le bus reste actif ; `off` renvoie `409`.
+- Hors ligne ou à la perte de connexion, tout appui distant est effacé.
+
+Les commandes sont exécutées sur le thread de l'interface, par le même chemin que les raccourcis clavier.
+
 ## Découverte LAN
 
 Le serveur diffuse toutes les 2 s une balise JSON en broadcast UDP (port audio + 2) : nom du serveur, ports audio et contrôle, version. Le client liste les serveurs vus depuis moins de 6 s.

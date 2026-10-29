@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import uuid
 from collections.abc import Mapping
+from http import HTTPStatus
 from pathlib import Path
 
 from loguru import logger
@@ -36,6 +37,7 @@ from .hotkeys import (
     GlobalPttHotkeys,
 )
 from .preflight import PreflightDialog
+from .remote import REMOTE_DEFAULT_PORT, QtDispatcher, RemoteCommand, RemoteControlServer, RemoteReply, bus_label
 from .status import (
     ClientOperationalState,
     ClientOperationalStatus,
@@ -175,6 +177,10 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._ptt_bus_mode_widgets: dict[int, QtWidgets.QComboBox] = {}
         self._ptt_bus_modes: dict[int, str] = {}
         self._ptt_bus_toggle_state: dict[int, bool] = {}
+        # Buses held down by the HTTP remote (PTT mode only).
+        self._ptt_remote_active: dict[int, bool] = {}
+        self._remote_server: RemoteControlServer | None = None
+        self._remote_dispatcher = QtDispatcher(self._handle_remote_command, self)
         self._ptt_bus_state_labels: dict[int, QtWidgets.QLabel] = {}
         self._ptt_bus_vu: dict[int, VuMeter] = {}
         self._shortcut_widgets: list[QtWidgets.QWidget] = []
@@ -439,6 +445,34 @@ class ClientWindow(QtWidgets.QMainWindow):
         ptt_lay.addWidget(ptt_hint)
         ptt_lay.addWidget(self._bus_rows_widget, 1)
 
+        self._remote_enabled = QtWidgets.QCheckBox("Contrôle HTTP")
+        self._remote_enabled.setToolTip(
+            "Piloter les PTT à distance (Stream Deck, Companion, scripts) : "
+            "POST /ptt/<bus>/on|off|toggle, GET /status."
+        )
+        self._remote_port = QtWidgets.QSpinBox()
+        self._remote_port.setRange(1024, 65535)
+        self._remote_port.setPrefix("port ")
+        self._remote_lan = QtWidgets.QCheckBox("Depuis le réseau")
+        self._remote_lan.setToolTip(
+            "Accepter les commandes des autres machines du réseau local. "
+            "Sinon, seules les applications de ce poste peuvent piloter le PTT."
+        )
+        self._remote_status = QtWidgets.QLabel("")
+        self._remote_status.setProperty("role", "muted")
+        self._remote_status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        with best_effort("restore remote control settings"):
+            self._remote_port.setValue(int(self._preset_get("remote_port", REMOTE_DEFAULT_PORT)))
+            self._remote_lan.setChecked(bool(self._preset_get("remote_lan", False)))
+            self._remote_enabled.setChecked(bool(self._preset_get("remote_enabled", False)))
+        remote_row = QtWidgets.QHBoxLayout()
+        remote_row.setSpacing(10)
+        remote_row.addWidget(self._remote_enabled)
+        remote_row.addWidget(self._remote_port)
+        remote_row.addWidget(self._remote_lan)
+        remote_row.addWidget(self._remote_status, 1)
+        ptt_lay.addLayout(remote_row)
+
         live_row = QtWidgets.QHBoxLayout()
         live_row.setSpacing(12)
         live_row.addWidget(ctrl_box, 4)
@@ -461,6 +495,9 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._listen_return_bus.stateChanged.connect(self._on_listen_return_bus_changed)
         self._preflight_btn.clicked.connect(self._open_preflight)
         self._duck_return.stateChanged.connect(self._on_duck_return_changed)
+        self._remote_enabled.stateChanged.connect(self._on_remote_settings_changed)
+        self._remote_lan.stateChanged.connect(self._on_remote_settings_changed)
+        self._remote_port.editingFinished.connect(self._on_remote_settings_changed)
         self._mic_gain.valueChanged.connect(self._on_mic_gain_changed)
         self._hp_gain.valueChanged.connect(self._on_hp_gain_changed)
         self._return_gain.valueChanged.connect(self._on_return_gain_changed)
@@ -491,6 +528,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._global_ptt: GlobalPttHotkeys | None = None
 
         QtCore.QTimer.singleShot(0, self._start_device_refresh)
+        QtCore.QTimer.singleShot(0, self._restart_remote_server)
         if self._preset_load_problem is not None:
             QtCore.QTimer.singleShot(0, self._show_preset_load_problem)
 
@@ -531,6 +569,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._ptt_bus_toggle_state = {
             int(bus_id): False for bus_id in self._ptt_bus_toggle_state
         }
+        self._ptt_remote_active = {}
         client = self._client
         if client is not None:
             for bus_id in list(self._ptt_bus_keys):
@@ -621,25 +660,28 @@ class ClientWindow(QtWidgets.QMainWindow):
         if previous is not status.state:
             self._refresh_state_labels()
 
-    def _apply_ptt_modes_to_client(self) -> None:
+    def _ptt_bus_active(self, bus_id: int) -> bool:
+        """Single source of truth for whether a bus transmits right now."""
+        if self._operational_status.state is not ClientOperationalState.ONLINE:
+            return False
+        mode = str(self._ptt_bus_modes.get(int(bus_id), "ptt"))
+        if mode == "always_on":
+            return True
+        if mode == "toggle":
+            return bool(self._ptt_bus_toggle_state.get(int(bus_id), False))
+        held = self._global_ptt.active_buses() if self._global_ptt is not None else {}
+        return bool(held.get(int(bus_id), False) or self._ptt_remote_active.get(int(bus_id), False))
+
+    def _apply_ptt_bus(self, bus_id: int) -> None:
         cli = self._client
         if cli is None:
             return
+        with best_effort("cli.set_ptt_bus()"):
+            cli.set_ptt_bus(int(bus_id), self._ptt_bus_active(int(bus_id)))
 
-        active_buses = self._global_ptt.active_buses() if self._global_ptt is not None else {}
+    def _apply_ptt_modes_to_client(self) -> None:
         for bid in list(self._ptt_bus_keys.keys()):
-            if self._operational_status.state is not ClientOperationalState.ONLINE:
-                active = False
-            else:
-                mode = str(self._ptt_bus_modes.get(int(bid), "ptt"))
-                if mode == "always_on":
-                    active = True
-                elif mode == "toggle":
-                    active = bool(self._ptt_bus_toggle_state.get(int(bid), False))
-                else:
-                    active = bool(active_buses.get(int(bid), False))
-            with best_effort("cli.set_ptt_bus()"):
-                cli.set_ptt_bus(int(bid), bool(active))
+            self._apply_ptt_bus(int(bid))
 
     def _update_toggle_state_label(self, lbl: QtWidgets.QLabel, bus_id: int, mode: str) -> None:
         online = self._operational_status.state is ClientOperationalState.ONLINE
@@ -657,9 +699,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             lbl.setStyleSheet("color: #4caf50; font-weight: bold;" if on else "color: #f44336; font-weight: bold;")
             lbl.setToolTip("Transmission activée" if on else "Transmission désactivée")
         elif mode == "ptt":
-            gp = getattr(self, "_global_ptt", None)
-            active_buses = gp.active_buses() if gp is not None else {}
-            on = bool(active_buses.get(int(bus_id), False))
+            on = self._ptt_bus_active(int(bus_id))
             lbl.setText("ACTIF" if on else "PRÊT")
             lbl.setStyleSheet("color: #4caf50; font-weight: bold;" if on else "color: #aab4c3; font-weight: 600;")
             lbl.setToolTip("Transmission en cours" if on else "Maintenez le raccourci pour parler")
@@ -713,10 +753,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         mode = str(self._ptt_bus_modes.get(int(bus_id), "ptt"))
         if mode == "toggle":
             self._ptt_bus_toggle_state[int(bus_id)] = bool(active)
-        cli = self._client
-        if cli is not None:
-            with best_effort("cli.set_ptt_bus()"):
-                cli.set_ptt_bus(int(bus_id), bool(active))
+        self._apply_ptt_bus(int(bus_id))
         self._refresh_state_labels()
 
     def _on_ptt_bus_mode_changed(self, bus_id: int) -> None:
@@ -725,6 +762,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             return
         mode = str(cb.currentData() or "ptt")
         self._ptt_bus_modes[int(bus_id)] = mode
+        self._ptt_remote_active.pop(int(bus_id), None)
         if mode != "toggle":
             self._ptt_bus_toggle_state.pop(int(bus_id), None)
         lbl = self._ptt_bus_state_labels.get(int(bus_id))
@@ -1297,6 +1335,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             if self._global_ptt is not None:
                 self._global_ptt.stop()
         self._global_ptt = None
+        self._stop_remote_server()
         if self._client is not None:
             with best_effort("_client.stop()"):
                 self._client.stop()
@@ -1717,6 +1756,102 @@ class ClientWindow(QtWidgets.QMainWindow):
         if self._client is None:
             return
         self._client.set_listen_return_bus(bool(enabled))
+
+    # -- HTTP remote control ---------------------------------------------------
+
+    def _on_remote_settings_changed(self, *_args) -> None:
+        with best_effort("save remote control settings"):
+            self._preset_set("remote_enabled", bool(self._remote_enabled.isChecked()))
+            self._preset_set("remote_port", int(self._remote_port.value()))
+            self._preset_set("remote_lan", bool(self._remote_lan.isChecked()))
+        self._restart_remote_server()
+
+    def _stop_remote_server(self) -> None:
+        server, self._remote_server = self._remote_server, None
+        if server is not None:
+            with best_effort("stop remote control"):
+                server.stop()
+
+    def _restart_remote_server(self) -> None:
+        self._stop_remote_server()
+        enabled = self._remote_enabled.isChecked()
+        self._remote_port.setEnabled(not enabled)
+        self._remote_lan.setEnabled(not enabled)
+        if not enabled:
+            self._remote_status.setText("")
+            return
+        lan = self._remote_lan.isChecked()
+        port = int(self._remote_port.value())
+        try:
+            server = RemoteControlServer(
+                self._remote_dispatcher,
+                host="0.0.0.0" if lan else "127.0.0.1",
+                port=port,
+            )
+            server.start()
+        except OSError as exc:
+            logger.warning("remote control failed to start on port {}: {}", port, exc)
+            self._remote_status.setText(f"Port {port} indisponible")
+            self._remote_port.setEnabled(True)
+            self._remote_lan.setEnabled(True)
+            self._remote_enabled.blockSignals(True)
+            self._remote_enabled.setChecked(False)
+            self._remote_enabled.blockSignals(False)
+            self._preset_set("remote_enabled", False)
+            return
+        self._remote_server = server
+        host = "<IP de ce poste>" if lan else "127.0.0.1"
+        self._remote_status.setText(f"http://{host}:{server.port}")
+
+    def _remote_status_payload(self) -> dict:
+        status = self._operational_status
+        return {
+            "state": status.label,
+            "online": status.state is ClientOperationalState.ONLINE,
+            "buses": {
+                bus_label(int(bid)): {
+                    "mode": str(self._ptt_bus_modes.get(int(bid), "ptt")),
+                    "active": self._ptt_bus_active(int(bid)),
+                }
+                for bid in sorted(self._ptt_bus_keys)
+            },
+        }
+
+    def _handle_remote_command(self, command: RemoteCommand) -> RemoteReply:
+        """Runs on the Qt thread; same rules as the keyboard shortcuts."""
+        if command.action == "status":
+            return RemoteReply(HTTPStatus.OK, self._remote_status_payload())
+        if self._operational_status.state is not ClientOperationalState.ONLINE or self._client is None:
+            return RemoteReply(
+                HTTPStatus.CONFLICT,
+                {"error": "PTT désarmé : le client n'est pas en ligne", **self._remote_status_payload()},
+            )
+        if command.bus_id is not None and int(command.bus_id) not in self._ptt_bus_keys:
+            return RemoteReply(HTTPStatus.NOT_FOUND, {"error": "bus non proposé par ce serveur"})
+
+        targets = [int(command.bus_id)] if command.bus_id is not None else list(self._ptt_bus_keys)
+        for bid in targets:
+            mode = str(self._ptt_bus_modes.get(bid, "ptt"))
+            if mode == "always_on":
+                if command.bus_id is not None and command.action != "on":
+                    return RemoteReply(
+                        HTTPStatus.CONFLICT,
+                        {"error": "bus en mode Always On : changez son mode dans le client"},
+                    )
+                continue
+            if command.action == "toggle":
+                target = not self._ptt_bus_active(bid)
+            else:
+                target = command.action == "on"
+            if mode == "toggle":
+                self._ptt_bus_toggle_state[bid] = target
+                if self._global_ptt is not None:
+                    self._global_ptt.set_toggle_state(bid, target)
+            else:
+                self._ptt_remote_active[bid] = target
+            self._apply_ptt_bus(bid)
+        self._refresh_state_labels()
+        return RemoteReply(HTTPStatus.OK, self._remote_status_payload())
 
     def _open_preflight(self) -> None:
         input_device = self._input_device.currentData()

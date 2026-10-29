@@ -213,6 +213,7 @@ def main() -> None:
     client_window._name.setText("Réalisation")
     client_window._server_ip.setText("127.0.0.1")
     client_window._duck_return.setChecked(True)
+    client_window._remote_enabled.setChecked(True)
     for bus_id, key in ((REGIE_BUS_ID, "F1"), (PLATEAU_BUS_ID, "F2"), (VMIX_BUS_ID, "F3")):
         client_window._ptt_bus_keys[bus_id].setKeySequence(QtGui.QKeySequence(key))
     client_window.show()
