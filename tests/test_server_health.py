@@ -42,5 +42,5 @@ def test_udp_label_counts_the_clients_whose_audio_is_fine() -> None:
     health = derive_server_operational_health(_stats(2), clients, {0: {"stream_active": True}})
 
     assert health.udp.state is ServerHealthState.DEGRADED
-    assert health.udp.label == "UDP : 1/2"
+    assert health.udp.label == "Voix reçue : 1/2 postes"
     assert "1 client(s) en parole" in health.udp.detail

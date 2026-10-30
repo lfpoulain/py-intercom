@@ -11,7 +11,7 @@ from loguru import logger
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .. import __version__
-from ..common.buses import BUS_BY_ID, FIXED_BUSES, REGIE_BUS_ID
+from ..common.buses import BUS_BY_ID, FIXED_BUSES
 from ..common.console import (
     Card,
     ChannelStrip,
@@ -44,7 +44,6 @@ from ..common.preset_schema import (
 from ..common.theme import (
     TOKENS,
     make_field,
-    mono_font,
     patch_combo,
     repolish,
     set_status_label,
@@ -64,6 +63,8 @@ CLIENT_STATE_REFRESH_INTERVAL_MS = 250
 CLIENT_VU_REFRESH_INTERVAL_MS = 67
 
 _MODE_BADGES = {"ptt": "PTT", "toggle": "BASCULE", "always_on": "PERMANENT"}
+# Wide enough for a two-line toggle such as "Baisser quand on me parle".
+_MONITOR_STRIP_WIDTH = 124
 # Shortcuts are stored in Qt's portable syntax, the one the hotkey engine
 # parses; the native (localized) one is only for display.
 _PORTABLE = QtGui.QKeySequence.SequenceFormat.PortableText
@@ -285,22 +286,26 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._autoconnect_cb.stateChanged.connect(self._on_autoconnect_changed)
 
         self._listen_regie = chip(
-            BUS_BY_ID[REGIE_BUS_ID].name.upper(),
-            f"Écouter le bus {BUS_BY_ID[REGIE_BUS_ID].name} dans le casque",
+            "Entendre la Régie",
+            "Coché : tu entends dans ton casque ce que les autres disent sur Régie.\n"
+            "Décoché : tu ne l'entends plus (tu peux toujours parler).",
         )
         self._listen_regie.setEnabled(False)
         with best_effort("_listen_regie.setChecked()"):
             self._listen_regie.setChecked(bool(self._preset_get("listen_regie", True)))
 
-        self._listen_return_bus = chip("ÉCOUTE", "Écouter le bus Return (programme) dans le casque")
+        self._listen_return_bus = chip(
+            "Entendre le programme",
+            "Coché : le son de l'émission (Return) est ajouté dans ton casque.",
+        )
         self._listen_return_bus.setEnabled(False)
         with best_effort("_listen_return_bus.setChecked()"):
             self._listen_return_bus.setChecked(bool(self._preset_get("listen_return_bus", False)))
 
         self._duck_return = chip(
-            "DUCKING",
-            "Baisser le Return quand on me parle : le programme baisse de 15 dB "
-            "dans votre casque pendant que quelqu'un vous parle, puis remonte.",
+            "Baisser quand on me parle",
+            "Coché : le programme baisse de 15 dB dans ton casque pendant que quelqu'un "
+            "te parle, puis remonte tout seul.",
         )
         with best_effort("restore duck_return"):
             self._duck_return.setChecked(bool(self._preset_get("duck_return", False)))
@@ -369,43 +374,64 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._top_bar.right.addWidget(self._info_btn)
 
         # -- Console page: talk pads + monitoring strips ------------------------
-        talk = Section("Parler")
+        talk = Section(
+            "Parler",
+            "Un pad par destination. Il s'allume à sa couleur quand ta voix y est envoyée.",
+        )
         self._release_all_btn = QtWidgets.QPushButton("Tout relâcher")
         self._release_all_btn.setProperty("class", "secondary")
-        self._release_all_btn.setToolTip("Couper toutes les destinations en bascule, tenues au clavier ou à distance")
+        self._release_all_btn.setToolTip(
+            "Coupe d'un coup toutes les destinations ouvertes : bascules, touches tenues et commandes à distance"
+        )
         self._release_all_btn.clicked.connect(self._release_all_talk)
         talk.actions.addWidget(self._release_all_btn)
         talk.body.addLayout(self._pads_layout, 1)
         self._talk_hint = QtWidgets.QLabel("")
         self._talk_hint.setProperty("role", "hint")
+        self._talk_hint.setWordWrap(True)
         self._talk_hint.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         talk.body.addWidget(self._talk_hint)
         self._diag_label = QtWidgets.QLabel("")
         self._diag_label.setProperty("role", "diag")
-        self._diag_label.setFont(mono_font(11))
+        self._diag_label.setWordWrap(True)
         self._diag_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self._diag_label.setToolTip(
-            "RTT : aller-retour réseau vers le serveur. Tampons : audio en attente dans ce poste.\n"
-            "Carte son : latence annoncée par le pilote. Pertes : paquets manquants par seconde ; "
-            "FEC : reconstruits à partir du paquet suivant ; PLC : extrapolés."
+            "Aller-retour : temps pour joindre le serveur et revenir.\n"
+            "Audio en attente : marge gardée dans ce poste contre les à-coups du réseau.\n"
+            "Carte son : retard ajouté par le micro et le casque (pilote Windows).\n"
+            "Paquets perdus : réparés à partir du paquet suivant (inaudible) ou comblés (audible)."
         )
         talk.body.addWidget(self._diag_label)
         talk.body.addStretch(0)
 
-        monitor = Section("Écoute")
+        monitor = Section("Réglages du son", "Ta voix à gauche, ce que tu entends à droite.")
         self._mic_strip = ChannelStrip(
-            "Micro", fader=self._mic_gain, meter=self._in_vu, readout=self._mic_gain_lbl, color=TOKENS["accent"]
+            "Micro",
+            hint="Volume de ta voix envoyée",
+            fader=self._mic_gain,
+            meter=self._in_vu,
+            readout=self._mic_gain_lbl,
+            color=TOKENS["accent"],
+            width=_MONITOR_STRIP_WIDTH,
         )
         self._hp_strip = ChannelStrip(
-            "Casque", fader=self._hp_gain, meter=self._out_vu, readout=self._hp_gain_lbl, color=TOKENS["accent"]
+            "Casque",
+            hint="Volume de ce que tu entends",
+            fader=self._hp_gain,
+            meter=self._out_vu,
+            readout=self._hp_gain_lbl,
+            color=TOKENS["accent"],
+            width=_MONITOR_STRIP_WIDTH,
         )
         self._hp_strip.top.addWidget(self._listen_regie)
         self._return_strip = ChannelStrip(
-            "Return",
+            "Programme",
+            hint="Le son de l'émission (Return)",
             fader=self._return_gain,
             meter=self._return_vu,
             readout=self._return_gain_lbl,
             color=TOKENS["muted"],
+            width=_MONITOR_STRIP_WIDTH,
         )
         self._return_strip.top.addWidget(self._listen_return_bus)
         self._return_strip.top.addWidget(self._duck_return)
@@ -696,21 +722,23 @@ class ClientWindow(QtWidgets.QMainWindow):
         pad.set_key_text(edit.keySequence().toString(QtGui.QKeySequence.SequenceFormat.NativeText) if edit else "")
         state = self._operational_status.state
         pad.setEnabled(state is ClientOperationalState.ONLINE)
+        name = BUS_BY_ID[int(bus_id)].name if int(bus_id) in BUS_BY_ID else str(bus_id)
         if state is ClientOperationalState.DEGRADED and self._ptt_bus_armed(int(bus_id)):
-            pad.set_state(
-                "disarmed",
-                "SUSPENDU",
-                "Transmission coupée tant que la liaison est dégradée : elle reprend au retour en ligne",
-            )
+            pad.set_state("disarmed", "SUSPENDU", "Liaison dégradée : reprend toute seule au retour")
         elif state is not ClientOperationalState.ONLINE:
-            pad.set_state("disarmed", "DÉSARMÉ", "PTT désarmé tant que la chaîne audio n'est pas en ligne")
+            pad.set_state("disarmed", "HORS LIGNE", "Connecte-toi pour pouvoir parler")
         elif self._ptt_bus_active(int(bus_id)):
-            detail = "Transmission permanente" if mode == "always_on" else "Transmission en cours"
-            pad.set_state("live", "EN PAROLE", detail)
+            if mode == "always_on":
+                hint = f"Micro toujours ouvert vers {name}"
+            elif mode == "toggle":
+                hint = f"{name} t'entend · clique pour couper"
+            else:
+                hint = f"{name} t'entend · relâche pour couper"
+            pad.set_state("live", "TU PARLES", hint)
         elif mode == "toggle":
-            pad.set_state("off", "COUPÉ", "Cliquez ou appuyez sur le raccourci pour parler")
+            pad.set_state("off", "MICRO FERMÉ", f"Clique pour parler à {name}")
         else:
-            pad.set_state("ready", "PRÊT", "Maintenez le raccourci ou le pad pour parler")
+            pad.set_state("ready", "PRÊT", f"Maintiens pour parler à {name}")
 
     def _refresh_state_labels(self) -> None:
         for bid in self._ptt_pads:
@@ -718,15 +746,16 @@ class ClientWindow(QtWidgets.QMainWindow):
         state = self._operational_status.state
         if state is ClientOperationalState.ONLINE:
             self._talk_hint.setText(
-                "Maintenez un pad ou son raccourci pour parler ; en mode Bascule, un clic active ou coupe."
+                "PTT : tu parles tant que tu maintiens · BASCULE : un clic ouvre, un autre ferme · "
+                "PERMANENT : toujours ouvert. La touche en haut à droite marche même fenêtre réduite."
             )
         elif state is ClientOperationalState.DEGRADED:
             self._talk_hint.setText(
-                "Liaison dégradée : transmission coupée. Ce qui est armé reprend au retour en ligne,"
-                " sauf si vous le relâchez."
+                "Liaison dégradée : ta voix ne part plus. Ce qui était ouvert reprend tout seul au retour,"
+                " sauf si tu le relâches."
             )
         else:
-            self._talk_hint.setText("Les touches de parole s'arment dès que le poste est en ligne.")
+            self._talk_hint.setText("Connecte-toi (bouton en haut à droite) pour activer les pads.")
         # Releasing stays possible as long as something may still be armed.
         self._release_all_btn.setEnabled(state in (ClientOperationalState.ONLINE, ClientOperationalState.DEGRADED))
 
@@ -1946,13 +1975,19 @@ class ClientWindow(QtWidgets.QMainWindow):
         )
         frames = sum(int(st.get(key, 0)) for key in ("jitter_buffered_frames", "playout_ring_depth", "tx_ring_depth"))
         buffered_ms = frames * 1000.0 * FRAME_SAMPLES / SAMPLE_RATE
-        self._diag_label.setText(
-            f"RTT {format_ms(st.get('control_rtt_ms'))} · tampons {format_ms(buffered_ms)} · "
-            f"carte son {format_ms(st.get('audio_latency_ms'))} · "
-            f"pertes {format_rate(rates['missing'])} · FEC {format_rate(rates['fec'])} · "
-            f"PLC {format_rate(rates['concealed'])}"
+        lost = rates["missing"] > 0.0 or rates["concealed"] > 0.0
+        alert = rates["concealed"] > 0.0
+        verdict = "Liaison dégradée" if alert else "Pertes réparées" if lost else "Liaison parfaite"
+        text = (
+            f"{verdict} · aller-retour {format_ms(st.get('control_rtt_ms'))} · "
+            f"audio en attente {format_ms(buffered_ms)} · carte son {format_ms(st.get('audio_latency_ms'))}"
         )
-        alert = rates["missing"] > 0.0 or rates["concealed"] > 0.0
+        if lost:
+            text += (
+                f" · paquets perdus {format_rate(rates['missing'])} : "
+                f"{format_rate(rates['fec'])} réparés, {format_rate(rates['concealed'])} comblés"
+            )
+        self._diag_label.setText(text)
         if bool(self._diag_label.property("alert")) != alert:
             self._diag_label.setProperty("alert", alert)
             repolish(self._diag_label)

@@ -11,7 +11,7 @@ from loguru import logger
 from PySide6 import QtCore, QtWidgets
 
 from .. import __version__
-from ..common.buses import BUS_BY_ID, FIXED_BUSES, REGIE_BUS_ID
+from ..common.buses import BUS_BY_ID, FIXED_BUSES, PLATEAU_BUS_ID, REGIE_BUS_ID, VMIX_BUS_ID
 from ..common.console import (
     Card,
     ChannelStrip,
@@ -30,7 +30,7 @@ from ..common.console import (
 )
 from ..common.constants import AUDIO_UDP_PORT, MAX_GAIN_DB
 from ..common.devices import DeviceInfo, format_device_label, list_devices
-from ..common.diagnostics import CounterRates
+from ..common.diagnostics import CounterRates, format_rate
 from ..common.gui_utils import DEVICE_REFRESH_TIMEOUT_MS, DeviceRefresh, is_checked, run_window, set_app_icon
 from ..common.identity import client_id_from_uuid
 from ..common.jsonio import JsonFileStatus, atomic_write_json, read_json_file_result
@@ -56,6 +56,33 @@ from .server import IntercomServer, PresetLoadError
 
 SERVER_STRUCTURE_REFRESH_INTERVAL_MS = 500
 SERVER_VU_REFRESH_INTERVAL_MS = 67
+_BUS_HINTS = {
+    REGIE_BUS_ID: "Entendu par tous les postes",
+    PLATEAU_BUS_ID: "Vers les sorties Plateau",
+    VMIX_BUS_ID: "Vers les sorties VMix",
+}
+
+
+def _lamp_legend() -> QtWidgets.QWidget:
+    """ "R Régie  P Plateau  V VMix": what the talk lamps of a station mean."""
+    legend = QtWidgets.QWidget()
+    lay = QtWidgets.QHBoxLayout(legend)
+    lay.setContentsMargins(0, 0, 8, 0)
+    lay.setSpacing(4)
+    caption = QtWidgets.QLabel("Parle vers :")
+    caption.setProperty("role", "hint")
+    lay.addWidget(caption)
+    for definition in FIXED_BUSES:
+        lamp = Lamp(definition.name[:1].upper(), definition.color)
+        lamp.set_on(True)
+        lay.addWidget(lamp)
+        name = QtWidgets.QLabel(definition.name)
+        name.setProperty("role", "hint")
+        lay.addWidget(name)
+        lay.addSpacing(6)
+    return legend
+
+
 # A fader drag emits one value per pixel and every bus/input gain change is
 # pushed to the clients over TCP: apply the first value at once, then at most
 # one value per interval, always ending on the last one.
@@ -130,7 +157,10 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._start_minimized_cb = QtWidgets.QCheckBox("Démarrer réduit")
         self._start_minimized_cb.setChecked(bool(self._settings.value("start_minimized", False, type=bool)))
 
-        self._return_enabled = chip("ACTIF", "Diffuser l'entrée Return (programme) aux postes qui l'écoutent")
+        self._return_enabled = chip(
+            "Envoyer aux postes",
+            "Coché : le son de l'émission est envoyé aux postes ; chacun choisit de l'écouter ou non.",
+        )
         self._return_enabled.setChecked(False)
         self._return_input_device = require_focus_for_wheel(QtWidgets.QComboBox())
         patch_combo(self._return_input_device)
@@ -188,7 +218,12 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._forget_client_btn.setEnabled(False)
         self._forget_client_btn.clicked.connect(self._forget_selected_client)
 
-        self._team_section = Section("Équipe")
+        self._team_section = Section(
+            "Équipe",
+            "Une tranche par poste. Ses voyants s'allument quand il parle vers une destination ; "
+            "le fader règle le volume de sa voix.",
+        )
+        self._team_section.actions.addWidget(_lamp_legend())
         self._team_section.actions.addWidget(self._forget_client_btn)
         self._team_section.body.addWidget(self._client_rack, 1)
 
@@ -198,7 +233,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._bus_gain_labels: dict[int, QtWidgets.QLabel] = {}
         self._bus_feed_widgets: dict[int, QtWidgets.QCheckBox] = {}
         self._bus_vu_widgets: dict[int, LevelMeter] = {}
-        buses_section = Section("Bus")
+        buses_section = Section("Destinations", "Volume de ce qui est dit vers chaque destination.")
         bus_row = QtWidgets.QHBoxLayout()
         bus_row.setSpacing(8)
         for definition in FIXED_BUSES:
@@ -208,15 +243,21 @@ class ServerWindow(QtWidgets.QMainWindow):
             meter = self._regie_vu if bid == REGIE_BUS_ID else LevelMeter()
             value = readout()
             strip = ChannelStrip(
-                definition.name, color=definition.color, fader=fader, meter=meter, readout=value, width=100
+                definition.name,
+                hint=_BUS_HINTS.get(bid, ""),
+                color=definition.color,
+                fader=fader,
+                meter=meter,
+                readout=value,
+                width=112,
             )
             strip.reserve_top(1)
-            if bid == REGIE_BUS_ID:
-                strip.set_caption("bus principal")
-            else:
+            if bid != REGIE_BUS_ID:
+                regie = BUS_BY_ID[REGIE_BUS_ID].name
                 feed = chip(
-                    f"→ {BUS_BY_ID[REGIE_BUS_ID].name.upper()}",
-                    f"Renvoyer aussi ce bus dans {BUS_BY_ID[REGIE_BUS_ID].name}",
+                    "Aussi en Régie",
+                    f"Coché : ce qui est dit vers {definition.name} est aussi entendu par tous les postes "
+                    f"qui écoutent {regie}.",
                 )
                 feed.stateChanged.connect(lambda state, bus_id=bid: self._on_bus_feed_to_regie_changed(bus_id, state))
                 strip.top.addWidget(feed)
@@ -229,8 +270,14 @@ class ServerWindow(QtWidgets.QMainWindow):
         buses_section.body.addLayout(bus_row, 1)
 
         # -- Return input --------------------------------------------------------
-        return_section = Section("Return")
-        self._return_strip = ChannelStrip("Programme", meter=self._return_vu, width=100, color=TOKENS["muted"])
+        return_section = Section("Programme", "Le son de l'émission (Return).")
+        self._return_strip = ChannelStrip(
+            "Return",
+            hint="Entrée choisie dans Réglages",
+            meter=self._return_vu,
+            width=112,
+            color=TOKENS["muted"],
+        )
         self._return_strip.reserve_top(1)
         self._return_strip.top.addWidget(self._return_enabled)
         return_section.body.addWidget(self._return_strip, 1)
@@ -262,19 +309,22 @@ class ServerWindow(QtWidgets.QMainWindow):
         add_lay.setSpacing(8)
         add_title = QtWidgets.QLabel("Nouvelle sortie")
         add_title.setProperty("role", "stripName")
-        add_hint = QtWidgets.QLabel("Envoie un bus vers une carte son : retour plateau, vMix, enregistreur…")
+        add_hint = QtWidgets.QLabel("Fait sortir une destination sur une carte son du serveur.")
         add_hint.setProperty("role", "stripCaption")
         add_hint.setWordWrap(True)
         add_lay.addWidget(add_title)
         add_lay.addWidget(add_hint)
         add_lay.addWidget(make_field("PÉRIPHÉRIQUE", self._add_output_device))
-        add_lay.addWidget(make_field("BUS", self._bus_selector))
+        add_lay.addWidget(make_field("DESTINATION", self._bus_selector))
         add_lay.addStretch(1)
         add_lay.addWidget(self._add_output_btn)
 
         self._output_rack = StripRack("")
         self._output_rack.add_trailing(add_card)
-        outputs_section = Section("Sorties")
+        outputs_section = Section(
+            "Sorties son",
+            "Cartes son du serveur qui diffusent une destination : retour plateau, vMix, enregistreur…",
+        )
         outputs_section.body.addWidget(self._output_rack, 1)
 
         # -- Console page --------------------------------------------------------
@@ -443,10 +493,10 @@ class ServerWindow(QtWidgets.QMainWindow):
 
     def _set_health_facets_unavailable(self) -> None:
         for label, text in (
-            (self._engine_health_label, "Moteur : —"),
-            (self._control_health_label, "Ctrl : —"),
-            (self._udp_health_label, "UDP : —"),
-            (self._audio_health_label, "Audio : —"),
+            (self._engine_health_label, "Moteur —"),
+            (self._control_health_label, "Postes —"),
+            (self._udp_health_label, "Voix reçue —"),
+            (self._audio_health_label, "Sorties son —"),
         ):
             set_status_label(
                 label,
@@ -1595,8 +1645,9 @@ class ServerWindow(QtWidgets.QMainWindow):
         diag.setProperty("role", "diag")
         diag.setFont(mono_font(10))
         diag.setToolTip(
-            "Trames perdues par seconde sur ce poste. FEC : reconstruites à partir du paquet suivant "
-            "(quasi inaudible). PLC : extrapolées, plus audible."
+            "Réception de la voix de ce poste. « Réseau OK » : rien de perdu. « Pertes réparées » : "
+            "des paquets manquent mais sont reconstruits (inaudible). « Coupures » : des trous sont comblés "
+            "(audible), vérifier le réseau du poste."
         )
         strip.reserve_top(2)
         strip.top.addWidget(lamps_row)
@@ -1644,8 +1695,13 @@ class ServerWindow(QtWidgets.QMainWindow):
             label.setText("")
             return
         per_second = rates.update({"fec": int(st.get("jb_fec", 0)), "plc": int(st.get("jb_concealed", 0))}, now)
-        label.setText(f"FEC {per_second['fec']:.0f} · PLC {per_second['plc']:.0f}")
-        alert = per_second["fec"] > 0.0 or per_second["plc"] > 0.0
+        alert = per_second["plc"] > 0.0
+        if alert:
+            label.setText(f"Coupures {format_rate(per_second['plc'])}")
+        elif per_second["fec"] > 0.0:
+            label.setText("Pertes réparées")
+        else:
+            label.setText("Réseau OK")
         if bool(label.property("alert")) != alert:
             label.setProperty("alert", alert)
             repolish(label)

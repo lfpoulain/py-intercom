@@ -322,6 +322,10 @@ def _style_sheet(ui_font_family: str) -> str:
             color: {t["faint"]};
             font-size: 10px;
         }}
+        QLabel[role="stripHint"] {{
+            color: {t["muted"]};
+            font-size: 11px;
+        }}
         QLabel[role="readout"] {{
             font-family: "{MONO_FONT}", "Consolas";
             font-size: 11px;

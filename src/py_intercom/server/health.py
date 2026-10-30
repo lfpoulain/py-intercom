@@ -40,6 +40,10 @@ class ServerOperationalHealth:
 _EXPECTED_SERVER_WORKERS = frozenset({"udp-rx", "udp-tx", "mix", "ctrl-accept"})
 
 
+def _count(count: int, singular: str, plural: str) -> str:
+    return f"{count} {singular if count == 1 else plural}"
+
+
 def derive_client_transport_state(
     client: Mapping[str, object],
     *,
@@ -87,7 +91,7 @@ def derive_server_operational_health(
     if not running:
         engine = HealthFacet(
             ServerHealthState.ERROR,
-            "Moteur : arrêt",
+            "Moteur arrêté",
             "Le moteur ne signale plus son état running.",
         )
     elif worker_errors or dead_workers:
@@ -98,13 +102,13 @@ def derive_server_operational_health(
             details.append("erreurs : " + "; ".join(f"{name}: {error}" for name, error in worker_errors.items()))
         engine = HealthFacet(
             ServerHealthState.ERROR,
-            "Moteur : erreur",
+            "Moteur en erreur",
             "; ".join(details),
         )
     else:
         engine = HealthFacet(
             ServerHealthState.HEALTHY,
-            "Moteur : OK",
+            "Moteur OK",
             "Tous les workers critiques sont actifs.",
         )
 
@@ -114,7 +118,7 @@ def derive_server_operational_health(
         connected_count = 0
     control = HealthFacet(
         ServerHealthState.HEALTHY,
-        f"Ctrl : {connected_count}",
+        _count(connected_count, "poste connecté", "postes connectés"),
         (
             f"{connected_count} client(s) avec contrôle TCP actif."
             if connected_count
@@ -144,13 +148,13 @@ def derive_server_operational_health(
     if stale_active_udp > 0:
         udp = HealthFacet(
             ServerHealthState.DEGRADED,
-            f"UDP : {associated_udp - stale_active_udp}/{associated_udp}",
+            f"Voix reçue : {associated_udp - stale_active_udp}/{associated_udp} postes",
             f"{stale_active_udp} client(s) en parole n'envoient plus d'audio récent.",
         )
     else:
         udp = HealthFacet(
             ServerHealthState.HEALTHY,
-            f"UDP : {associated_udp}",
+            "Voix reçue OK" if associated_udp else "Réception prête",
             (
                 (
                     f"{associated_udp} client(s) associé(s), dont {active_udp} en parole ; "
@@ -180,7 +184,7 @@ def derive_server_operational_health(
     if not outputs:
         audio = HealthFacet(
             ServerHealthState.DEGRADED,
-            "Audio : aucune",
+            "Aucune sortie son",
             "Aucune sortie audio n'est configurée.",
         )
     elif explicit_output_errors or inactive_outputs or return_inactive or return_error:
@@ -193,19 +197,19 @@ def derive_server_operational_health(
             details.append(f"Return : {return_error}")
         audio = HealthFacet(
             ServerHealthState.ERROR,
-            "Audio : erreur",
+            "Sortie son en erreur",
             "; ".join(details),
         )
     elif unknown_outputs or (return_enabled and not return_active_known):
         audio = HealthFacet(
             ServerHealthState.UNKNOWN,
-            f"Audio : {len(outputs)}",
+            _count(len(outputs), "sortie son", "sorties son"),
             "L'activité de certains streams audio n'est pas encore confirmée.",
         )
     else:
         audio = HealthFacet(
             ServerHealthState.HEALTHY,
-            f"Audio : {len(outputs)} OK",
+            _count(len(outputs), "sortie son OK", "sorties son OK"),
             "Tous les streams audio configurés sont actifs.",
         )
 

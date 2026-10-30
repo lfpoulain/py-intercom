@@ -8,6 +8,7 @@ playback is read from the client's playout ring.
 
 from __future__ import annotations
 
+import random
 import socket
 import threading
 import time
@@ -45,16 +46,17 @@ class _FakeStream:
 
 def _free_port_pair() -> int:
     """Return a UDP port whose TCP neighbour (control port) is also free."""
-    # Start from a TCP port the system grants: Windows reserves whole TCP
-    # ranges (Hyper-V), and UDP ephemeral ports are handed out next to each
-    # other, so probing from the UDP side can stay inside such a range.
-    for _ in range(50):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
-            tcp.bind(("127.0.0.1", 0))
-            port = int(tcp.getsockname()[1]) - 1
+    # Windows reserves whole blocks of TCP and UDP ports (Hyper-V, WinNAT),
+    # and hands out ephemeral ports next to each other: probing from either
+    # side can stay inside such a block. Random candidates leave it at once.
+    rng = random.Random()
+    for _ in range(200):
+        port = rng.randrange(20_000, 60_000)
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
                 udp.bind(("127.0.0.1", port))
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
+                tcp.bind(("127.0.0.1", port + 1))
         except OSError:
             continue
         return port

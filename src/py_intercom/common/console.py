@@ -25,6 +25,12 @@ _YELLOW = QtGui.QColor("#f5c518")
 _RED = QtGui.QColor("#ef4444")
 
 
+# A strip toggle holds two lines of 11 px text.
+CHIP_HEIGHT = 32
+# Two lines of strip hint text.
+STRIP_HINT_HEIGHT = 30
+
+
 def _qcolor(color: str | QtGui.QColor, alpha: int | None = None) -> QtGui.QColor:
     c = QtGui.QColor(color)
     if alpha is not None:
@@ -339,6 +345,7 @@ class TalkPad(QtWidgets.QAbstractButton):
         self._key_text = ""
         self._state = "disarmed"
         self._state_text = "DÉSARMÉ"
+        self._hint = ""
         self._level = METER_FLOOR_DB
         self.setMinimumSize(150, 150)
         self.setMaximumHeight(400)
@@ -371,12 +378,13 @@ class TalkPad(QtWidgets.QAbstractButton):
         self._key_text = text
         self.update()
 
-    def set_state(self, state: str, text: str, detail: str = "") -> None:
-        if (state, text) != (self._state, self._state_text):
-            self._state, self._state_text = state, text
+    def set_state(self, state: str, text: str, hint: str = "") -> None:
+        """``hint`` is the plain instruction shown under the state ("Maintiens pour parler")."""
+        if (state, text, hint) != (self._state, self._state_text, self._hint):
+            self._state, self._state_text, self._hint = state, text, hint
             self.update()
-        self.setToolTip(detail or text)
-        self.setAccessibleDescription(f"{text}. {detail}".strip())
+        self.setToolTip(hint or text)
+        self.setAccessibleDescription(f"{text}. {hint}".strip())
 
     def set_level(self, dbfs: float) -> None:
         level = max(METER_FLOOR_DB, min(0.0, float(dbfs)))
@@ -485,6 +493,19 @@ class TalkPad(QtWidgets.QAbstractButton):
         state_rect = QtCore.QRectF(rect.left() + pad, title_rect.bottom(), rect.width() - 2 * pad, 20)
         p.drawText(state_rect, QtCore.Qt.AlignmentFlag.AlignCenter, self._state_text)
 
+        if self._hint:
+            hint_font = self.font()
+            hint_font.setPixelSize(12)
+            p.setFont(hint_font)
+            p.setPen(sub_ink)
+            hint_rect = QtCore.QRectF(rect.left() + pad, state_rect.bottom() + 4, rect.width() - 2 * pad, 34)
+            p.drawText(
+                hint_rect,
+                int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop)
+                | int(QtCore.Qt.TextFlag.TextWordWrap),
+                self._hint,
+            )
+
         # level bar (bottom)
         bar = QtCore.QRectF(rect.left() + pad, rect.bottom() - pad - 5, rect.width() - 2 * pad, 5)
         p.setPen(QtCore.Qt.PenStyle.NoPen)
@@ -535,6 +556,7 @@ class ChannelStrip(QtWidgets.QFrame):
         *,
         color: str | None = None,
         caption: str = "",
+        hint: str = "",
         fader: QtWidgets.QSlider | None = None,
         meter: LevelMeter | None = None,
         readout: QtWidgets.QLabel | None = None,
@@ -565,6 +587,16 @@ class ChannelStrip(QtWidgets.QFrame):
         self.caption_label.setVisible(bool(caption))
         lay.addWidget(self.caption_label)
 
+        # What the strip is for, in plain words; a fixed two-line height keeps
+        # faders lined up across strips with shorter hints.
+        self.hint_label = QtWidgets.QLabel(hint)
+        self.hint_label.setProperty("role", "stripHint")
+        self.hint_label.setWordWrap(True)
+        self.hint_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        self.hint_label.setFixedHeight(STRIP_HINT_HEIGHT)
+        self.hint_label.setVisible(bool(hint))
+        lay.addWidget(self.hint_label)
+
         self.top_area = QtWidgets.QWidget()
         self.top = QtWidgets.QVBoxLayout(self.top_area)
         self.top.setContentsMargins(0, 0, 0, 0)
@@ -588,8 +620,8 @@ class ChannelStrip(QtWidgets.QFrame):
             lay.addWidget(readout)
 
     def reserve_top(self, rows: int) -> None:
-        """Keep faders aligned across strips that carry 0, 1 or 2 chips."""
-        self.top_area.setFixedHeight(max(0, rows * 22 + (rows - 1) * 4))
+        """Keep faders aligned across strips that carry 0, 1 or 2 rows of controls."""
+        self.top_area.setFixedHeight(max(0, rows * CHIP_HEIGHT + (rows - 1) * 4))
 
     def set_title(self, title: str) -> None:
         if self.name_label.text() != title:
@@ -671,9 +703,10 @@ class StripRack(QtWidgets.QScrollArea):
 
 
 class Section(QtWidgets.QFrame):
-    """Rounded panel with an uppercase title and right-aligned actions."""
+    """Rounded panel: an uppercase title, right-aligned actions and an
+    optional sentence saying what the panel is for."""
 
-    def __init__(self, title: str, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, title: str, description: str = "", parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setProperty("role", "panel")
         lay = QtWidgets.QVBoxLayout(self)
@@ -695,6 +728,11 @@ class Section(QtWidgets.QFrame):
         self.actions.setSpacing(6)
         head.addLayout(self.actions)
         lay.addLayout(head)
+        self.description_label = QtWidgets.QLabel(description)
+        self.description_label.setProperty("role", "hint")
+        self.description_label.setWordWrap(True)
+        self.description_label.setVisible(bool(description))
+        lay.addWidget(self.description_label)
         self.body = QtWidgets.QVBoxLayout()
         self.body.setSpacing(8)
         lay.addLayout(self.body, 1)
@@ -811,20 +849,24 @@ def compact_combo(combo: QtWidgets.QComboBox) -> QtWidgets.QComboBox:
 
 
 class Chip(QtWidgets.QCheckBox):
-    """Check box drawn as a full-width toggle chip, for use on strips."""
+    """Strip toggle that says what it does: a check box and a plain sentence.
+
+    The box is ticked and the chip tinted with the accent colour while the
+    option is on, so its state reads without hovering.
+    """
 
     def __init__(self, text: str, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(text, parent)
         self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
-        self.setFixedHeight(22)
+        self.setFixedHeight(CHIP_HEIGHT)
 
     def hitButton(self, pos: QtCore.QPoint) -> bool:  # noqa: N802
         return self.rect().contains(pos)
 
     def sizeHint(self) -> QtCore.QSize:  # noqa: N802
-        return QtCore.QSize(self.fontMetrics().horizontalAdvance(self.text()) + 20, 22)
+        return QtCore.QSize(self.fontMetrics().horizontalAdvance(self.text()) + 30, CHIP_HEIGHT)
 
     def paintEvent(self, event) -> None:  # noqa: N802
         p = QtGui.QPainter(self)
@@ -833,9 +875,10 @@ class Chip(QtWidgets.QCheckBox):
         on = self.isChecked()
         enabled = self.isEnabled()
         hover = self.underMouse() and enabled
+        accent = _qcolor(TOKENS["accent"] if enabled else TOKENS["border_strong"])
         if on:
-            fill = _qcolor(TOKENS["accent"] if enabled else TOKENS["border_strong"])
-            border, ink = fill, _qcolor(TOKENS["accent_text"] if enabled else TOKENS["muted"])
+            fill, border = _qcolor(accent, 40), accent
+            ink = _qcolor(TOKENS["text"] if enabled else TOKENS["muted"])
         else:
             fill = _qcolor(TOKENS["bg"])
             border = _qcolor(TOKENS["muted"] if hover else TOKENS["border_strong"] if enabled else TOKENS["border"])
@@ -843,13 +886,32 @@ class Chip(QtWidgets.QCheckBox):
         p.setPen(QtGui.QPen(border, 1))
         p.setBrush(fill)
         p.drawRoundedRect(rect, 6, 6)
+
+        box = QtCore.QRectF(rect.left() + 6, rect.center().y() - 6, 12, 12)
+        p.setPen(QtGui.QPen(accent if on else border, 1.2))
+        p.setBrush(accent if on else QtCore.Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(box, 3, 3)
+        if on:
+            tick = QtGui.QPainterPath()
+            tick.moveTo(box.left() + 2.6, box.center().y() + 0.2)
+            tick.lineTo(box.left() + 5.0, box.bottom() - 3.0)
+            tick.lineTo(box.right() - 2.4, box.top() + 3.2)
+            p.setPen(QtGui.QPen(_qcolor(TOKENS["accent_text"]), 1.8))
+            p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            p.drawPath(tick)
+
         font = self.font()
-        font.setPixelSize(10)
-        font.setBold(True)
-        font.setLetterSpacing(QtGui.QFont.SpacingType.AbsoluteSpacing, 0.8)
+        font.setPixelSize(11)
+        font.setBold(on)
         p.setFont(font)
         p.setPen(ink)
-        p.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, self.text())
+        text_rect = rect.adjusted(box.width() + 11, 1, -4, -1)
+        p.drawText(
+            text_rect,
+            int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            | int(QtCore.Qt.TextFlag.TextWordWrap),
+            self.text(),
+        )
         p.end()
 
 
