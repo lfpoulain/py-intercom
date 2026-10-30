@@ -51,6 +51,7 @@ class _FakeStream:
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self.active = False
+        self.latency = 0.01  # seconds, like a low-latency WASAPI stream
         self._phase = 0
 
     def _buffer(self) -> np.ndarray:

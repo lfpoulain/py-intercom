@@ -28,6 +28,7 @@ from ..common.console import (
 )
 from ..common.constants import AUDIO_UDP_PORT, CHANNELS, CONTROL_PORT_OFFSET, FRAME_SAMPLES, MAX_GAIN_DB, SAMPLE_RATE
 from ..common.devices import format_device_label, resolve_device
+from ..common.diagnostics import CounterRates, format_ms, format_rate
 from ..common.discovery import DiscoveryListener
 from ..common.gui_utils import DEVICE_REFRESH_TIMEOUT_MS, DeviceRefresh, is_checked, run_window, set_app_icon
 from ..common.identity import client_id_from_uuid
@@ -43,7 +44,9 @@ from ..common.preset_schema import (
 from ..common.theme import (
     TOKENS,
     make_field,
+    mono_font,
     patch_combo,
+    repolish,
     set_status_label,
 )
 from .client import ClientConfig, IntercomClient
@@ -323,6 +326,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             label.setText(format_db(gain))
 
         self._in_vu = LevelMeter()
+        self._in_vu.setToolTip("Gris : micro mesuré, rien n’est envoyé. En couleur : transmis.")
         self._out_vu = LevelMeter()
         self._return_vu = LevelMeter()
 
@@ -376,6 +380,16 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._talk_hint.setProperty("role", "hint")
         self._talk_hint.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         talk.body.addWidget(self._talk_hint)
+        self._diag_label = QtWidgets.QLabel("")
+        self._diag_label.setProperty("role", "diag")
+        self._diag_label.setFont(mono_font(11))
+        self._diag_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._diag_label.setToolTip(
+            "RTT : aller-retour réseau vers le serveur. Tampons : audio en attente dans ce poste.\n"
+            "Carte son : latence annoncée par le pilote. Pertes et PLC : paquets manquants et "
+            "trames reconstruites, par seconde."
+        )
+        talk.body.addWidget(self._diag_label)
         talk.body.addStretch(0)
 
         monitor = Section("Écoute")
@@ -524,6 +538,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._connect_after_device_refresh: bool = False
         self._ptt_start_failed: bool = False
         self._recovery = OnlineRecoveryHysteresis()
+        self._diag_rates = CounterRates()
 
         self._global_ptt: GlobalPttHotkeys | None = None
 
@@ -1902,16 +1917,40 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         with best_effort("_refresh_state_labels()"):
             self._refresh_state_labels()
+        self._refresh_diagnostics(st)
 
     def _refresh_vu_meters(self) -> None:
         if self._client is None or not self._connected or self.isMinimized():
             return
         levels = self._client.meter_levels()
         self._in_vu.set_level(levels.input_dbfs)
+        # Grey while the microphone is only measured, coloured once it is sent.
+        self._in_vu.set_dimmed(not levels.input_transmitting)
         self._out_vu.set_level(levels.output_dbfs)
         self._return_vu.set_level(levels.return_dbfs)
         for bid, pad in self._ptt_pads.items():
             pad.set_level(levels.bus_dbfs.get(int(bid), -60.0))
+
+    def _refresh_diagnostics(self, st: Mapping[str, object]) -> None:
+        if self._operational_status.state is not ClientOperationalState.ONLINE:
+            self._diag_rates.reset()
+            self._diag_label.setText("")
+            return
+        rates = self._diag_rates.update(
+            {"missing": int(st.get("jitter_missing", 0)), "concealed": int(st.get("jitter_concealed", 0))},
+            time.monotonic(),
+        )
+        frames = sum(int(st.get(key, 0)) for key in ("jitter_buffered_frames", "playout_ring_depth", "tx_ring_depth"))
+        buffered_ms = frames * 1000.0 * FRAME_SAMPLES / SAMPLE_RATE
+        self._diag_label.setText(
+            f"RTT {format_ms(st.get('control_rtt_ms'))} · tampons {format_ms(buffered_ms)} · "
+            f"carte son {format_ms(st.get('audio_latency_ms'))} · "
+            f"pertes {format_rate(rates['missing'])} · PLC {format_rate(rates['concealed'])}"
+        )
+        alert = rates["missing"] > 0.0 or rates["concealed"] > 0.0
+        if bool(self._diag_label.property("alert")) != alert:
+            self._diag_label.setProperty("alert", alert)
+            repolish(self._diag_label)
 
     def changeEvent(self, event: QtCore.QEvent) -> None:  # noqa: N802
         super().changeEvent(event)

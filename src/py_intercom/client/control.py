@@ -25,8 +25,11 @@ from ..common.control_protocol import (
     require_control_protocol_version,
 )
 from ..common.logging import best_effort
+from ..common.realtime import configure_control_socket
 
 _MAX_SERVER_MESSAGE_CHARS = 300
+# Exponential smoothing of the control round trip shown to the operator.
+_RTT_SMOOTHING = 0.2
 
 
 class ControlRefused(Exception):
@@ -170,6 +173,12 @@ class ControlMixin:
                     self._control_send_state()
                     self._send_silence_probe()
         elif mtype == "pong":
+            sent = float(self._ctrl_ping_sent_monotonic)
+            if sent:
+                self._ctrl_ping_sent_monotonic = 0.0
+                rtt_ms = (time.monotonic() - sent) * 1000.0
+                previous = self._ctrl_rtt_ms
+                self._ctrl_rtt_ms = rtt_ms if previous is None else previous + _RTT_SMOOTHING * (rtt_ms - previous)
             if "return_vu_dbfs" in msg:
                 with best_effort("read return VU from pong"):
                     with self._state_lock:
@@ -204,6 +213,7 @@ class ControlMixin:
                         continue
                     self._ctrl_sock = sock
                 sock.connect((self._server_addr[0], int(self.config.control_port or 0)))
+                configure_control_socket(sock)
                 sock.settimeout(0.02)
                 with self._network_state_lock:
                     if not self._network_is_current_locked(stop_event, generation):
@@ -211,6 +221,8 @@ class ControlMixin:
                     self._ctrl_connected = True
                     self._ctrl_received_welcome = False
                     self._ctrl_received_config = False
+                    self._ctrl_ping_sent_monotonic = 0.0
+                    self._ctrl_rtt_ms = None
                     udp_ready.clear()
                     self._ctrl_last_rx_monotonic = time.monotonic()
                     self._ctrl_last_tx_monotonic = time.monotonic()
@@ -243,6 +255,9 @@ class ControlMixin:
                             end_reason = f"ping failed: {e}"
                             break
                         self._ctrl_last_tx_monotonic = now
+                        # Pongs come back in order: time the oldest unanswered one.
+                        if not self._ctrl_ping_sent_monotonic:
+                            self._ctrl_ping_sent_monotonic = now
 
                     try:
                         chunk = sock.recv(4096)

@@ -41,6 +41,7 @@ from ..common.persistence import DebouncedJsonWriter
 from ..common.preset_schema import (
     PRESET_SCHEMA_VERSION,
 )
+from ..common.realtime import configure_udp_socket, run_as_audio_thread
 from .control import ControlMixin
 from .mixer import MixerMixin
 from .models import (
@@ -84,6 +85,7 @@ class IntercomServer(PresetsMixin, OutputsMixin, ReturnInputMixin, ControlMixin,
         with best_effort("_sock.setsockopt()"):
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+        configure_udp_socket(self._sock)
         self._sock.bind((self.bind_ip, self.port))
         self._sock.settimeout(0.5)
 
@@ -641,10 +643,13 @@ class IntercomServer(PresetsMixin, OutputsMixin, ReturnInputMixin, ControlMixin,
                 self._stop.set()
                 logger.error("critical worker {} stopped: {}", name, error)
 
-    def _new_worker(self, name: str, target: Callable[[], None], *, critical: bool = True) -> threading.Thread:
+    def _new_worker(
+        self, name: str, target: Callable[[], None], *, critical: bool = True, audio: bool = False
+    ) -> threading.Thread:
+        """``audio`` workers run on the 10 ms deadline and get MMCSS priority."""
         thread = threading.Thread(
-            target=self._worker_entry,
-            args=(str(name), target),
+            target=run_as_audio_thread if audio else self._worker_entry,
+            args=(self._worker_entry, str(name), target) if audio else (str(name), target),
             kwargs={"critical": bool(critical)},
             name=str(name),
             daemon=True,
@@ -683,9 +688,9 @@ class IntercomServer(PresetsMixin, OutputsMixin, ReturnInputMixin, ControlMixin,
             with self._worker_lock:
                 self._worker_errors.clear()
             workers = [
-                self._new_worker("udp-rx", self._rx_loop),
-                self._new_worker("udp-tx", self._broadcast_loop),
-                self._new_worker("mix", self._mix_loop),
+                self._new_worker("udp-rx", self._rx_loop, audio=True),
+                self._new_worker("udp-tx", self._broadcast_loop, audio=True),
+                self._new_worker("mix", self._mix_loop, audio=True),
                 self._new_worker("ctrl-accept", self._ctrl_accept_loop),
                 self._new_worker("ctrl-push", self._config_push_loop, critical=False),
             ]

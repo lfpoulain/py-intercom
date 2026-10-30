@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import sounddevice as sd
 
+import py_intercom.client.control as client_control_mod
 import py_intercom.common.opus_codec as opus_codec_mod
 from py_intercom.client import audio_io as audio_io_mod
 from py_intercom.client import client as client_mod
@@ -220,6 +221,9 @@ def test_control_protocol_error_closes_session_before_backoff(client_factory, mo
         def connect(self, addr: tuple) -> None:
             pass
 
+        def setsockopt(self, *_args) -> None:
+            pass
+
         def sendall(self, data: bytes) -> None:
             self.sent.append(bytes(data))
 
@@ -422,6 +426,7 @@ def test_client_stats_expose_audio_and_network_health(client_factory):
 
     class _ActiveStream:
         active = True
+        latency = 0.01
 
     client._ctrl_thread = _AliveThread()
     client._rx_thread = _AliveThread()
@@ -441,6 +446,7 @@ def test_client_stats_expose_audio_and_network_health(client_factory):
     assert stats["playout_worker_alive"] is True
     assert stats["tx_ring_depth"] == 0
     assert stats["playout_ring_depth"] == 0
+    assert stats["audio_latency_ms"] == pytest.approx(20.0)
     client._ctrl_thread = None
     client._rx_thread = None
     client._tx_thread = None
@@ -1812,6 +1818,9 @@ class _ScriptedControlSocket:
     def connect(self, addr: tuple) -> None:
         pass
 
+    def setsockopt(self, *_args) -> None:
+        pass
+
     def sendall(self, data: bytes) -> None:
         self.sent.append(bytes(data))
 
@@ -1991,3 +2000,48 @@ def test_oversized_datagram_never_pauses_client_reception(client_factory):
     assert time.monotonic() - started < 0.05
     assert client._rx_invalid_packets == 1
     assert client._rx_socket_errors == 0
+
+
+def test_microphone_is_measured_without_a_talk_key_but_never_sent(client_factory):
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender.bind(("127.0.0.1", 0))
+    client = client_factory(server_port=sender.getsockname()[1])
+    client._stop = threading.Event()
+    client._udp_ready = threading.Event()
+    client._udp_ready.set()
+    client._session_token = SESSION_TOKEN
+    client._ptt_buses = {0: False}
+    input_frame = np.full((int(FRAME_SAMPLES), 1), 0.25, dtype=np.float32)
+
+    client._in_callback(input_frame, int(FRAME_SAMPLES), None, None)
+    idle = client.meter_levels()
+
+    assert idle.input_dbfs > -20.0
+    assert idle.input_transmitting is False
+    assert client._tx_ring.depth == 0
+    assert all(level == -60.0 for level in idle.bus_dbfs.values())
+
+    client._ptt_buses = {0: True}
+    client._in_callback(input_frame, int(FRAME_SAMPLES), None, None)
+
+    assert client.meter_levels().input_transmitting is True
+    assert client._tx_ring.depth == 1
+    sender.close()
+
+
+def test_control_round_trip_is_timed_from_ping_to_pong(client_factory, monkeypatch):
+    client = client_factory(server_port=9)
+    client._stop = threading.Event()
+    clock = iter([10.004, 20.010])
+    monkeypatch.setattr(client_control_mod.time, "monotonic", lambda: next(clock))
+    client._ctrl_received_welcome = True
+
+    client._ctrl_ping_sent_monotonic = 10.0
+    client._control_handle_msg({"type": "pong", "return_vu_dbfs": -60.0})
+    assert client._ctrl_rtt_ms == pytest.approx(4.0)
+    assert client._ctrl_ping_sent_monotonic == 0.0
+
+    client._ctrl_ping_sent_monotonic = 20.0
+    client._control_handle_msg({"type": "pong", "return_vu_dbfs": -60.0})
+    # Smoothed: one slow round trip moves the readout only part of the way.
+    assert client._ctrl_rtt_ms == pytest.approx(4.0 + 0.2 * (10.0 - 4.0))

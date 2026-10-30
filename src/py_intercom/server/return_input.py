@@ -140,10 +140,13 @@ class ReturnInputMixin:
         except Exception as e:
             logger.warning("failed to query return input device {}: {}", int(device), e)
         extra_settings = shared_stream_extra_settings(dev_info)
+        # A programme feed is stereo: both sides are summed to mono, so a
+        # source panned or recorded on one side only is never lost.
+        channels = 2 if dev_info is not None and int(dev_info.get("max_input_channels", 1)) >= 2 else 1
         try:
             sd.check_input_settings(
                 device=int(device),
-                channels=1,
+                channels=channels,
                 dtype="float32",
                 samplerate=int(in_sr),
                 extra_settings=extra_settings,
@@ -155,7 +158,7 @@ class ReturnInputMixin:
                 dev_info=dev_info,
                 device=int(device),
                 sr=int(in_sr),
-                ch=1,
+                ch=channels,
             )
             raise RuntimeError(msg) from e
 
@@ -163,7 +166,7 @@ class ReturnInputMixin:
         try:
             st = sd.InputStream(
                 samplerate=float(in_sr),
-                channels=1,
+                channels=channels,
                 dtype="float32",
                 blocksize=blocksize_frame,
                 device=int(device),
@@ -189,7 +192,7 @@ class ReturnInputMixin:
                 dev_info=dev_info,
                 device=int(device),
                 sr=int(in_sr),
-                ch=1,
+                ch=channels,
             )
             raise RuntimeError(msg) from e
         return st, gate
@@ -309,8 +312,13 @@ class ReturnInputMixin:
             if active_gate is not None and not active_gate.is_set():
                 return
             scratch = self._return_input_scratch
-            # Streams are opened mono: one column of exactly FRAME_SAMPLES.
-            np.copyto(scratch, indata[:, 0], casting="unsafe")
+            if indata.shape[1] >= 2:
+                # Equal-weight sum (-6 dB per side): identical sides keep
+                # their level and a full-scale programme never clips.
+                np.add(indata[:, 0], indata[:, 1], out=scratch, casting="unsafe")
+                np.multiply(scratch, 0.5, out=scratch)
+            else:
+                np.copyto(scratch, indata[:, 0], casting="unsafe")
             limit_peak_inplace(scratch)
             self._return_vu_dbfs = rms_dbfs(scratch)
             self._return_frames.push(scratch)

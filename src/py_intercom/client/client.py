@@ -24,6 +24,7 @@ from ..common.constants import (
 from ..common.frame_ring import FrameRingBuffer
 from ..common.jitter_buffer import new_realtime_jitter_buffer
 from ..common.logging import best_effort
+from ..common.realtime import configure_udp_socket, run_as_audio_thread
 from .audio_io import AudioIOMixin
 from .control import ControlMixin
 from .transport import TransportMixin
@@ -40,6 +41,7 @@ class ClientMeterLevels:
     """Meter levels in dBFS: capture, headphones, Return and the capture level per talked-to bus."""
 
     input_dbfs: float
+    input_transmitting: bool
     output_dbfs: float
     return_dbfs: float
     bus_dbfs: dict[int, float]
@@ -88,6 +90,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         with best_effort("_sock.setsockopt()"):
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+        configure_udp_socket(self._sock)
         self._sock.bind(("0.0.0.0", 0))
         self._resolve_server_address()
         self._sock.settimeout(0.5)
@@ -132,6 +135,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         self._output_gain_db = clamp_gain_db(self.config.output_gain_db)
         self._return_gain_db = clamp_gain_db(self.config.return_gain_db)
         self._in_vu_dbfs = -60.0
+        self._in_transmitting = False
         self._out_vu_dbfs = -60.0
         self._return_vu_dbfs = -60.0
         self._bus_vu_dbfs: dict[int, float] = {int(bus_id): -60.0 for bus_id in FIXED_BUS_IDS}
@@ -162,6 +166,8 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         self._ctrl_connected: bool = False
         self._ctrl_last_rx_monotonic: float = 0.0
         self._ctrl_last_tx_monotonic: float = 0.0
+        self._ctrl_ping_sent_monotonic: float = 0.0
+        self._ctrl_rtt_ms: float | None = None
         self._ctrl_received_welcome: bool = False
         # Why the server refused this station's hello; empty unless refused.
         self._ctrl_refusal: str = ""
@@ -188,6 +194,8 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         )
         in_stream_active = self._stream_is_active(self._in_stream)
         out_stream_active = self._stream_is_active(self._out_stream)
+        audio_latency_ms = self._streams_latency_ms()
+        jitter_stats = self._jb.stats
 
         with self._state_lock:
             now = time.monotonic()
@@ -202,7 +210,11 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
                 "output_gain_db": self._output_gain_db,
                 "return_gain_db": self._return_gain_db,
                 "jitter_buffered_frames": int(jitter_buffered_frames),
-                "jitter_trimmed": int(self._jb.stats.trimmed),
+                "jitter_trimmed": int(jitter_stats.trimmed),
+                "jitter_missing": int(jitter_stats.missing),
+                "jitter_concealed": int(jitter_stats.concealed),
+                "control_rtt_ms": self._ctrl_rtt_ms,
+                "audio_latency_ms": audio_latency_ms,
                 "tx_ring_depth": int(tx_ring_stats.depth),
                 "tx_ring_pushed": int(tx_ring_stats.pushed),
                 "tx_ring_popped": int(tx_ring_stats.popped),
@@ -280,6 +292,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         """
         return ClientMeterLevels(
             input_dbfs=float(self._in_vu_dbfs),
+            input_transmitting=bool(self._in_transmitting),
             output_dbfs=float(self._out_vu_dbfs),
             return_dbfs=float(self._return_vu_dbfs),
             bus_dbfs=dict(self._bus_vu_dbfs),
@@ -440,8 +453,8 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
                 self._ctrl_received_config = False
                 self._ctrl_refusal = ""
                 rx_thread = threading.Thread(
-                    target=self._rx_loop,
-                    args=(stop_event, generation, udp_ready),
+                    target=run_as_audio_thread,
+                    args=(self._rx_loop, stop_event, generation, udp_ready),
                     name=f"udp-rx-{generation}",
                     daemon=True,
                 )
@@ -452,14 +465,14 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
                     daemon=True,
                 )
                 tx_thread = threading.Thread(
-                    target=self._tx_loop,
-                    args=(stop_event, generation, udp_ready),
+                    target=run_as_audio_thread,
+                    args=(self._tx_loop, stop_event, generation, udp_ready),
                     name=f"audio-tx-{generation}",
                     daemon=True,
                 )
                 playout_thread = threading.Thread(
-                    target=self._playout_loop,
-                    args=(stop_event, generation, udp_ready),
+                    target=run_as_audio_thread,
+                    args=(self._playout_loop, stop_event, generation, udp_ready),
                     name=f"audio-playout-{generation}",
                     daemon=True,
                 )

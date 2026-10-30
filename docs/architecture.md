@@ -33,6 +33,7 @@ src/py_intercom/
 │   ├── bootstrap.py         chargement de opus.dll, rapports de crash
 │   ├── buses.py             catalogue fixe des bus (source unique)
 │   ├── constants.py         contrat audio, budget de latence, ports
+│   ├── diagnostics.py       taux par seconde et formats des diagnostics opérateur
 │   ├── control_protocol.py  framing JSON du contrôle TCP, tokens
 │   ├── devices.py           inventaire et validation des périphériques
 │   ├── discovery.py         annonce et découverte LAN
@@ -45,6 +46,7 @@ src/py_intercom/
 │   ├── packets.py           en-tête audio UDP V2
 │   ├── persistence.py       writer JSON unique avec debounce
 │   ├── preset_schema.py     schéma 2 et migrations
+│   ├── realtime.py          priorité Windows (ABOVE_NORMAL, MMCSS), options de sockets
 │   ├── routing.py           routeur pur et mix-minus
 │   ├── theme.py             thème Qt : couleurs, style, interrupteurs
 │   ├── console.py           widgets console : vu-mètres LED, faders, pads, tranches
@@ -91,6 +93,8 @@ Règle d'or : **aucun callback PortAudio ne fait d'I/O, n'encode, ne décode, ne
 | Worker playout | Cadence le jitter buffer toutes les 10 ms, décode, pousse dans le ring de lecture |
 | Callback de sortie | Dépile une trame, applique le volume, joue du silence en cas de manque |
 | Worker contrôle | Connexion TCP, handshake, pings, reconnexion avec backoff |
+
+Le processus tourne en priorité `ABOVE_NORMAL` (jamais `HIGH` : vMix ou un encodeur doivent continuer de tourner), avec un passage du GIL toutes les 1 ms au lieu de 5. Les workers TX, RX et playout, et côté serveur `udp-rx`, `mix` et `udp-tx`, sont inscrits auprès de MMCSS comme threads « Pro Audio ». Les sockets UDP ignorent les ICMP « port injoignable » (`SIO_UDP_CONNRESET`) et le contrôle TCP envoie chaque ligne sans délai de Nagle (`TCP_NODELAY`).
 
 Chaque connexion réseau est une **génération** : nouvel `Event` d'arrêt, nouveaux workers, encodeur et décodeur neufs, backlog UDP purgé. Un ancien thread ne peut ni publier d'audio ni fermer le socket d'une génération plus récente.
 
@@ -145,7 +149,7 @@ Le test d'intégration vérifie qu'en boucle locale, sans carte son, la voix d'u
 
 **Toutes les files sont bornées et jettent leur trame la plus ancienne quand elles sont pleines** (constantes dans `common/constants.py`) : le retard ne peut jamais dépasser leur capacité, au prix d'une coupure brève. Le jitter buffer démarre sur la fenêtre la plus récente et saute en avant sur un grand trou.
 
-**Plafond de latence.** Deux horloges ne battent jamais exactement au même rythme : carte son du client, horloge du serveur, carte son d'une sortie. Une rafale réseau peut aussi laisser des trames en trop. Le jitter buffer et les rings de lecture surveillent donc leur profondeur : si elle reste au-dessus de sa cible pendant 0,5 s (`LATENCY_TRIM_AFTER_FRAMES`), une trame de 10 ms est retirée. La latence revient ainsi toujours vers la cible (~50 ms de jitter buffer, ≤ 20 ms par ring), et un retard ne peut jamais s'installer. Chaque retrait est compté (`jb_trimmed`, `playout_ring_trimmed`, `queue_trimmed`, `return_queue_trimmed`).
+**Plafond de latence.** Deux horloges ne battent jamais exactement au même rythme : carte son du client, horloge du serveur, carte son d'une sortie. Une rafale réseau peut aussi laisser des trames en trop. Le jitter buffer et les rings de lecture surveillent donc leur profondeur : si elle reste au-dessus de sa cible pendant 0,5 s (`LATENCY_TRIM_AFTER_FRAMES`), une trame de 10 ms est retirée. Un excédent de plus de 2 trames qui dure 10 lectures (rafale réseau, lecteur bloqué) est retiré d'un coup. La latence revient ainsi toujours vers la cible (~30 ms de jitter buffer, ≤ 20 ms par ring), et un retard ne peut jamais s'installer. Après un silence, la lecture reprend sur la première trame attendue, sans nouveau pré-buffer. Chaque retrait est compté (`jb_trimmed`, `playout_ring_trimmed`, `queue_trimmed`, `return_queue_trimmed`).
 
 
 ## Audio et Opus

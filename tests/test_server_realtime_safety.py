@@ -2534,3 +2534,21 @@ def test_control_sessions_log_their_opening_and_end_with_the_reason(server, monk
         f"control session opened: client {client_id} ('') from 127.0.0.1, audio port 41000",
         f"control session of client {client_id} from 127.0.0.1 ended: closed by the client",
     ]
+
+
+def test_stereo_return_is_summed_to_mono_without_losing_one_side(server):
+    server._return_enabled = True
+    gate = threading.Event()
+    gate.set()
+    left_only = np.zeros((FRAME_SAMPLES, 2), dtype=np.float32)
+    left_only[:, 0] = 0.5
+    both = np.full((FRAME_SAMPLES, 2), 0.5, dtype=np.float32)
+    out = np.empty(FRAME_SAMPLES, dtype=np.float32)
+
+    for frame in (left_only, both):
+        server._return_in_callback(frame, FRAME_SAMPLES, None, None, active_gate=gate)
+
+    assert server._return_frames.pop_into(out) is not None
+    np.testing.assert_allclose(out, 0.25, atol=1e-6)
+    assert server._return_frames.pop_into(out) is not None
+    np.testing.assert_allclose(out, 0.5, atol=1e-6)

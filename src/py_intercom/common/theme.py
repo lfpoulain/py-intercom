@@ -306,6 +306,13 @@ def _style_sheet(ui_font_family: str) -> str:
             color: {t["faint"]};
             font-size: 12px;
         }}
+        QLabel[role="diag"] {{
+            color: {t["faint"]};
+            font-size: 11px;
+        }}
+        QLabel[role="diag"][alert="true"] {{
+            color: {t["warning"]};
+        }}
         QLabel[role="stripName"] {{
             color: {t["text"]};
             font-size: 12px;

@@ -652,3 +652,16 @@ def test_bus_meters_show_the_bus_even_without_an_output(window, running) -> None
 
     assert window._bus_vu_widgets[VMIX_BUS_ID].level() == -12.0
     assert window._bus_vu_widgets[PLATEAU_BUS_ID].level() == -60.0
+
+
+def test_station_strip_shows_its_concealment_rate(window, running, monkeypatch) -> None:
+    clock = iter([100.0, 101.0])
+    monkeypatch.setattr(gui_mod.time, "monotonic", lambda: next(clock))
+    running.clients = {7: {"name": "Cadreur", "control_connected": True, "addr": ("10.0.0.7", 1), "jb_concealed": 10}}
+    window._refresh_client_strips(running.get_clients_snapshot())
+    running.clients[7]["jb_concealed"] = 14
+    window._refresh_client_strips(running.get_clients_snapshot())
+
+    label, _rates = window._client_diag[7]
+    assert label.text() == "PLC 4/s"
+    assert label.property("alert") is True

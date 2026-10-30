@@ -40,6 +40,18 @@ class AudioIOMixin:
             return None
         return info if isinstance(info, dict) else None
 
+    def _streams_latency_ms(self) -> float | None:
+        """Input plus output latency reported by PortAudio, in ms."""
+        total = 0.0
+        for stream in (self._in_stream, self._out_stream):
+            if stream is None:
+                return None
+            try:
+                total += float(stream.latency)
+            except sd.PortAudioError:
+                return None
+        return total * 1000.0
+
     @staticmethod
     def _stream_is_active(stream) -> bool:
         if stream is None:
@@ -219,31 +231,32 @@ class AudioIOMixin:
         if status:
             self._input_callback_statuses += 1
 
-        if self._stop.is_set() or not self._udp_ready.is_set():
+        if self._stop.is_set():
             self._in_vu_dbfs = -60.0
-            return
-
-        bus_mask = self._ptt_bus_mask(self._ptt_buses)
-        if bus_mask == 0:
-            self._in_vu_dbfs = -60.0
-            self._update_bus_vu(0, -60.0)
+            self._in_transmitting = False
             return
 
         if int(frames) != int(FRAME_SAMPLES):
             self._input_frame_mismatches += 1
             return
 
-        with self._tx_lock:
-            session_token = int(self._session_token)
-            session_epoch = int(self._audio_session_epoch)
-        if session_token == 0:
-            return
-
+        # Measured even with no talk key held, so the operator can check the
+        # microphone and its gain before speaking (a few microseconds).
         np.copyto(self._capture_work, indata[:, 0], casting="same_kind")
         np.multiply(self._capture_work, db_to_linear(self._input_gain_db), out=self._capture_work)
         limit_peak_inplace(self._capture_work)
         vu = rms_dbfs(self._capture_work)
         self._in_vu_dbfs = vu
+
+        bus_mask = self._ptt_bus_mask(self._ptt_buses) if self._udp_ready.is_set() else 0
+        with self._tx_lock:
+            session_token = int(self._session_token)
+            session_epoch = int(self._audio_session_epoch)
+        if bus_mask == 0 or session_token == 0:
+            self._in_transmitting = False
+            self._update_bus_vu(0, -60.0)
+            return
+        self._in_transmitting = True
         self._update_bus_vu(bus_mask, vu)
 
         metadata = self._pack_tx_metadata(session_epoch, bus_mask)

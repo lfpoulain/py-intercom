@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import os
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -29,6 +30,7 @@ from ..common.console import (
 )
 from ..common.constants import AUDIO_UDP_PORT, MAX_GAIN_DB
 from ..common.devices import DeviceInfo, format_device_label, list_devices
+from ..common.diagnostics import CounterRates, format_rate
 from ..common.gui_utils import DEVICE_REFRESH_TIMEOUT_MS, DeviceRefresh, is_checked, run_window, set_app_icon
 from ..common.identity import client_id_from_uuid
 from ..common.jsonio import JsonFileStatus, atomic_write_json, read_json_file_result
@@ -39,7 +41,9 @@ from ..common.theme import (
     TOKENS,
     StatusIndicator,
     make_field,
+    mono_font,
     patch_combo,
+    repolish,
     set_status_label,
 )
 from .health import (
@@ -173,6 +177,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._vu_widgets: dict[int, LevelMeter] = {}
         self._status_widgets: dict[int, StatusIndicator] = {}
         self._talk_lamps: dict[int, dict[int, Lamp]] = {}
+        self._client_diag: dict[int, tuple[QtWidgets.QLabel, CounterRates]] = {}
 
         self._client_rack = StripRack(
             "Aucun poste pour l'instant.\nLes postes apparaissent ici dès leur première connexion."
@@ -1586,8 +1591,13 @@ class ServerWindow(QtWidgets.QMainWindow):
             lamps_lay.addWidget(lamp)
             lamps[int(definition.bus_id)] = lamp
         lamps_lay.addStretch(1)
-        strip.reserve_top(1)
+        diag = QtWidgets.QLabel("")
+        diag.setProperty("role", "diag")
+        diag.setFont(mono_font(10))
+        diag.setToolTip("Trames reconstruites (PLC) par seconde : paquets perdus ou en retard sur ce poste.")
+        strip.reserve_top(2)
         strip.top.addWidget(lamps_row)
+        strip.top.addWidget(diag)
         strip.setToolTip("Cliquer pour sélectionner ce poste")
         strip.clicked.connect(lambda cid=int(client_id): self._select_client(cid))
 
@@ -1597,6 +1607,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._vu_widgets[int(client_id)] = meter
         self._status_widgets[int(client_id)] = indicator
         self._talk_lamps[int(client_id)] = lamps
+        self._client_diag[int(client_id)] = (diag, CounterRates())
         return strip
 
     def _clear_client_strips(self) -> None:
@@ -1609,6 +1620,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._vu_widgets,
             self._status_widgets,
             self._talk_lamps,
+            self._client_diag,
         ):
             cache.clear()
 
@@ -1622,7 +1634,21 @@ class ServerWindow(QtWidgets.QMainWindow):
     def _fader_in_use(faders: Mapping[int, Fader]) -> bool:
         return any(fader.isSliderDown() for fader in faders.values())
 
+    def _refresh_client_diag(self, client_id: int, st: Mapping[str, object], *, online: bool, now: float) -> None:
+        label, rates = self._client_diag[client_id]
+        if not online:
+            rates.reset()
+            label.setText("")
+            return
+        concealed = rates.update({"concealed": int(st.get("jb_concealed", 0))}, now)["concealed"]
+        label.setText(f"PLC {format_rate(concealed)}")
+        alert = concealed > 0.0
+        if bool(label.property("alert")) != alert:
+            label.setProperty("alert", alert)
+            repolish(label)
+
     def _refresh_client_strips(self, snap: dict[int, dict]) -> None:
+        now = time.monotonic()
         client_ids = sorted(snap.keys())
         if client_ids != self._client_row_ids:
             if self._fader_in_use(self._input_gain_widgets):
@@ -1659,6 +1685,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             disconnected = transport_state is ClientTransportState.OFFLINE
             online += 0 if disconnected else 1
             strip.set_flag("offline", disconnected)
+            self._refresh_client_diag(int(client_id), st, online=not disconnected, now=now)
 
             slider = self._input_gain_widgets[int(client_id)]
             slider.setEnabled(self._server is not None)

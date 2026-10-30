@@ -1,6 +1,7 @@
 import argparse
 
 from ..common.logging import setup_logging
+from ..common.realtime import raise_process_priority
 
 
 def main() -> int:
@@ -10,6 +11,7 @@ def main() -> int:
     args = parser.parse_args()
 
     setup_logging(bool(args.debug), component="server")
+    raise_process_priority()
 
     from .gui import run_gui
 

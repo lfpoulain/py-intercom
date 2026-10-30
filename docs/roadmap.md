@@ -23,6 +23,7 @@ Un intercom LAN desktop fiable pour le live : latence bornée, comportement fail
 - Octobre 2026 : plafond de latence (dérive d'horloge et rafales absorbées), préflight opérateur, ducking du Return en option.
 - Octobre 2026 : contrôle HTTP du PTT côté client (Stream Deck, Companion, scripts).
 - Octobre 2026 : nouvelle interface façon console : pads de parole cliquables côté client, tranches de mixage côté serveur.
+- Octobre 2026 : audit complet (latence, stabilité, PTT, code mort), priorité temps réel Windows, options de sockets, VU micro hors PTT, Return stéréo, diagnostic RTT / tampons / PLC.
 
 ## Travaux ouverts
 

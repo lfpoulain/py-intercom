@@ -29,6 +29,7 @@ SPEECH_DBFS = -30.0
 
 class _FakeStream:
     active = False
+    latency = 0.01
 
     def start(self) -> None:
         self.active = True

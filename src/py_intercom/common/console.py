@@ -63,7 +63,11 @@ def require_focus_for_wheel(widget: QtWidgets.QWidget) -> QtWidgets.QWidget:
 
 
 class LevelMeter(QtWidgets.QWidget):
-    """Segmented LED meter (-60 .. 0 dBFS) with peak hold."""
+    """Segmented LED meter (-60 .. 0 dBFS) with peak hold.
+
+    A dimmed meter still moves but in grey: the level is real, nothing is
+    being sent (a microphone measured while no talk key is held).
+    """
 
     def __init__(
         self,
@@ -75,6 +79,7 @@ class LevelMeter(QtWidgets.QWidget):
         self._level = METER_FLOOR_DB
         self._peak = METER_FLOOR_DB
         self._peak_at = 0.0
+        self._dimmed = False
         if orientation == QtCore.Qt.Orientation.Vertical:
             self.setMinimumSize(8, 60)
             self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding)
@@ -86,6 +91,11 @@ class LevelMeter(QtWidgets.QWidget):
 
     def level(self) -> float:
         return self._level
+
+    def set_dimmed(self, dimmed: bool) -> None:
+        if bool(dimmed) != self._dimmed:
+            self._dimmed = bool(dimmed)
+            self.update()
 
     def set_level(self, dbfs: float) -> None:
         """Set the level in dBFS (clamped to -60 .. 0)."""
@@ -117,7 +127,7 @@ class LevelMeter(QtWidgets.QWidget):
         p.setPen(QtCore.Qt.PenStyle.NoPen)
         for i in range(count):
             db = METER_FLOOR_DB + (i + 0.5) / count * span
-            color = QtGui.QColor(_segment_color(db))
+            color = QtGui.QColor(TOKENS["muted"] if self._dimmed else _segment_color(db))
             lit = i < lit_upto or (i == peak_index and self._peak > METER_FLOOR_DB + 1)
             color.setAlpha(255 if lit and enabled else 34)
             pos = offset + i * (seg + gap)

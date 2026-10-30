@@ -402,7 +402,7 @@ class _FakeIntercomClient:
         return self.streams_active
 
     def meter_levels(self) -> ClientMeterLevels:
-        return ClientMeterLevels(-12.0, -24.0, -36.0, {REGIE_BUS_ID: -6.0})
+        return ClientMeterLevels(-12.0, False, -24.0, -36.0, {REGIE_BUS_ID: -6.0})
 
     def _ignore(self, *_args) -> None:
         return
@@ -538,6 +538,7 @@ def test_vu_meters_read_the_lock_free_levels(client_window, monkeypatch) -> None
     window._refresh_vu_meters()
 
     assert window._in_vu.level() == pytest.approx(-12.0)
+    assert window._in_vu._dimmed is True  # measured, not sent
     window._disconnect()
 
 

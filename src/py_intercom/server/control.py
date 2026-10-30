@@ -35,6 +35,7 @@ from ..common.identity import (
 )
 from ..common.jitter_buffer import new_realtime_jitter_buffer
 from ..common.logging import best_effort
+from ..common.realtime import configure_control_socket
 from .models import ClientProfile, ClientState
 
 # Message told to a peer whose identity collides: never another client's UUID.
@@ -191,6 +192,7 @@ class ControlMixin:
                 with best_effort("conn.close()"):
                     conn.close()
                 return
+            configure_control_socket(conn)
             reject = False
             with self._worker_lock:
                 self._ctrl_session_threads = {thread for thread in self._ctrl_session_threads if thread.is_alive()}
