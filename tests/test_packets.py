@@ -3,6 +3,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from py_intercom.common.buses import FIXED_BUS_MASK, PLATEAU_BUS_ID, REGIE_BUS_ID, VMIX_BUS_ID
 from py_intercom.common.constants import (
     AUDIO_PACKET_FLAG_CLIENT_TO_SERVER,
     AUDIO_PACKET_FLAG_SERVER_TO_CLIENT,
@@ -13,6 +14,7 @@ from py_intercom.common.constants import (
 )
 from py_intercom.common.packets import (
     AudioPacketDirection,
+    is_valid_route,
     pack_audio_packet_v2,
     unpack_audio_packet_v2,
 )
@@ -31,6 +33,15 @@ def _v2_packet(**overrides):
     }
     fields.update(overrides)
     return pack_audio_packet_v2(**fields)
+
+
+def test_route_must_target_only_fixed_buses_on_the_reserved_stream():
+    assert is_valid_route(0, 0)
+    assert is_valid_route(0, (1 << REGIE_BUS_ID) | (1 << PLATEAU_BUS_ID) | (1 << VMIX_BUS_ID))
+    assert is_valid_route(0, FIXED_BUS_MASK)
+    assert not is_valid_route(1, 1 << REGIE_BUS_ID)
+    assert not is_valid_route(0, 1 << 15)
+    assert not is_valid_route(0, -1)
 
 
 def test_v2_header_schema_and_roundtrip_are_exact():
@@ -54,7 +65,6 @@ def test_v2_header_schema_and_roundtrip_are_exact():
     assert packet.version == AUDIO_PACKET_V2_VERSION
     assert packet.header_size == AUDIO_PACKET_V2_HEADER_BYTES
     assert packet.flags == AUDIO_PACKET_FLAG_CLIENT_TO_SERVER
-    assert packet.direction is AudioPacketDirection.CLIENT_TO_SERVER
     assert packet.session_token == 0x0123456789ABCDEF
     assert packet.client_id == 42
     assert packet.timestamp_ms == 0x10203040
@@ -68,11 +78,8 @@ def test_v2_header_schema_and_roundtrip_are_exact():
 
 
 def test_v2_server_to_client_direction_roundtrip():
-    packet = unpack_audio_packet_v2(
-        _v2_packet(direction=AudioPacketDirection.SERVER_TO_CLIENT, bus_mask=0)
-    )
+    packet = unpack_audio_packet_v2(_v2_packet(direction=AudioPacketDirection.SERVER_TO_CLIENT, bus_mask=0))
     assert packet.flags == AUDIO_PACKET_FLAG_SERVER_TO_CLIENT
-    assert packet.direction is AudioPacketDirection.SERVER_TO_CLIENT
     assert packet.bus_mask == 0
 
 
@@ -148,7 +155,4 @@ def test_v2_unpack_rejects_invalid_datagram_sizes_and_empty_payload():
     with pytest.raises(ValueError, match="empty"):
         unpack_audio_packet_v2(encoded[:AUDIO_PACKET_V2_HEADER_BYTES])
     with pytest.raises(ValueError, match="too large"):
-        unpack_audio_packet_v2(
-            encoded[:AUDIO_PACKET_V2_HEADER_BYTES]
-            + (b"x" * (MAX_UDP_PAYLOAD_BYTES + 1))
-        )
+        unpack_audio_packet_v2(encoded[:AUDIO_PACKET_V2_HEADER_BYTES] + (b"x" * (MAX_UDP_PAYLOAD_BYTES + 1)))

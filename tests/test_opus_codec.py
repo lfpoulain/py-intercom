@@ -68,9 +68,7 @@ def fake_opus(monkeypatch):
         decode_fec,
         channels,
     ):
-        decoder_state.plc_calls.append(
-            (payload, payload_length, frame_samples, decode_fec, channels)
-        )
+        decoder_state.plc_calls.append((payload, payload_length, frame_samples, decode_fec, channels))
         if decoder_state.plc_error is not None:
             raise decoder_state.plc_error
         if decoder_state.plc_pcm is not None:
@@ -203,6 +201,20 @@ def test_decoder_fails_closed_when_deep_plc_ctl_is_unavailable(fake_opus):
         OpusDecoder()
 
 
+def test_decoder_fails_closed_without_native_state(fake_opus, monkeypatch):
+    opuslib = sys.modules["opuslib"]
+
+    class StatelessDecoderBackend(opuslib.Decoder):
+        def __init__(self, sample_rate, channels):
+            super().__init__(sample_rate, channels)
+            self.decoder_state = None
+
+    monkeypatch.setattr(opuslib, "Decoder", StatelessDecoderBackend)
+
+    with pytest.raises(RuntimeError, match="Deep PLC Opus decoder"):
+        OpusDecoder()
+
+
 @pytest.mark.parametrize(
     "source",
     (
@@ -296,17 +308,6 @@ def test_plc_uses_null_packet_and_pads_short_native_output(fake_opus):
     assert frame.shape == (480,)
     np.testing.assert_allclose(frame[:120], 1_000.0 / 32_768.0)
     np.testing.assert_array_equal(frame[120:], np.zeros((360,), dtype=np.float32))
-
-
-def test_plc_falls_back_to_high_level_decoder_without_native_state(fake_opus):
-    decoder = OpusDecoder(OpusConfig(frame_samples=120))
-    backend = fake_opus.decoder_instances[-1]
-    backend.decoder_state = None
-
-    frame = decoder.decode(b"")
-
-    assert backend.decode_calls == [(b"", 120, False)]
-    assert frame.shape == (120,)
 
 
 @pytest.mark.parametrize("payload", (None, "opus", [1, 2, 3]))

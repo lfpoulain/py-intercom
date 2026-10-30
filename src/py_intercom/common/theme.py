@@ -43,7 +43,6 @@ _SEMANTIC_STATUS_COLORS = {
     "unknown": TOKENS["faint"],
 }
 
-UI_FONT = "Segoe UI"
 MONO_FONT = "Cascadia Mono"
 
 _UI_FONTS_REGISTERED = False
@@ -409,11 +408,6 @@ def _style_sheet(ui_font_family: str) -> str:
             background: {t["danger_hover"]};
             border-color: {t["danger_hover"]};
         }}
-        QPushButton[class="warning"] {{
-            border: 1px solid {t["warning"]};
-            background: {t["warning"]};
-            color: #111111;
-        }}
         QPushButton[class="secondary"] {{
             background: transparent;
             border-color: {t["border_strong"]};
@@ -481,44 +475,6 @@ def _style_sheet(ui_font_family: str) -> str:
         }}
         QCheckBox:checked {{
             color: {t["text"]};
-        }}
-        /* --- Sliders (horizontal, outside the console faders) --- */
-        QSlider::groove:horizontal {{
-            height: 6px;
-            background: {t["raised"]};
-            border-radius: 3px;
-        }}
-        QSlider::handle:horizontal {{
-            background: {t["accent"]};
-            width: 14px;
-            height: 14px;
-            margin: -5px 0;
-            border-radius: 7px;
-        }}
-        QSlider::sub-page:horizontal {{
-            background: {t["accent"]};
-            border-radius: 3px;
-        }}
-
-        /* --- Tables --- */
-        QTableWidget {{
-            border: 1px solid {t["border"]};
-            border-radius: 8px;
-            background: {t["bg"]};
-            gridline-color: transparent;
-            alternate-background-color: {t["panel_alt"]};
-            selection-background-color: {t["raised"]};
-            selection-color: {t["text"]};
-            outline: none;
-        }}
-        QHeaderView::section {{
-            background-color: {t["panel"]};
-            color: {t["muted"]};
-            border: none;
-            border-bottom: 1px solid {t["border"]};
-            padding: 7px 8px;
-            font-size: 11px;
-            font-weight: 700;
         }}
 
         /* --- Scroll bars --- */
@@ -608,13 +564,6 @@ def _style_sheet(ui_font_family: str) -> str:
             border-color: {t["danger"]};
             background: #2a0d0d;
         }}
-        QLabel[role="statusChip"] {{
-            background: {t["bg"]};
-            border: 1px solid {t["border"]};
-            border-radius: 6px;
-            padding: 3px 8px;
-            font-size: 11px;
-        }}
 
         /* --- Splitter --- */
         QSplitter::handle {{
@@ -626,16 +575,10 @@ def _style_sheet(ui_font_family: str) -> str:
     """
 
 
-def make_field(
-    label_text: str,
-    control: QtWidgets.QWidget,
-    *,
-    minimum_width: int = 0,
-) -> QtWidgets.QWidget:
+def make_field(label_text: str, control: QtWidgets.QWidget) -> QtWidgets.QWidget:
     """Build a consistently spaced label/control field for desktop forms."""
 
     container = QtWidgets.QWidget()
-    container.setProperty("role", "field")
     layout = QtWidgets.QVBoxLayout(container)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(5)
@@ -644,8 +587,6 @@ def make_field(
     label.setBuddy(control)
     layout.addWidget(label)
     layout.addWidget(control)
-    if minimum_width > 0:
-        container.setMinimumWidth(int(minimum_width))
     return container
 
 

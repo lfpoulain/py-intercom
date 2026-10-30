@@ -7,8 +7,10 @@ import py_intercom.common.opus_codec as opus_codec_mod
 import py_intercom.server.models as models_mod
 import py_intercom.server.presets as presets_mod
 import py_intercom.server.server as server_mod
+from py_intercom.common.buses import PLATEAU_BUS_ID, VMIX_BUS_ID
 from py_intercom.common.constants import FRAME_SAMPLES
 from py_intercom.common.control_protocol import CONTROL_PROTOCOL_VERSION, encode_control_message
+from py_intercom.common.devices import DeviceInfo
 from py_intercom.common.identity import client_id_from_uuid
 from py_intercom.common.preset_schema import PRESET_SCHEMA_VERSION
 
@@ -242,9 +244,223 @@ def test_profile_crc_collision_is_preserved_but_exposed_as_unsafe(monkeypatch, t
         assert set(srv._client_profiles) == {first_uuid, second_uuid}
         snapshot = srv.get_clients_snapshot()[client_id]
         assert snapshot["identity_collision"] is True
-        assert snapshot["identity_collision_uuids"] == sorted(
-            [first_uuid, second_uuid]
-        )
+        assert snapshot["identity_collision_uuids"] == sorted([first_uuid, second_uuid])
         assert srv.get_stats_snapshot()["identity_collision_count"] == 1
     finally:
         srv.stop()
+
+
+def _output_device(index: int, name: str) -> DeviceInfo:
+    return DeviceInfo(
+        index=index,
+        name=name,
+        hostapi="Windows WASAPI",
+        max_input_channels=0,
+        max_output_channels=2,
+    )
+
+
+def test_preset_gains_are_finite_and_bounded(monkeypatch, tmp_path):
+    preset_path = tmp_path / "server-preset.json"
+    # Python's json accepts NaN: a hand-edited preset can carry it.
+    preset_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "buses": {"1": {"gain_db": 60.0}, "2": {"gain_db": float("nan")}},
+                "outputs": [
+                    {"device": 3, "device_name": "Scene", "bus_id": 2, "gain_db": -1000.0},
+                    {"device": 3, "device_name": "Scene", "bus_id": 7},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    srv = _make_server(monkeypatch, preset_path)
+    monkeypatch.setattr(presets_mod, "list_devices", lambda *args, **kwargs: [_output_device(3, "Scene")])
+
+    try:
+        assert srv.load_preset() is True
+        buses = srv.get_buses_snapshot()
+        outputs = srv.get_outputs_snapshot()
+    finally:
+        srv.stop()
+
+    assert buses[1]["gain_db"] == 20.0
+    assert buses[2]["gain_db"] == 0.0
+    assert [(o["device"], o["bus_id"], o["gain_db"]) for o in outputs.values()] == [
+        (3, VMIX_BUS_ID, -60.0),
+        (3, PLATEAU_BUS_ID, 0.0),
+    ]
+
+
+def test_preset_output_on_an_unknown_bus_survives_the_next_save(monkeypatch, tmp_path):
+    preset_path = tmp_path / "server-preset.json"
+    preset_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "outputs": [
+                    # Older presets could route an output to a custom bus.
+                    {"device": 3, "device_name": "Scene", "bus_id": 5, "gain_db": -6.0},
+                    {"device": 3, "device_name": "Scene", "bus_id": "vmix"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    srv = _make_server(monkeypatch, preset_path)
+    monkeypatch.setattr(presets_mod, "list_devices", lambda *args, **kwargs: [_output_device(3, "Scene")])
+
+    try:
+        assert srv.load_preset() is True
+        outputs = srv.get_outputs_snapshot()
+        saved = srv._build_preset_data()["outputs"]
+    finally:
+        srv.stop()
+
+    # Kept on Plateau rather than dropped, so saving cannot erase the physical
+    # output; only an unreadable bus is skipped.
+    assert [(o["device"], o["bus_id"], o["gain_db"]) for o in outputs.values()] == [(3, PLATEAU_BUS_ID, -6.0)]
+    assert [(o["device"], o["bus_id"], o["gain_db"]) for o in saved] == [(3, PLATEAU_BUS_ID, -6.0)]
+
+
+def test_loading_a_preset_stops_replaced_streams_outside_the_engine_lock(monkeypatch, tmp_path):
+    preset_path = tmp_path / "server-preset.json"
+    preset_path.write_text(json.dumps({"version": 1, "outputs": []}), encoding="utf-8")
+    srv = _make_server(monkeypatch, preset_path)
+    lock_free_during_stop = []
+
+    class _Stream:
+        closed = False
+
+        def stop(self):
+            acquired = srv._lock.acquire(blocking=False)
+            if acquired:
+                srv._lock.release()
+            lock_free_during_stop.append(acquired)
+
+        def close(self):
+            self.closed = True
+
+    stream = _Stream()
+    replaced = models_mod.OutputState(0, 1, 1)
+    replaced.stream = stream
+    srv._outputs[0] = replaced
+
+    try:
+        srv.load_preset()
+    finally:
+        srv.stop()
+
+    assert lock_free_during_stop == [True]
+    assert stream.closed
+    assert replaced.stream is None
+
+
+def _absent_cards_preset(preset_path) -> None:
+    preset_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "outputs": [
+                    {"device": 3, "device_name": "Scene", "device_hostapi": "Windows WASAPI", "bus_id": 1},
+                    # The USB interface of the stage return is off at boot.
+                    {"device": 7, "device_name": "Retour USB", "device_hostapi": "ASIO", "bus_id": 2, "gain_db": -4},
+                ],
+                "return_enabled": True,
+                "return_input_device": 9,
+                "return_input_device_name": "Retour antenne",
+                "return_input_device_hostapi": "Windows WASAPI",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_outputs_and_return_of_absent_cards_survive_the_next_save(monkeypatch, tmp_path):
+    preset_path = tmp_path / "server-preset.json"
+    _absent_cards_preset(preset_path)
+    srv = _make_server(monkeypatch, preset_path)
+    monkeypatch.setattr(presets_mod, "list_devices", lambda *args, **kwargs: [_output_device(3, "Scene")])
+
+    try:
+        assert srv.load_preset() is True
+        outputs = srv.get_outputs_snapshot()
+        saved = srv._build_preset_data()
+    finally:
+        srv.stop()
+
+    # Only the present card is opened, but nothing is erased from the preset.
+    assert [(o["device"], o["bus_id"]) for o in outputs.values()] == [(3, PLATEAU_BUS_ID)]
+    assert srv._return_input_device is None
+    assert saved["outputs"] == [
+        {"device": 3, "device_name": "Scene", "device_hostapi": "Windows WASAPI", "bus_id": 1, "gain_db": 0.0},
+        {"device": 7, "device_name": "Retour USB", "device_hostapi": "ASIO", "bus_id": 2, "gain_db": -4.0},
+    ]
+    assert (
+        saved["return_input_device"],
+        saved["return_input_device_name"],
+        saved["return_input_device_hostapi"],
+    ) == (9, "Retour antenne", "Windows WASAPI")
+
+
+def test_choosing_a_return_card_replaces_the_absent_one(monkeypatch, tmp_path):
+    preset_path = tmp_path / "server-preset.json"
+    _absent_cards_preset(preset_path)
+    srv = _make_server(monkeypatch, preset_path)
+
+    try:
+        srv.load_preset()
+        srv.set_return_input_device(4)
+        saved = srv._build_preset_data()
+    finally:
+        srv.stop()
+
+    assert (saved["return_input_device"], saved["return_input_device_name"]) == (4, "")
+
+
+def test_preset_parsing_is_shared_and_reports_what_it_cannot_use():
+    data = {
+        "buses": {"x": {"gain_db": 1.0}, "9": {}, "1": {"gain_db": "loud", "feed_to_regie": True}},
+        "clients": {"uuid-a": "not an object", "uuid-b": {"name": "Cam 2", "input_gain_db": 3.0}},
+        "outputs": ["junk", {"device": "abc", "device_name": "Scene", "bus_id": "vmix"}, {"device": 3, "bus_id": 2}],
+        "return_input_device": "nope",
+    }
+
+    parsed = presets_mod.parse_server_preset(data, [_output_device(3, "Scene")])
+
+    assert parsed.bus_gain_db[PLATEAU_BUS_ID] == 0.0
+    assert parsed.bus_feed_to_regie[PLATEAU_BUS_ID] is True
+    assert {uuid: (p.name, p.input_gain_db) for uuid, p in parsed.profiles.items()} == {
+        "uuid-a": ("", 0.0),
+        "uuid-b": ("Cam 2", 3.0),
+    }
+    assert [(o.device, o.bus_id) for o in parsed.outputs] == [(3, VMIX_BUS_ID)]
+    assert parsed.return_device is None
+    assert not parsed.return_saved.is_set
+    # Nothing is replaced by a default silently: every fallback names its field.
+    assert parsed.warnings == (
+        "Return input device index 'nope' ignored",
+        "bus 'x' ignored: not a bus id",
+        "bus '9' ignored: unknown bus or settings not an object",
+        "bus 1 gain 'loud' corrected to 0.0 dB",
+        "client uuid-a settings reset: not an object",
+        "output 1 ignored: not an object",
+        "output 2 ignored: invalid bus 'vmix'",
+    )
+
+
+def test_load_preset_logs_every_value_it_could_not_use(monkeypatch, tmp_path):
+    preset_path = tmp_path / "server-preset.json"
+    preset_path.write_text(json.dumps({"version": 1, "outputs": [{"device": "abc", "bus_id": 1}]}), encoding="utf-8")
+    srv = _make_server(monkeypatch, preset_path)
+    warnings = []
+    monkeypatch.setattr(presets_mod.logger, "warning", lambda message, *args: warnings.append(message.format(*args)))
+
+    try:
+        srv.load_preset()
+    finally:
+        srv.stop()
+
+    assert any("output 1 device index 'abc' ignored" in line for line in warnings)

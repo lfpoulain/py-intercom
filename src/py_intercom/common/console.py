@@ -40,6 +40,28 @@ def _segment_color(db: float) -> QtGui.QColor:
     return _GREEN
 
 
+class _FocusWheelGuard(QtCore.QObject):
+    """Ignores the wheel over an unfocused control so its container scrolls.
+
+    A wheel notch while merely hovering a fader or a device combo must never
+    change a live gain or reroute an output; the ignored event propagates to
+    the parent (the strip rack or a page) instead.
+    """
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:  # noqa: N802
+        if event.type() == QtCore.QEvent.Type.Wheel and not watched.hasFocus():
+            event.ignore()
+            return True
+        return False
+
+
+def require_focus_for_wheel(widget: QtWidgets.QWidget) -> QtWidgets.QWidget:
+    """Only let the wheel act on ``widget`` once it has the keyboard focus."""
+    widget.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
+    widget.installEventFilter(_FocusWheelGuard(widget))
+    return widget
+
+
 class LevelMeter(QtWidgets.QWidget):
     """Segmented LED meter (-60 .. 0 dBFS) with peak hold."""
 
@@ -126,10 +148,13 @@ class Fader(QtWidgets.QSlider):
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding)
         self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Glisser pour régler, double-clic : 0 dB")
+        require_focus_for_wheel(self)
 
     def set_color(self, color: str | QtGui.QColor) -> None:
-        self._color = QtGui.QColor(color)
-        self.update()
+        new = QtGui.QColor(color)
+        if new != self._color:
+            self._color = new
+            self.update()
 
     # -- geometry ------------------------------------------------------------
 
@@ -196,7 +221,11 @@ class Fader(QtWidgets.QSlider):
             strong = db == 0
             p.setPen(_qcolor(TOKENS["muted"] if strong else TOKENS["faint"], 255 if enabled else 120))
             label = f"+{db}" if db > 0 else str(db)
-            p.drawText(QtCore.QRectF(0, y - 6, self._SCALE_W - 3, 12), QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter, label)
+            p.drawText(
+                QtCore.QRectF(0, y - 6, self._SCALE_W - 3, 12),
+                QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter,
+                label,
+            )
             p.drawLine(QtCore.QPointF(groove_x - 9, y), QtCore.QPointF(groove_x - (13 if strong else 11), y))
             p.drawLine(QtCore.QPointF(groove_x + 9, y), QtCore.QPointF(groove_x + (13 if strong else 11), y))
 
@@ -258,9 +287,6 @@ class Lamp(QtWidgets.QWidget):
         self._on = False
         self.setFixedSize(22, 16)
 
-    def is_on(self) -> bool:
-        return self._on
-
     def set_on(self, on: bool) -> None:
         if bool(on) != self._on:
             self._on = bool(on)
@@ -312,12 +338,15 @@ class TalkPad(QtWidgets.QAbstractButton):
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.setAccessibleName(f"Parler {title}")
 
+    def hitButton(self, pos: QtCore.QPoint) -> bool:
+        # A press lasts until the button is physically released: sliding off
+        # the edge and back must not emit a second press (a toggle would flip
+        # twice).
+        return self.isDown() or super().hitButton(pos)
+
     @property
     def state(self) -> str:
         return self._state
-
-    def state_text(self) -> str:
-        return self._state_text
 
     def set_title(self, title: str) -> None:
         self._title = title
@@ -379,7 +408,9 @@ class TalkPad(QtWidgets.QAbstractButton):
             grad.setColorAt(0.0, _qcolor("#1c222d" if not disarmed else "#141821"))
             grad.setColorAt(1.0, _qcolor("#12161d" if not disarmed else "#0f1218"))
             p.setBrush(grad)
-            border = _qcolor(color, 150) if hover else _qcolor(TOKENS["border_strong"] if not disarmed else TOKENS["border"])
+            border = (
+                _qcolor(color, 150) if hover else _qcolor(TOKENS["border_strong"] if not disarmed else TOKENS["border"])
+            )
             p.setPen(QtGui.QPen(border, 1.2))
         p.drawRoundedRect(rect, 16, 16)
 
@@ -427,7 +458,12 @@ class TalkPad(QtWidgets.QAbstractButton):
         title_font.setBold(True)
         p.setFont(title_font)
         p.setPen(ink)
-        title_rect = QtCore.QRectF(rect.left() + pad, rect.center().y() - title_font.pixelSize() * 1.05, rect.width() - 2 * pad, title_font.pixelSize() * 1.4)
+        title_rect = QtCore.QRectF(
+            rect.left() + pad,
+            rect.center().y() - title_font.pixelSize() * 1.05,
+            rect.width() - 2 * pad,
+            title_font.pixelSize() * 1.4,
+        )
         p.drawText(title_rect, QtCore.Qt.AlignmentFlag.AlignCenter, self._title)
 
         state_font = self.font()
@@ -459,8 +495,10 @@ class _ColorBar(QtWidgets.QWidget):
         self.setFixedHeight(3)
 
     def set_color(self, color: str | None) -> None:
-        self._color = QtGui.QColor(color) if color else None
-        self.update()
+        new = QtGui.QColor(color) if color else None
+        if new != self._color:
+            self._color = new
+            self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         if self._color is None:
@@ -474,7 +512,10 @@ class _ColorBar(QtWidgets.QWidget):
 
 
 class ChannelStrip(QtWidgets.QFrame):
-    """Vertical mixer strip: colour bar, name, extras, meter + fader, read-out."""
+    """Vertical mixer strip: colour bar, name, extras, meter + fader, read-out.
+
+    ``readout`` is a label made by :func:`readout`, which carries its style.
+    """
 
     clicked = QtCore.Signal()
 
@@ -495,8 +536,6 @@ class ChannelStrip(QtWidgets.QFrame):
         self.setFixedWidth(int(width))
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding)
         self.fader = fader
-        self.meter = meter
-        self.readout = readout
 
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(8, 6, 8, 8)
@@ -536,13 +575,7 @@ class ChannelStrip(QtWidgets.QFrame):
         lay.addLayout(body, 1)
 
         if readout is not None:
-            readout.setProperty("role", "readout")
-            readout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             lay.addWidget(readout)
-
-        self.bottom = QtWidgets.QVBoxLayout()
-        self.bottom.setSpacing(4)
-        lay.addLayout(self.bottom)
 
     def reserve_top(self, rows: int) -> None:
         """Keep faders aligned across strips that carry 0, 1 or 2 chips."""
@@ -599,12 +632,6 @@ class StripRack(QtWidgets.QScrollArea):
         self._strips: list[QtWidgets.QWidget] = []
         self._trailing: list[QtWidgets.QWidget] = []
         self.setWidget(inner)
-
-    def empty_text(self) -> str:
-        return self._empty.text()
-
-    def set_empty_text(self, text: str) -> None:
-        self._empty.setText(text)
 
     def strips(self) -> list[QtWidgets.QWidget]:
         return list(self._strips)
@@ -726,7 +753,9 @@ class SegmentedNav(QtWidgets.QFrame):
 class TopBar(QtWidgets.QFrame):
     """Window header: logo, brand, title/subtitle on the left, controls right."""
 
-    def __init__(self, title: str, subtitle: str, icon: QtGui.QIcon | None = None, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self, title: str, subtitle: str, icon: QtGui.QIcon | None = None, parent: QtWidgets.QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self.setProperty("role", "topbar")
         lay = QtWidgets.QHBoxLayout(self)
@@ -763,6 +792,7 @@ class TopBar(QtWidgets.QFrame):
 
 def compact_combo(combo: QtWidgets.QComboBox) -> QtWidgets.QComboBox:
     """Small combo for strips; long device names are elided in the box."""
+    require_focus_for_wheel(combo)
     combo.setProperty("role", "compact")
     combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
     combo.setMinimumContentsLength(4)

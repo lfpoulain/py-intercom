@@ -305,7 +305,4 @@ def test_validation_is_recorded_independently_for_input_and_output(
     assert devices[0].supports_output is True
     assert {direction for direction, _kwargs in checked} == {"input", "output"}
     assert all(kwargs["dtype"] == "float32" for _direction, kwargs in checked)
-    assert all(
-        kwargs["extra_settings"] is shared_settings
-        for _direction, kwargs in checked
-    )
+    assert all(kwargs["extra_settings"] is shared_settings for _direction, kwargs in checked)

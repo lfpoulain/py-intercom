@@ -16,24 +16,30 @@ _SESSION_TOKEN_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
 class ControlProtocolError(ValueError):
-    pass
+    """A control peer broke the protocol; its session is closed.
+
+    ``peer_message`` is what may be told to that peer before closing. It
+    defaults to the error text and must never carry another client's data.
+    ``refused`` marks what the peer cannot fix by retrying (protocol version,
+    identity, name): it is told not to reconnect on its own.
+    """
+
+    def __init__(self, message: str, *, peer_message: str | None = None, refused: bool = False) -> None:
+        super().__init__(message)
+        self.peer_message = str(message if peer_message is None else peer_message)
+        self.refused = bool(refused)
 
 
 def require_control_protocol_version(value: object) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or int(value) != int(CONTROL_PROTOCOL_VERSION)
-    ):
+    if isinstance(value, bool) or not isinstance(value, int) or int(value) != int(CONTROL_PROTOCOL_VERSION):
         legacy_note = (
-            " Protocol V1 is intentionally refused because it has no "
-            "authenticated UDP session token."
+            " Protocol V1 is intentionally refused because it has no authenticated UDP session token."
             if value == 1
             else ""
         )
         raise ControlProtocolError(
-            f"unsupported control protocol version {value!r}; "
-            f"expected {CONTROL_PROTOCOL_VERSION}.{legacy_note}"
+            f"unsupported control protocol version {value!r}; expected {CONTROL_PROTOCOL_VERSION}.{legacy_note}",
+            refused=True,
         )
     return int(value)
 

@@ -59,12 +59,17 @@ def _validate_config(config: OpusConfig) -> None:
         raise TypeError("complexity must be an integer")
     if not 0 <= config.complexity <= 10:
         raise ValueError("Opus complexity must be between 0 and 10")
-    if isinstance(config.decoder_complexity, bool) or not isinstance(
-        config.decoder_complexity, int
-    ):
+    if isinstance(config.decoder_complexity, bool) or not isinstance(config.decoder_complexity, int):
         raise TypeError("decoder_complexity must be an integer")
     if not 0 <= config.decoder_complexity <= 10:
         raise ValueError("Opus decoder complexity must be between 0 and 10")
+
+
+def opuslib_version() -> str:
+    """Version of the installed opuslib binding, for diagnostics."""
+    import opuslib
+
+    return str(getattr(opuslib, "__version__", ""))
 
 
 @dataclass
@@ -95,9 +100,7 @@ class OpusEncoder:
     def encode(self, frame_f32: np.ndarray) -> bytes:
         frame = np.asarray(frame_f32)
         if frame.ndim != 1 or frame.shape != (self.config.frame_samples,):
-            raise ValueError(
-                f"Opus input must be mono with shape ({self.config.frame_samples},)"
-            )
+            raise ValueError(f"Opus input must be mono with shape ({self.config.frame_samples},)")
         if frame.dtype.kind != "f":
             raise TypeError("Opus input samples must use a floating-point dtype")
         if not np.isfinite(frame).all():
@@ -128,26 +131,24 @@ class OpusDecoder:
         try:
             self._decoder = opuslib.Decoder(self.config.sample_rate, self.config.channels)
             self._opus_decoder_api = opus_decoder_api
-            decoder_state = getattr(self._decoder, "decoder_state", None)
-            if decoder_state is None:
+            # The native state drives Deep PLC; without it the decoder is unusable.
+            self._decoder_state = getattr(self._decoder, "decoder_state", None)
+            if self._decoder_state is None:
                 raise RuntimeError("opuslib decoder does not expose its native state")
             opus_decoder_api.decoder_ctl(
-                decoder_state,
+                self._decoder_state,
                 opus_ctl_api.set_complexity,
                 self.config.decoder_complexity,
             )
             configured_complexity = opus_decoder_api.decoder_ctl(
-                decoder_state,
+                self._decoder_state,
                 opus_ctl_api.get_complexity,
             )
             if int(configured_complexity) != int(self.config.decoder_complexity):
-                raise RuntimeError(
-                    "libopus did not apply the requested decoder complexity"
-                )
+                raise RuntimeError("libopus did not apply the requested decoder complexity")
         except Exception as e:
             raise RuntimeError(
-                "failed to initialize the Deep PLC Opus decoder "
-                "(libopus 1.5+ built with Deep PLC is required)"
+                "failed to initialize the Deep PLC Opus decoder (libopus 1.5+ built with Deep PLC is required)"
             ) from e
 
     def decode(self, payload: bytes) -> np.ndarray:
@@ -158,18 +159,15 @@ class OpusDecoder:
             raise ValueError("Opus payload exceeds the 1275-byte codec limit")
 
         if not payload:
-            dec_state = getattr(self._decoder, "decoder_state", None)
-            if dec_state is not None:
-                pcm = self._opus_decoder_api.decode(
-                    dec_state,
-                    None,
-                    0,
-                    self.config.frame_samples,
-                    decode_fec=False,
-                    channels=self.config.channels,
-                )
-            else:
-                pcm = self._decoder.decode(b"", self.config.frame_samples, decode_fec=False)
+            # Packet-loss concealment: a null packet makes libopus run Deep PLC.
+            pcm = self._opus_decoder_api.decode(
+                self._decoder_state,
+                None,
+                0,
+                self.config.frame_samples,
+                decode_fec=False,
+                channels=self.config.channels,
+            )
         else:
             pcm = self._decoder.decode(payload, self.config.frame_samples, decode_fec=False)
 

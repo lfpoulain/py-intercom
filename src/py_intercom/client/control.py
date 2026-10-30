@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import random
 import socket
 import threading
 import time
 
 from loguru import logger
 
+from ..common.audio import clamp_gain_db
 from ..common.constants import (
     CTRL_LIVENESS_TIMEOUT_S,
     CTRL_PING_INTERVAL_S,
-    MAX_GAIN_DB,
+    CTRL_RECONNECT_MAX_S,
+    CTRL_RECONNECT_MIN_S,
 )
 from ..common.control_protocol import (
     CONTROL_PROTOCOL_VERSION,
@@ -23,6 +26,17 @@ from ..common.control_protocol import (
 )
 from ..common.logging import best_effort
 
+_MAX_SERVER_MESSAGE_CHARS = 300
+
+
+class ControlRefused(Exception):
+    """The server refused this station's hello for good (``"retry": false``).
+
+    A refusal names what the station must fix (protocol version, identity,
+    name), none of which can change while it is connected: retrying would
+    only repeat it, so the control loop gives up until the operator reconnects.
+    """
+
 
 class ControlMixin:
     def _control_send(self, sock: socket.socket, msg: dict) -> None:
@@ -32,7 +46,9 @@ class ControlMixin:
 
     def _control_send_state(self) -> None:
         sock = self._ctrl_sock
-        if sock is None or not self._ctrl_connected:
+        # Never before the hello: the server would refuse the session. The full
+        # state is sent once the config arrives, so no change is lost.
+        if sock is None or not self._ctrl_received_config:
             return
         with self._state_lock:
             input_gain_db = float(self._input_gain_db)
@@ -79,16 +95,25 @@ class ControlMixin:
         stop_event: threading.Event | None = None,
         udp_ready: threading.Event | None = None,
     ) -> None:
-        if generation is not None:
-            event = self._stop if stop_event is None else stop_event
-            if not self._network_is_current(event, int(generation)):
-                return
+        event = self._stop if stop_event is None else stop_event
+        if generation is not None and not self._network_is_current(event, int(generation)):
+            return
         mtype = str(msg.get("type") or "").lower()
+        if mtype == "error":
+            # Shown to the operator: bounded so a broken server cannot flood the dialog.
+            reason = str(msg.get("message") or "").strip()[:_MAX_SERVER_MESSAGE_CHARS] or "aucun motif donné"
+            if not self._ctrl_received_welcome and msg.get("retry") is False:
+                raise ControlRefused(reason)
+            # A transient error (server busy or stopping, slow hello): the
+            # server closes this session right after and the loop reconnects.
+            logger.warning("control error from server: {}", reason)
+            return
         if mtype == "kick":
-            with best_effort("record kick message"):
-                with self._state_lock:
-                    self._kicked = True
-                    self._kick_message = str(msg.get("message") or "Tu as été kick")
+            kick_message = str(msg.get("message") or "Tu as été kick")[:_MAX_SERVER_MESSAGE_CHARS]
+            logger.warning("session closed by the server (kick): {}", kick_message)
+            with self._state_lock:
+                self._kicked = True
+                self._kick_message = kick_message
             # Defer disconnect to a separate thread to avoid deadlock:
             # we are ON the control thread, so calling disconnect_network()
             # here would try to join the control thread from itself.
@@ -105,7 +130,10 @@ class ControlMixin:
                 )
             require_control_protocol_version(msg.get("version"))
             session_token = parse_session_token(msg.get("session_token"))
-            self._activate_session_token(int(session_token))
+            if not self._activate_session_token(int(session_token), event):
+                # A disconnect ran since the check above and already reset
+                # the session: this generation is over.
+                return
             self._ctrl_received_welcome = True
         elif mtype == "welcome":
             raise ControlProtocolError("received duplicate welcome")
@@ -122,52 +150,20 @@ class ControlMixin:
                 if not self._ctrl_received_config and "buses" not in cfg:
                     raise ControlProtocolError("initial config is missing buses")
                 if "input_gain_db" in cfg:
-                    with best_effort("apply server input gain"):
-                        with self._state_lock:
-                            self._input_gain_db = max(-60.0, min(float(MAX_GAIN_DB), float(cfg.get("input_gain_db"))))
-                if "buses" in cfg:
-                    buses = cfg.get("buses")
-                    if not isinstance(buses, (list, dict)):
-                        raise ControlProtocolError("config buses must be a list or object")
-                    with best_effort("parse server bus list"):
-                        parsed: dict[int, dict] = {}
-                        if isinstance(buses, list):
-                            for b in buses:
-                                if not isinstance(b, dict):
-                                    continue
-                                try:
-                                    bid = int(b.get("bus_id"))
-                                except (TypeError, ValueError):
-                                    continue
-                                parsed[int(bid)] = {
-                                    "bus_id": int(bid),
-                                    "name": str(b.get("name") or f"Bus {int(bid)}"),
-                                    "feed_to_regie": bool(b.get("feed_to_regie", False)),
-                                }
-                        elif isinstance(buses, dict):
-                            for k, b in buses.items():
-                                if not isinstance(b, dict):
-                                    continue
-                                try:
-                                    bid = int(k)
-                                except (TypeError, ValueError):
-                                    continue
-                                parsed[int(bid)] = {
-                                    "bus_id": int(bid),
-                                    "name": str(b.get("name") or f"Bus {int(bid)}"),
-                                    "feed_to_regie": bool(b.get("feed_to_regie", False)),
-                                }
-                        self._ctrl_buses = parsed
+                    with self._state_lock:
+                        self._input_gain_db = clamp_gain_db(cfg.get("input_gain_db"), default=self._input_gain_db)
+                # The buses are the fixed catalog: their entries are not used,
+                # but a config that breaks their shape breaks the protocol.
+                if "buses" in cfg and not isinstance(cfg.get("buses"), list):
+                    raise ControlProtocolError("config buses must be a list")
                 if "return_vu_dbfs" in cfg:
                     with best_effort("read return VU from config"):
                         with self._state_lock:
                             self._return_vu_dbfs = float(cfg.get("return_vu_dbfs"))
                 if not bool(self._ctrl_received_config):
-                    # No audio from the previous control session is allowed to
-                    # survive into this one.  RX is gated until this reset has
-                    # completed and a real server config was received.
-                    with best_effort("_jb.reset()"):
-                        self._jb.reset()
+                    # No audio from the previous control session survives into
+                    # this one: the welcome emptied every audio queue when it
+                    # activated the token, and RX stays gated until this point.
                     self._ctrl_received_config = True
                     ready_event = self._udp_ready if udp_ready is None else udp_ready
                     ready_event.set()
@@ -186,35 +182,39 @@ class ControlMixin:
         generation: int,
         udp_ready: threading.Event,
     ) -> None:
-        backoff_s = 1.0
-        liveness_timeout_s = CTRL_LIVENESS_TIMEOUT_S
-        ping_interval_s = CTRL_PING_INTERVAL_S
+        server = f"{self._server_addr[0]}:{int(self.config.control_port or 0)}"
+        backoff_s = CTRL_RECONNECT_MIN_S
+        # While the server is down the same failure repeats every couple of
+        # seconds: the file log keeps its first occurrence only.
+        last_failure = ""
 
         while self._network_is_current(stop_event, generation):
             sock: socket.socket | None = None
+            connected = False
+            refused = False
+            failure = ""
+            failure_level = "INFO"
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(1.0)
-                sock.connect((self.config.server_ip, int(self.config.control_port or 0)))
-                if not self._network_is_current(stop_event, generation):
-                    continue
-                sock.settimeout(0.02)
-                self._reset_session_token()
+                # Published before connect() so that a disconnect can close it
+                # and wake this thread at once, not after the connect timeout.
                 with self._network_state_lock:
-                    if (
-                        int(self._network_generation) != int(generation)
-                        or self._stop is not stop_event
-                        or stop_event.is_set()
-                    ):
+                    if not self._network_is_current_locked(stop_event, generation):
                         continue
                     self._ctrl_sock = sock
+                sock.connect((self._server_addr[0], int(self.config.control_port or 0)))
+                sock.settimeout(0.02)
+                with self._network_state_lock:
+                    if not self._network_is_current_locked(stop_event, generation):
+                        continue
                     self._ctrl_connected = True
                     self._ctrl_received_welcome = False
                     self._ctrl_received_config = False
                     udp_ready.clear()
                     self._ctrl_last_rx_monotonic = time.monotonic()
                     self._ctrl_last_tx_monotonic = time.monotonic()
-                backoff_s = 1.0
+                connected = True
 
                 hello = {
                     "type": "hello",
@@ -228,25 +228,31 @@ class ControlMixin:
                 self._control_send(sock, hello)
 
                 parser = JsonLineBuffer()
+                welcomed = False
+                end_reason = ""
                 while self._network_is_current(stop_event, generation):
                     now = time.monotonic()
-                    if now - float(self._ctrl_last_rx_monotonic) >= float(liveness_timeout_s):
-                        logger.debug("control liveness timeout (no rx for {:.1f}s)", float(liveness_timeout_s))
+                    silent_s = now - float(self._ctrl_last_rx_monotonic)
+                    if silent_s >= float(CTRL_LIVENESS_TIMEOUT_S):
+                        end_reason = f"liveness lost, nothing received for {silent_s:.1f} s"
                         break
-                    if now - float(self._ctrl_last_tx_monotonic) >= float(ping_interval_s):
+                    if now - float(self._ctrl_last_tx_monotonic) >= float(CTRL_PING_INTERVAL_S):
                         try:
-                            self._control_send(sock, {"type": "ping", "t": int(time.time() * 1000)})
-                            self._ctrl_last_tx_monotonic = now
-                        except Exception:
+                            self._control_send(sock, {"type": "ping"})
+                        except OSError as e:
+                            end_reason = f"ping failed: {e}"
                             break
+                        self._ctrl_last_tx_monotonic = now
 
                     try:
                         chunk = sock.recv(4096)
-                        if not chunk:
-                            break
                     except TimeoutError:
                         continue
-                    except OSError:
+                    except OSError as e:
+                        end_reason = f"connection lost: {e}"
+                        break
+                    if not chunk:
+                        end_reason = "closed by the server"
                         break
 
                     for msg in parser.feed(chunk):
@@ -257,19 +263,37 @@ class ControlMixin:
                             stop_event=stop_event,
                             udp_ready=udp_ready,
                         )
+                    if not welcomed and self._ctrl_received_welcome:
+                        # Only a welcome proves the server accepts this
+                        # station: until then the backoff keeps growing.
+                        welcomed = True
+                        backoff_s = CTRL_RECONNECT_MIN_S
+                        last_failure = ""
+                        logger.info("control session established with {}", server)
+                if end_reason and not stop_event.is_set():
+                    if welcomed:
+                        logger.info("control session with {} ended: {}", server, end_reason)
+                    else:
+                        # A server dropping every hello would repeat this.
+                        failure = f"no welcome, {end_reason}"
 
+            except ControlRefused as e:
+                with self._network_state_lock:
+                    refused = self._network_is_current_locked(stop_event, generation)
+                    if refused:
+                        self._ctrl_refusal = str(e)
+                if refused:
+                    logger.warning("control refused by {}, not retrying: {}", server, e)
             except ControlProtocolError as e:
-                if not stop_event.is_set():
-                    logger.warning("control protocol error, reconnecting: {}", e)
+                failure, failure_level = f"protocol error: {e}", "WARNING"
             except Exception as e:
-                if not stop_event.is_set():
-                    logger.debug("control loop error: {}", e)
+                failure = f"{type(e).__name__}: {e}"
             finally:
                 udp_ready.clear()
-                self._reset_session_token()
-                if self._network_is_current(stop_event, generation):
-                    with best_effort("_jb.reset()"):
-                        self._jb.reset()
+                if connected and self._network_is_current(stop_event, generation):
+                    # The connection dropped on its own. On a disconnect,
+                    # _stop_network has already reset the session.
+                    self._reset_session_token()
                 with best_effort("close control socket"):
                     if sock is not None:
                         sock.close()
@@ -281,8 +305,16 @@ class ControlMixin:
                         self._ctrl_received_welcome = False
                         self._ctrl_received_config = False
 
-            if not self._network_is_current(stop_event, generation):
+            if refused or not self._network_is_current(stop_event, generation):
                 break
-            if stop_event.wait(backoff_s):
+            if failure:
+                if failure != last_failure:
+                    logger.log(failure_level, "control connection to {} failed, retrying: {}", server, failure)
+                    last_failure = failure
+                else:
+                    logger.debug("control connection to {} failed again: {}", server, failure)
+            # The jitter keeps every client from retrying in lockstep after a
+            # server restart.
+            if stop_event.wait(backoff_s * random.uniform(0.8, 1.2)):
                 break
-            backoff_s = min(backoff_s * 2.0, 10.0)
+            backoff_s = min(backoff_s * 2.0, CTRL_RECONNECT_MAX_S)

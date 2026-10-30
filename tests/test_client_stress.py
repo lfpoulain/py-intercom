@@ -139,9 +139,7 @@ def test_client_rings_remain_bounded_and_drop_oldest_under_load(stress_client):
         metadata = client._playout_ring.pop_into(output)
         assert metadata is not None
         playout_metadata.append(metadata)
-    assert playout_metadata == list(
-        range(frame_count - client._playout_ring.capacity, frame_count)
-    )
+    assert playout_metadata == list(range(frame_count - client._playout_ring.capacity, frame_count))
 
 
 def test_rapid_ptt_and_epoch_changes_never_send_an_old_frame(
@@ -200,7 +198,7 @@ def test_rapid_ptt_and_epoch_changes_never_send_an_old_frame(
     for change in range(1, 51):
         final_token = SESSION_TOKEN + change
         final_bus = bus_ids[change % len(bus_ids)]
-        client._activate_session_token(final_token)
+        client._activate_session_token(final_token, client._stop)
         with client._state_lock:
             client._ptt_buses = {final_bus: True}
         frame.fill(float(change) / 100.0)

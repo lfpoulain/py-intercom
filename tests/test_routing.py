@@ -7,13 +7,13 @@ import pytest
 
 from py_intercom.common.buses import (
     FIXED_BUS_IDS,
+    FIXED_BUS_MASK,
     PLATEAU_BUS_ID,
     REGIE_BUS_ID,
     VMIX_BUS_ID,
 )
 from py_intercom.common.constants import FRAME_SAMPLES
 from py_intercom.common.routing import (
-    VALID_BUS_MASK,
     RoutedSource,
     RoutingConfig,
     RoutingError,
@@ -97,7 +97,7 @@ def test_multi_ptt_routes_every_physical_bus_but_direct_regie_is_monitored_once(
         },
         feed_to_regie={PLATEAU_BUS_ID: True, VMIX_BUS_ID: True},
     )
-    source = RoutedSource(client_id=9, frame=_frame(0.25), bus_mask=VALID_BUS_MASK)
+    source = RoutedSource(client_id=9, frame=_frame(0.25), bus_mask=FIXED_BUS_MASK)
 
     result = route_sources([source], config)
 

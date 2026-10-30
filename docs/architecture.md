@@ -48,7 +48,7 @@ src/py_intercom/
 │   ├── routing.py           routeur pur et mix-minus
 │   ├── theme.py             thème Qt : couleurs, style, interrupteurs
 │   ├── console.py           widgets console : vu-mètres LED, faders, pads, tranches
-│   └── gui_utils.py         helpers Qt
+│   └── gui_utils.py         inventaire audio hors thread Qt, icône, lancement des fenêtres
 ├── server/
 │   ├── server.py            IntercomServer : état partagé, cycle de vie, snapshots
 │   ├── control.py           sessions TCP : hello/welcome, état, config
@@ -176,6 +176,7 @@ Le serveur garde des `ClientProfile` légers pour les clients hors ligne ; codec
 - Une erreur dans un chemin temps réel incrémente un **compteur** exposé dans les diagnostics, et le traitement passe au silence.
 - Une opération non critique (fermer un socket, rafraîchir un widget) passe par `best_effort("action")` : l'erreur est journalisée, jamais propagée.
 - Ruff (`S110`, `S112`) interdit un `except` qui avale une erreur sans trace.
+- L'inventaire des périphériques tourne hors du thread Qt (`DeviceRefresh`, commun aux deux fenêtres). Un pilote peut y rester bloqué : après 5 s, la fenêtre l'indique mais attend toujours, et un inventaire tardif reste utilisé. Une fermeture demandée pendant l'inventaire attend sa fin, ou au plus ces 5 s ; au-delà, la fenêtre libère tout ce qui ne passe pas par PortAudio, enregistre son preset, puis `run_window()` vide les logs et termine le processus sans détruire le thread bloqué.
 
 ## Limites actuelles
 

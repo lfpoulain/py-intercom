@@ -10,6 +10,7 @@ import sounddevice as sd
 from loguru import logger
 
 from ..common import opus_codec
+from ..common.audio import clamp_gain_db
 from ..common.buses import FIXED_BUS_IDS
 from ..common.constants import (
     AUDIO_UDP_PORT,
@@ -17,7 +18,6 @@ from ..common.constants import (
     FRAME_SAMPLES,
     JB_START_FRAMES,
     LATENCY_TRIM_AFTER_FRAMES,
-    MAX_GAIN_DB,
     PCM_RING_TRIM_ABOVE_FRAMES,
     SAMPLE_RATE,
 )
@@ -35,6 +35,16 @@ _TX_METADATA_BUS_MASK = (1 << _TX_METADATA_BUS_BITS) - 1
 _AUDIO_SESSION_EPOCH_MASK = (1 << (63 - _TX_METADATA_BUS_BITS)) - 1
 
 
+@dataclass(frozen=True, slots=True)
+class ClientMeterLevels:
+    """Meter levels in dBFS: capture, headphones, Return and the capture level per talked-to bus."""
+
+    input_dbfs: float
+    output_dbfs: float
+    return_dbfs: float
+    bus_dbfs: dict[int, float]
+
+
 @dataclass
 class ClientConfig:
     server_ip: str
@@ -48,8 +58,6 @@ class ClientConfig:
     input_gain_db: float = 0.0
     output_gain_db: float = 0.0
     return_gain_db: float = 0.0
-
-    ptt_bus_keys: dict | None = None
 
     listen_return_bus: bool = False
     listen_regie: bool = True
@@ -70,34 +78,21 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         if self.config.control_port is None:
             self.config.control_port = int(self.config.server_port) + int(CONTROL_PORT_OFFSET)
 
+        # Fail fast when libopus is unusable. The TX and playout workers own
+        # their codecs and create a fresh pair for every audio session.
+        opus_codec.OpusEncoder()
+        opus_codec.OpusDecoder()
+        self._opuslib_version = opus_codec.opuslib_version()
+
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         with best_effort("_sock.setsockopt()"):
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
         self._sock.bind(("0.0.0.0", 0))
-        self._server_addr = (self.config.server_ip, int(self.config.server_port))
-        self._expected_server_udp_ips: frozenset[str] = frozenset()
-        self._refresh_expected_server_udp_sources()
+        self._resolve_server_address()
         self._sock.settimeout(0.5)
 
-        self._enc = opus_codec.OpusEncoder()
-        self._dec = opus_codec.OpusDecoder()
-
         self._jb = new_realtime_jitter_buffer()
-
-        self._opus_ok: bool = True
-        self._opus_err: str = ""
-        self._opuslib_version: str = ""
-        try:
-            import opuslib  # type: ignore
-
-            self._opuslib_version = str(getattr(opuslib, "__version__", ""))
-            test_payload = self._enc.encode(np.zeros((FRAME_SAMPLES,), dtype=np.float32))
-            test_frame = self._dec.decode(test_payload)
-            self._opus_ok = bool(getattr(test_frame, "shape", None) is not None and int(test_frame.shape[0]) == int(FRAME_SAMPLES))
-        except Exception as e:
-            self._opus_ok = False
-            self._opus_err = str(e)
 
         self._seq = 0
         # Only the TX worker may touch the stateful encoder, sequence number or
@@ -117,7 +112,6 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
             trim_after=LATENCY_TRIM_AFTER_FRAMES,
         )
         self._capture_work = np.empty((int(FRAME_SAMPLES),), dtype=np.float32)
-        self._capture_abs_work = np.empty((int(FRAME_SAMPLES),), dtype=np.float32)
         self._output_work = np.empty((int(FRAME_SAMPLES),), dtype=np.float32)
         self._silence_frame = np.zeros((int(FRAME_SAMPLES),), dtype=np.float32)
 
@@ -134,53 +128,25 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         self._kick_message: str = ""
 
         self._state_lock = threading.Lock()
-        self._input_gain_db = max(
-            -60.0,
-            min(float(MAX_GAIN_DB), float(self.config.input_gain_db)),
-        )
-        self._output_gain_db = max(
-            -60.0,
-            min(float(MAX_GAIN_DB), float(self.config.output_gain_db)),
-        )
-        self._return_gain_db = float(self.config.return_gain_db)
+        self._input_gain_db = clamp_gain_db(self.config.input_gain_db)
+        self._output_gain_db = clamp_gain_db(self.config.output_gain_db)
+        self._return_gain_db = clamp_gain_db(self.config.return_gain_db)
         self._in_vu_dbfs = -60.0
         self._out_vu_dbfs = -60.0
         self._return_vu_dbfs = -60.0
-        self._bus_vu_dbfs: dict[int, float] = {
-            int(bus_id): -60.0 for bus_id in FIXED_BUS_IDS
-        }
+        self._bus_vu_dbfs: dict[int, float] = {int(bus_id): -60.0 for bus_id in FIXED_BUS_IDS}
 
-        self._in_channels = 1
-        self._out_channels = 1
-
-        self._in_samplerate = SAMPLE_RATE
-        self._out_samplerate = SAMPLE_RATE
-
-        self._tx_packets = 0
-        self._tx_udp_sent = 0
-        self._rx_packets = 0
-        self._opus_encode_errors = 0
-        self._opus_decode_errors = 0
-        self._tx_socket_errors = 0
-        self._rx_socket_errors = 0
-        self._rx_source_dropped = 0
-        self._rx_not_ready_dropped = 0
-        self._rx_invalid_packets = 0
-        self._rx_invalid_tokens = 0
-        self._rx_invalid_directions = 0
-        self._rx_invalid_route_masks = 0
-        self._last_udp_rx_monotonic = 0.0
-        self._playout_underflows = 0
+        # Sound card counters live as long as the audio streams; the network
+        # counters restart with each network session.
         self._input_callback_statuses = 0
         self._output_callback_statuses = 0
+        self._input_callback_errors = 0
+        self._output_callback_errors = 0
+        self._input_callback_error_streak = 0
+        self._output_callback_error_streak = 0
         self._input_frame_mismatches = 0
         self._output_frame_mismatches = 0
-        self._tx_worker_failures = 0
-        self._playout_worker_failures = 0
-        self._opus_encoder_resets = 0
-        self._opus_decoder_resets = 0
-        self._opus_encoder_reset_errors = 0
-        self._opus_decoder_reset_errors = 0
+        self._reset_network_counters()
         self._last_stats_log = time.monotonic()
 
         self._in_stream: sd.InputStream | None = None
@@ -196,8 +162,9 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         self._ctrl_connected: bool = False
         self._ctrl_last_rx_monotonic: float = 0.0
         self._ctrl_last_tx_monotonic: float = 0.0
-        self._ctrl_buses: dict[int, dict] = {}
         self._ctrl_received_welcome: bool = False
+        # Why the server refused this station's hello; empty unless refused.
+        self._ctrl_refusal: str = ""
         self._ctrl_received_config: bool = False
         self._session_token: int = 0
 
@@ -207,70 +174,35 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         self._duck_return: bool = bool(self.config.duck_return)
 
     def get_stats_snapshot(self) -> dict:
-        with self._state_lock:
-            tx_ring_stats = self._tx_ring.stats
-            playout_ring_stats = self._playout_ring.stats
-            capture_samples = int(tx_ring_stats.depth) * int(FRAME_SAMPLES)
-            playback_samples = int(playout_ring_stats.depth) * int(FRAME_SAMPLES)
-            try:
-                jitter_buffered_frames = int(self._jb.buffered_frames)
-            except Exception:
-                jitter_buffered_frames = 0
-            jitter_trimmed = int(self._jb.stats.trimmed)
+        # Thread and PortAudio queries can release the GIL: they are gathered
+        # before taking the state lock.
+        tx_ring_stats = self._tx_ring.stats
+        playout_ring_stats = self._playout_ring.stats
+        jitter_buffered_frames = self._jb.buffered_frames
+        control_worker_alive = bool(self._ctrl_thread is not None and self._ctrl_thread.is_alive())
+        rx_worker_alive = bool(self._rx_thread is not None and self._rx_thread.is_alive())
+        tx_worker_alive = bool(self._tx_thread is not None and self._tx_thread.is_alive())
+        playout_worker_alive = bool(self._playout_thread is not None and self._playout_thread.is_alive())
+        network_workers_alive = bool(
+            control_worker_alive and rx_worker_alive and tx_worker_alive and playout_worker_alive
+        )
+        in_stream_active = self._stream_is_active(self._in_stream)
+        out_stream_active = self._stream_is_active(self._out_stream)
 
-            ctrl_age_s = (
-                max(0.0, time.monotonic() - float(self._ctrl_last_rx_monotonic)) if self._ctrl_connected else None
-            )
-            ctrl_tx_age_s = (
-                max(0.0, time.monotonic() - float(self._ctrl_last_tx_monotonic)) if self._ctrl_connected else None
-            )
+        with self._state_lock:
+            now = time.monotonic()
+            ctrl_age_s = max(0.0, now - float(self._ctrl_last_rx_monotonic)) if self._ctrl_connected else None
+            ctrl_tx_age_s = max(0.0, now - float(self._ctrl_last_tx_monotonic)) if self._ctrl_connected else None
             udp_rx_age_s = (
-                max(0.0, time.monotonic() - float(self._last_udp_rx_monotonic))
-                if float(self._last_udp_rx_monotonic) > 0.0
-                else None
+                max(0.0, now - float(self._last_udp_rx_monotonic)) if float(self._last_udp_rx_monotonic) > 0.0 else None
             )
-            control_worker_alive = bool(
-                self._ctrl_thread is not None and self._ctrl_thread.is_alive()
-            )
-            rx_worker_alive = bool(
-                self._rx_thread is not None and self._rx_thread.is_alive()
-            )
-            tx_worker_alive = bool(
-                self._tx_thread is not None and self._tx_thread.is_alive()
-            )
-            playout_worker_alive = bool(
-                self._playout_thread is not None and self._playout_thread.is_alive()
-            )
-            network_workers_alive = bool(
-                control_worker_alive
-                and rx_worker_alive
-                and tx_worker_alive
-                and playout_worker_alive
-            )
-            try:
-                in_stream_active = bool(self._in_stream is not None and self._in_stream.active)
-            except Exception:
-                in_stream_active = False
-            try:
-                out_stream_active = bool(self._out_stream is not None and self._out_stream.active)
-            except Exception:
-                out_stream_active = False
 
             return {
                 "input_gain_db": self._input_gain_db,
                 "output_gain_db": self._output_gain_db,
                 "return_gain_db": self._return_gain_db,
-                "in_vu_dbfs": self._in_vu_dbfs,
-                "out_vu_dbfs": self._out_vu_dbfs,
-                "return_vu_dbfs": self._return_vu_dbfs,
-                "in_channels": self._in_channels,
-                "out_channels": self._out_channels,
-                "in_samplerate": self._in_samplerate,
-                "out_samplerate": self._out_samplerate,
-                "capture_samples": int(capture_samples),
-                "playback_samples": int(playback_samples),
                 "jitter_buffered_frames": int(jitter_buffered_frames),
-                "jitter_trimmed": jitter_trimmed,
+                "jitter_trimmed": int(self._jb.stats.trimmed),
                 "tx_ring_depth": int(tx_ring_stats.depth),
                 "tx_ring_pushed": int(tx_ring_stats.pushed),
                 "tx_ring_popped": int(tx_ring_stats.popped),
@@ -296,9 +228,10 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
                 "rx_invalid_directions": int(self._rx_invalid_directions),
                 "rx_invalid_route_masks": int(self._rx_invalid_route_masks),
                 "udp_rx_age_s": udp_rx_age_s,
-                "playout_underflows": int(self._playout_underflows),
                 "input_callback_statuses": int(self._input_callback_statuses),
                 "output_callback_statuses": int(self._output_callback_statuses),
+                "input_callback_errors": int(self._input_callback_errors),
+                "output_callback_errors": int(self._output_callback_errors),
                 "input_frame_mismatches": int(self._input_frame_mismatches),
                 "output_frame_mismatches": int(self._output_frame_mismatches),
                 "tx_worker_failures": int(self._tx_worker_failures),
@@ -307,8 +240,9 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
                 "opus_decoder_resets": int(self._opus_decoder_resets),
                 "opus_encoder_reset_errors": int(self._opus_encoder_reset_errors),
                 "opus_decoder_reset_errors": int(self._opus_decoder_reset_errors),
-                "opus_ok": bool(self._opus_ok),
-                "opus_err": str(self._opus_err),
+                # libopus worked when the client was built; this session's
+                # workers have not failed to create a codec since.
+                "opus_ok": self._opus_encoder_reset_errors == 0 and self._opus_decoder_reset_errors == 0,
                 "opuslib_version": str(self._opuslib_version),
                 "stopped": bool(self._stop.is_set()),
                 "fully_stopped": bool(self._fully_stopped),
@@ -316,10 +250,9 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
                 "kick_message": str(self._kick_message),
                 "control_connected": bool(self._ctrl_connected),
                 "control_welcome_received": bool(self._ctrl_received_welcome),
+                "control_refusal": str(self._ctrl_refusal),
                 "control_ready": bool(
-                    self._ctrl_received_config
-                    and int(self._session_token) != 0
-                    and self._udp_ready.is_set()
+                    self._ctrl_received_config and int(self._session_token) != 0 and self._udp_ready.is_set()
                 ),
                 "control_age_s": ctrl_age_s,
                 "control_tx_age_s": ctrl_tx_age_s,
@@ -331,21 +264,26 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
                 "in_stream_active": in_stream_active,
                 "out_stream_active": out_stream_active,
                 "ptt_buses": dict(self._ptt_buses),
-                "bus_vu_dbfs": dict(self._bus_vu_dbfs),
                 "listen_return_bus": bool(self._listen_return_bus),
                 "listen_regie": bool(self._listen_regie),
                 "duck_return": bool(self._duck_return),
-                "buses": {
-                    str(int(bid)): {
-                        "bus_id": int(bid),
-                        "name": str(b.get("name") or f"Bus {int(bid)}"),
-                        "feed_to_regie": bool(b.get("feed_to_regie", False)),
-                    }
-                    for bid, b in self._ctrl_buses.items()
-                    if isinstance(b, dict)
-                },
                 "name": str(self.config.name or ""),
             }
+
+    def meter_levels(self) -> ClientMeterLevels:
+        """Current meter levels, read without any lock (GUI meters refresh at 15 Hz).
+
+        Each level is a float attribute, or an item of a dict that is never
+        resized, written by the audio callbacks or the control thread: reading
+        one is atomic under the GIL. The full snapshot would take the locks
+        the callbacks use, for the sake of four numbers.
+        """
+        return ClientMeterLevels(
+            input_dbfs=float(self._in_vu_dbfs),
+            output_dbfs=float(self._out_vu_dbfs),
+            return_dbfs=float(self._return_vu_dbfs),
+            bus_dbfs=dict(self._bus_vu_dbfs),
+        )
 
     def set_ptt_bus(self, bus_id: int, active: bool) -> None:
         with self._state_lock:
@@ -369,19 +307,16 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
 
     def set_input_gain_db(self, gain_db: float) -> None:
         with self._state_lock:
-            self._input_gain_db = max(-60.0, min(float(MAX_GAIN_DB), float(gain_db)))
+            self._input_gain_db = clamp_gain_db(gain_db, default=self._input_gain_db)
         self._control_send_state()
 
     def set_output_gain_db(self, gain_db: float) -> None:
         with self._state_lock:
-            self._output_gain_db = max(
-                -60.0,
-                min(float(MAX_GAIN_DB), float(gain_db)),
-            )
+            self._output_gain_db = clamp_gain_db(gain_db, default=self._output_gain_db)
 
     def set_return_gain_db(self, gain_db: float) -> None:
         with self._state_lock:
-            self._return_gain_db = float(gain_db)
+            self._return_gain_db = clamp_gain_db(gain_db, default=self._return_gain_db)
         self._control_send_state()
 
     @staticmethod
@@ -408,9 +343,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         )
 
     def _advance_audio_session_epoch_locked(self) -> int:
-        epoch = (int(self._audio_session_epoch) + 1) & int(
-            _AUDIO_SESSION_EPOCH_MASK
-        )
+        epoch = (int(self._audio_session_epoch) + 1) & int(_AUDIO_SESSION_EPOCH_MASK)
         self._audio_session_epoch = 1 if epoch == 0 else int(epoch)
         return int(self._audio_session_epoch)
 
@@ -423,33 +356,62 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
             with best_effort("_jb.reset()"):
                 self._jb.reset()
 
-    def _activate_session_token(self, session_token: int) -> None:
+    def _activate_session_token(self, session_token: int, stop_event: threading.Event) -> bool:
+        """Open the audio session of a welcome, unless its network generation is stopping.
+
+        _stop_network sets ``stop_event`` before it resets the session under
+        ``_tx_lock``. Checked under that lock, a welcome racing a disconnect
+        either lands before that reset or is refused: it never re-arms the
+        token after it.
+        """
         token = int(session_token)
         if token <= 0 or token > 0xFFFFFFFFFFFFFFFF:
             raise ValueError("session_token must be a non-zero uint64")
         with self._tx_lock:
+            if stop_event.is_set():
+                return False
             self._advance_audio_session_epoch_locked()
             self._session_token = token
             self._tx_ring.clear()
             self._playout_ring.clear()
             with best_effort("_jb.reset()"):
                 self._jb.reset()
+        return True
+
+    def _reset_network_counters(self) -> None:
+        self._tx_packets = 0
+        self._tx_udp_sent = 0
+        self._rx_packets = 0
+        self._opus_encode_errors = 0
+        self._opus_decode_errors = 0
+        self._tx_socket_errors = 0
+        self._rx_socket_errors = 0
+        self._rx_source_dropped = 0
+        self._rx_not_ready_dropped = 0
+        self._rx_invalid_packets = 0
+        self._rx_invalid_tokens = 0
+        self._rx_invalid_directions = 0
+        self._rx_invalid_route_masks = 0
+        self._tx_worker_failures = 0
+        self._playout_worker_failures = 0
+        self._opus_encoder_resets = 0
+        self._opus_decoder_resets = 0
+        self._opus_encoder_reset_errors = 0
+        self._opus_decoder_reset_errors = 0
+        self._last_udp_rx_monotonic = 0.0
+
+    def _network_is_current_locked(self, stop_event: threading.Event, generation: int) -> bool:
+        return int(self._network_generation) == int(generation) and self._stop is stop_event and not stop_event.is_set()
 
     def _network_is_current(self, stop_event: threading.Event, generation: int) -> bool:
         with self._network_state_lock:
-            return (
-                int(self._network_generation) == int(generation)
-                and self._stop is stop_event
-                and not stop_event.is_set()
-            )
+            return self._network_is_current_locked(stop_event, generation)
 
     def _start_network_threads(self) -> None:
         """Start a fresh, isolated network generation."""
         with self._network_lifecycle_lock:
             if self._fully_stopped:
-                raise RuntimeError(
-                    "a fully stopped IntercomClient cannot be restarted; create a new instance"
-                )
+                raise RuntimeError("a fully stopped IntercomClient cannot be restarted; create a new instance")
             with self._network_state_lock:
                 old_threads = (
                     self._rx_thread,
@@ -460,10 +422,11 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
             if any(t is not None and t.is_alive() for t in old_threads):
                 raise RuntimeError("previous network workers are still running")
 
-            self._refresh_expected_server_udp_sources()
+            # The audio session is already empty: either this client is new or
+            # _stop_network reset it. Only the socket backlog is left.
+            self._resolve_server_address()
             self._drain_udp_socket()
-            self._reset_session_token()
-            self._last_udp_rx_monotonic = 0.0
+            self._reset_network_counters()
 
             stop_event = threading.Event()
             udp_ready = threading.Event()
@@ -475,6 +438,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
                 self._ctrl_connected = False
                 self._ctrl_received_welcome = False
                 self._ctrl_received_config = False
+                self._ctrl_refusal = ""
                 rx_thread = threading.Thread(
                     target=self._rx_loop,
                     args=(stop_event, generation, udp_ready),
@@ -527,11 +491,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
 
     def start(self) -> None:
         if self._fully_stopped:
-            raise RuntimeError(
-                "a fully stopped IntercomClient cannot be restarted; create a new instance"
-            )
-        with best_effort("sd.stop()"):
-            sd.stop()
+            raise RuntimeError("a fully stopped IntercomClient cannot be restarted; create a new instance")
 
         logger.info(
             "client starting: server={}:{} in_dev={} out_dev={} sr={} frame={}",
@@ -546,24 +506,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         self._start_network_threads()
 
         try:
-            # Opening the microphone first is significant for Bluetooth
-            # headsets: Windows establishes the bidirectional HFP profile when
-            # capture starts.  Playback is opened only after that transition,
-            # so it cannot be an already-running A2DP stream invalidated by the
-            # profile switch.
-            self._in_stream = self._open_input_stream()
-            self._start_audio_stream(
-                self._in_stream,
-                kind="input",
-                device=self.config.input_device,
-            )
-
-            self._out_stream = self._open_output_stream()
-            self._start_audio_stream(
-                self._out_stream,
-                kind="output",
-                device=self.config.output_device,
-            )
+            self._start_audio_streams()
         except Exception:
             # Full rollback: no half-open capture/playback stream and no
             # network generation may survive a failed audio transaction.
@@ -588,13 +531,19 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
 
             self._reset_session_token()
 
-            # Closing/shutting down TCP wakes recv immediately.  The UDP socket
-            # intentionally remains open so reconnect reuses its local port.
+            # Closing/shutting down TCP wakes recv or connect immediately. The
+            # UDP socket intentionally remains open so reconnect reuses its
+            # local port: a datagram sent to that port wakes recvfrom instead
+            # (any leftover is drained by the next session).
             if ctrl_sock is not None:
                 with best_effort("ctrl_sock.shutdown()"):
                     ctrl_sock.shutdown(socket.SHUT_RDWR)
                 with best_effort("ctrl_sock.close()"):
                     ctrl_sock.close()
+            if rx_thread is not None and rx_thread.is_alive():
+                with best_effort("wake udp-rx"):
+                    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as waker:
+                        waker.sendto(b"\0", ("127.0.0.1", int(self._sock.getsockname()[1])))
 
             deadline = time.monotonic() + 3.0
             for thread in (ctrl_thread, rx_thread, tx_thread, playout_thread):
@@ -641,39 +590,25 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         self._stop_network()
 
     def reconnect_network(self) -> None:
-        """Reconnect to server (network only). Audio streams and UDP socket stay alive."""
+        """Reconnect to the server, reusing the UDP socket and its local port.
+
+        Running audio streams are kept. A stream that died (device unplugged,
+        Bluetooth profile switch, ...) never comes back by itself, so both
+        streams are reopened first.
+        """
         with self._network_lifecycle_lock:
             if self._fully_stopped:
-                raise RuntimeError(
-                    "a fully stopped IntercomClient cannot be reconnected; create a new instance"
-                )
+                raise RuntimeError("a fully stopped IntercomClient cannot be reconnected; create a new instance")
             if not self._stop_network():
                 raise RuntimeError("cannot reconnect while previous network workers are still running")
 
-            # Reuse the UDP socket and its ephemeral port, but never its queued
-            # packets or the state of the previous playout session.
-            self._server_addr = (self.config.server_ip, int(self.config.server_port))
-            self._tx_ring.clear()
-            self._playout_ring.clear()
-            with best_effort("_jb.reset()"):
-                self._jb.reset()
+            if self._in_stream is not None and not self.audio_streams_active():
+                logger.warning("audio streams inactive: reopening them before reconnecting")
+                self._close_audio_streams()
+                self._start_audio_streams()
 
             self._kicked = False
             self._kick_message = ""
-            self._ctrl_buses = {}
-            self._tx_packets = 0
-            self._tx_udp_sent = 0
-            self._rx_packets = 0
-            self._tx_socket_errors = 0
-            self._rx_socket_errors = 0
-            self._rx_source_dropped = 0
-            self._rx_not_ready_dropped = 0
-            self._rx_invalid_packets = 0
-            self._rx_invalid_tokens = 0
-            self._rx_invalid_directions = 0
-            self._rx_invalid_route_masks = 0
-            self._last_udp_rx_monotonic = 0.0
-
             self._start_network_threads()
 
         logger.info("network reconnected to {}:{}", self.config.server_ip, self.config.server_port)
@@ -690,13 +625,5 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
             # start, so it must leave no PortAudio handle behind.
             with best_effort("_sock.close()"):
                 self._sock.close()
-
-            # Reverse startup order.  In particular, keep Bluetooth
-            # capture/HFP active until its matching playback endpoint has
-            # been closed.
-            out_stream, self._out_stream = self._out_stream, None
-            in_stream, self._in_stream = self._in_stream, None
-            self._close_audio_stream(out_stream)
-            self._close_audio_stream(in_stream)
+            self._close_audio_streams()
             self._fully_stopped = True
-

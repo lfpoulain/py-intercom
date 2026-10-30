@@ -9,6 +9,8 @@ from typing import Final
 import numpy as np
 import numpy.typing as npt
 
+from .constants import JB_BURST_EXCESS_FRAMES, JB_BURST_TRIM_AFTER_FRAMES
+
 Float32Frame = npt.NDArray[np.float32]
 
 _INT64_MIN: Final[int] = -(1 << 63)
@@ -80,6 +82,7 @@ class FrameRingBuffer:
         self._trim_above = None if trim_above is None else max(0, int(trim_above))
         self._trim_after = self._positive_index(trim_after, name="trim_after")
         self._excess_pops = 0
+        self._burst_pops = 0
 
         self._condition = threading.Condition(threading.Lock())
 
@@ -109,9 +112,7 @@ class FrameRingBuffer:
         if frame.dtype != np.float32:
             raise TypeError("frame dtype must be float32")
         if frame.ndim != 1 or frame.shape[0] != self.frame_samples:
-            raise ValueError(
-                f"frame must have shape ({self.frame_samples},), got {frame.shape}"
-            )
+            raise ValueError(f"frame must have shape ({self.frame_samples},), got {frame.shape}")
         return frame
 
     def _validate_output(self, output: object) -> Float32Frame:
@@ -179,15 +180,27 @@ class FrameRingBuffer:
     def _trim_excess_locked(self) -> None:
         if self._trim_above is None:
             return
-        if self._depth <= self._trim_above:
+        excess = self._depth - self._trim_above
+        if excess <= 0:
             self._excess_pops = 0
+            self._burst_pops = 0
             return
+        # Same policy as the jitter buffer: one frame per sustained excess
+        # absorbs clock drift, a lasting burst (producer catching up after a
+        # stall) is dropped at once instead of over several seconds.
         self._excess_pops += 1
-        if self._excess_pops >= self._trim_after:
-            self._read_index = (self._read_index + 1) % self.capacity
-            self._depth -= 1
-            self._trimmed += 1
-            self._excess_pops = 0
+        self._burst_pops = self._burst_pops + 1 if excess > JB_BURST_EXCESS_FRAMES else 0
+        if self._burst_pops >= JB_BURST_TRIM_AFTER_FRAMES:
+            drop = excess
+        elif self._excess_pops >= self._trim_after:
+            drop = 1
+        else:
+            return
+        self._read_index = (self._read_index + drop) % self.capacity
+        self._depth -= drop
+        self._trimmed += drop
+        self._excess_pops = 0
+        self._burst_pops = 0
 
     def pop_into(self, output: Float32Frame) -> int | None:
         """Copy the oldest frame into ``output`` and return its metadata.
@@ -266,4 +279,5 @@ class FrameRingBuffer:
             self._write_index = 0
             self._depth = 0
             self._excess_pops = 0
+            self._burst_pops = 0
             return cleared

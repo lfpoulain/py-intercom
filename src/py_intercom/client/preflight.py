@@ -8,6 +8,7 @@ passes here will also open when connecting.
 
 from __future__ import annotations
 
+import itertools
 import math
 import socket
 import threading
@@ -26,12 +27,16 @@ from ..common.console import LevelMeter
 from ..common.constants import FRAME_SAMPLES, SAMPLE_RATE
 from ..common.logging import best_effort
 from ..common.theme import StatusIndicator
+from .hotkeys import _parse_qt_shortcut
 
 MIC_LISTEN_S = 4.0
 MIC_MIN_PEAK_DBFS = -45.0
 NETWORK_TIMEOUT_S = 1.5
 TONE_FREQUENCY_HZ = 1000.0
 TONE_AMPLITUDE = 0.125  # -18 dBFS
+TONE_ON_S = 0.3
+# One beep plus one pause: 28 800 samples, i.e. exactly 60 blocks of 10 ms.
+TONE_CYCLE_SAMPLES = int(round(2 * TONE_ON_S * SAMPLE_RATE))
 
 
 class Verdict(str, Enum):
@@ -71,20 +76,44 @@ def check_network(host: str, port: int, *, timeout_s: float = NETWORK_TIMEOUT_S)
     return CheckResult(Verdict.OK, f"Serveur joignable en {elapsed_ms:.0f} ms.")
 
 
+def _bus_name(bus_id: int) -> str:
+    return BUS_BY_ID[bus_id].name if bus_id in BUS_BY_ID else str(bus_id)
+
+
+def _also_fires(chord: list[frozenset[str]], pressed: list[frozenset[str]]) -> bool:
+    """Whether some way of holding ``pressed`` (one key per group) completes ``chord``.
+
+    Groups can overlap without being equal: "=" and "+" share a physical
+    key, and a digit matches both its row key and its keypad key.
+    """
+    return any(all(group & set(keys) for group in chord) for keys in itertools.product(*pressed))
+
+
 def check_shortcuts(shortcuts: Mapping[int, str]) -> CheckResult:
-    """Every bus may have a key; two buses must never share one."""
+    """Every bus may have a key; pressing one bus's key must never fire another.
+
+    The hotkey engine activates a chord as soon as all its keys are down,
+    whatever else is pressed: "A" also fires while "Ctrl+A" is held.
+    """
     assigned = {int(bus_id): str(key).strip() for bus_id, key in shortcuts.items() if str(key or "").strip()}
     if not assigned:
         return CheckResult(Verdict.WARNING, "Aucun raccourci PTT : seuls les boutons à l'écran permettront de parler.")
-    by_key: dict[str, list[str]] = {}
-    for bus_id, key in assigned.items():
-        by_key.setdefault(key.lower(), []).append(BUS_BY_ID[bus_id].name if bus_id in BUS_BY_ID else str(bus_id))
-    clashes = [f"{key.upper()} ({', '.join(buses)})" for key, buses in by_key.items() if len(buses) > 1]
+    chords = {bus_id: _parse_qt_shortcut(key) for bus_id, key in assigned.items()}
+    # An empty chord never fires, so it cannot clash with anything.
+    unsupported = [f"{_bus_name(bus_id)} = {assigned[bus_id]}" for bus_id in sorted(assigned) if not chords[bus_id]]
+    clashes = [
+        f"{_bus_name(a)} = {assigned[a]} et {_bus_name(b)} = {assigned[b]}"
+        for a, b in itertools.combinations(sorted(assigned), 2)
+        if chords[a] and chords[b] and (_also_fires(chords[a], chords[b]) or _also_fires(chords[b], chords[a]))
+    ]
+    problems = []
+    if unsupported:
+        problems.append("Raccourci non pris en charge : " + "; ".join(unsupported) + ".")
     if clashes:
-        return CheckResult(Verdict.ERROR, "Même touche sur plusieurs bus : " + "; ".join(clashes) + ".")
-    summary = ", ".join(
-        f"{BUS_BY_ID[bus_id].name if bus_id in BUS_BY_ID else bus_id} = {key}" for bus_id, key in sorted(assigned.items())
-    )
+        problems.append("Raccourcis qui déclenchent plusieurs bus à la fois : " + "; ".join(clashes) + ".")
+    if problems:
+        return CheckResult(Verdict.ERROR, " ".join(problems))
+    summary = ", ".join(f"{_bus_name(bus_id)} = {key}" for bus_id, key in sorted(assigned.items()))
     return CheckResult(Verdict.OK, summary)
 
 
@@ -102,7 +131,7 @@ def microphone_verdict(peak_dbfs: float) -> CheckResult:
 def tone_frame(phase: int) -> np.ndarray:
     """One 10 ms frame of a beep pattern: 300 ms tone, 300 ms silence."""
     t = (np.arange(FRAME_SAMPLES) + phase) / SAMPLE_RATE
-    gate = (np.floor(t / 0.3) % 2 == 0).astype(np.float32)
+    gate = (np.floor(t / TONE_ON_S) % 2 == 0).astype(np.float32)
     return (TONE_AMPLITUDE * gate * np.sin(2.0 * np.pi * TONE_FREQUENCY_HZ * t)).astype(np.float32)
 
 
@@ -169,6 +198,9 @@ class TonePlayer:
     """Plays the beep pattern on the selected headphones."""
 
     def __init__(self, device: int) -> None:
+        # Precomputed so the callback only copies samples: no allocation in
+        # the real-time thread. 1 kHz fits the cycle exactly: no click.
+        self._cycle = np.concatenate([tone_frame(phase) for phase in range(0, TONE_CYCLE_SAMPLES, FRAME_SAMPLES)])
         self._phase = 0
         try:
             dev_info = sd.query_devices(int(device))
@@ -189,8 +221,9 @@ class TonePlayer:
         if int(frames) != FRAME_SAMPLES:
             outdata.fill(0.0)
             return
-        outdata[:, 0] = tone_frame(self._phase)
-        self._phase += FRAME_SAMPLES
+        start = self._phase
+        np.copyto(outdata[:, 0], self._cycle[start : start + FRAME_SAMPLES])
+        self._phase = (start + FRAME_SAMPLES) % TONE_CYCLE_SAMPLES
 
     def close(self) -> None:
         with best_effort("close preflight tone"):
@@ -420,7 +453,10 @@ class PreflightDialog(QtWidgets.QDialog):
         self._microphone = None
         self._tone = None
 
-    def closeEvent(self, event) -> None:  # noqa: N802
+    def done(self, result: int) -> None:
+        # Escape, the Close button and the window cross all end here (Qt no
+        # longer sends closeEvent on Escape): never leave the microphone open
+        # or the beep playing behind a hidden dialog.
         self._timer.stop()
         self._release_audio()
-        super().closeEvent(event)
+        super().done(result)

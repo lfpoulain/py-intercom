@@ -16,7 +16,6 @@ class ServerHealthState(str, Enum):
 
 class ClientTransportState(str, Enum):
     OFFLINE = "offline"
-    WAITING_UDP = "waiting_udp"
     IDLE = "idle"
     ACTIVE = "active"
     DEGRADED = "degraded"
@@ -46,12 +45,14 @@ def derive_client_transport_state(
     *,
     udp_recent_threshold_s: float = 1.0,
 ) -> ClientTransportState:
-    """Separate normal silence from an actual loss of live UDP audio."""
+    """Separate normal silence from an actual loss of live UDP audio.
+
+    The hello declares the client's UDP endpoint, so a client whose control
+    session is open always has one: there is no "waiting for UDP" state.
+    """
 
     if client.get("control_connected") is not True:
         return ClientTransportState.OFFLINE
-    if not client.get("addr"):
-        return ClientTransportState.WAITING_UDP
 
     ptt_buses_raw = client.get("ptt_buses")
     ptt_buses = ptt_buses_raw if isinstance(ptt_buses_raw, Mapping) else {}
@@ -81,9 +82,7 @@ def derive_server_operational_health(
     worker_alive = worker_alive_raw if isinstance(worker_alive_raw, Mapping) else {}
     worker_errors_raw = stats.get("worker_errors")
     worker_errors = worker_errors_raw if isinstance(worker_errors_raw, Mapping) else {}
-    dead_workers = sorted(
-        name for name in _EXPECTED_SERVER_WORKERS if worker_alive.get(name) is not True
-    )
+    dead_workers = sorted(name for name in _EXPECTED_SERVER_WORKERS if worker_alive.get(name) is not True)
 
     if not running:
         engine = HealthFacet(
@@ -96,10 +95,7 @@ def derive_server_operational_health(
         if dead_workers:
             details.append("workers absents : " + ", ".join(dead_workers))
         if worker_errors:
-            details.append(
-                "erreurs : "
-                + "; ".join(f"{name}: {error}" for name, error in worker_errors.items())
-            )
+            details.append("erreurs : " + "; ".join(f"{name}: {error}" for name, error in worker_errors.items()))
         engine = HealthFacet(
             ServerHealthState.ERROR,
             "Moteur : erreur",
@@ -126,56 +122,30 @@ def derive_server_operational_health(
         ),
     )
 
-    try:
-        waiting_udp = int(stats.get("clients_waiting_udp", 0))
-    except (TypeError, ValueError):
-        waiting_udp = 0
-    connected_snapshots = 0
+    # The UDP view is derived from the clients snapshot alone, never compared
+    # with a count taken from another snapshot: that raced with every
+    # connection and flashed false alerts.
     associated_udp = 0
     active_udp = 0
     stale_active_udp = 0
     for client in clients.values():
-        if client.get("control_connected") is not True:
-            continue
-        connected_snapshots += 1
         transport_state = derive_client_transport_state(
             client,
             udp_recent_threshold_s=udp_recent_threshold_s,
         )
-        if transport_state in {
-            ClientTransportState.IDLE,
-            ClientTransportState.ACTIVE,
-            ClientTransportState.DEGRADED,
-        }:
-            associated_udp += 1
+        if transport_state is ClientTransportState.OFFLINE:
+            continue
+        associated_udp += 1
         if transport_state is ClientTransportState.ACTIVE:
             active_udp += 1
         elif transport_state is ClientTransportState.DEGRADED:
             stale_active_udp += 1
 
-    missing_snapshots = max(0, connected_count - connected_snapshots)
-    missing_associations = max(0, connected_count - associated_udp)
-    if (
-        waiting_udp > 0
-        or missing_snapshots > 0
-        or missing_associations > 0
-        or stale_active_udp > 0
-    ):
-        details = []
-        if waiting_udp > 0 or missing_associations > 0:
-            details.append(
-                f"{max(waiting_udp, missing_associations)} client(s) attendent l'association UDP"
-            )
-        if missing_snapshots > 0:
-            details.append(f"{missing_snapshots} état(s) client manquant(s)")
-        if stale_active_udp > 0:
-            details.append(
-                f"{stale_active_udp} client(s) en parole n'envoient plus d'audio récent"
-            )
+    if stale_active_udp > 0:
         udp = HealthFacet(
             ServerHealthState.DEGRADED,
-            f"UDP : {associated_udp}/{connected_count}",
-            "; ".join(details) + ".",
+            f"UDP : {associated_udp - stale_active_udp}/{associated_udp}",
+            f"{stale_active_udp} client(s) en parole n'envoient plus d'audio récent.",
         )
     else:
         udp = HealthFacet(
@@ -206,9 +176,7 @@ def derive_server_operational_health(
     return_enabled = stats.get("return_enabled") is True
     return_active_known = "return_stream_active" in stats
     return_inactive = return_enabled and stats.get("return_stream_active") is not True
-    return_error = (
-        str(stats.get("return_stream_error") or "") if return_enabled else ""
-    )
+    return_error = str(stats.get("return_stream_error") or "") if return_enabled else ""
     if not outputs:
         audio = HealthFacet(
             ServerHealthState.DEGRADED,
@@ -218,9 +186,7 @@ def derive_server_operational_health(
     elif explicit_output_errors or inactive_outputs or return_inactive or return_error:
         details = list(explicit_output_errors)
         if inactive_outputs:
-            details.append(
-                "streams inactifs : " + ", ".join(str(i) for i in inactive_outputs)
-            )
+            details.append("streams inactifs : " + ", ".join(str(i) for i in inactive_outputs))
         if return_inactive:
             details.append("entrée Return inactive")
         if return_error:
@@ -250,10 +216,7 @@ def derive_server_operational_health(
             "Erreur opérationnelle",
             "Au moins un composant critique est en erreur.",
         )
-    elif any(
-        facet.state in {ServerHealthState.DEGRADED, ServerHealthState.UNKNOWN}
-        for facet in facets
-    ):
+    elif any(facet.state in {ServerHealthState.DEGRADED, ServerHealthState.UNKNOWN} for facet in facets):
         overall = HealthFacet(
             ServerHealthState.DEGRADED,
             "En service dégradé",

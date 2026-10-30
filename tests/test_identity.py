@@ -53,3 +53,9 @@ def test_collision_report_is_deterministic_and_ignores_duplicates(monkeypatch) -
 def test_collision_report_rejects_non_string_values() -> None:
     with pytest.raises(TypeError, match="strings"):
         find_client_id_collisions(["ok", 3])
+
+
+def test_uuid_that_cannot_be_encoded_maps_to_the_reserved_id() -> None:
+    assert client_id_from_uuid("bad-\ud800-uuid") == 0
+    with pytest.raises(ClientIdentityError, match="reserved"):
+        validate_client_identity(0, "bad-\ud800-uuid")

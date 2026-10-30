@@ -50,6 +50,9 @@ def _device_label(dev_info: dict | None, fallback: int | None) -> str:
 
 
 def looks_like_bluetooth(dev_info: dict | None) -> bool:
+    # Only markers that wired USB headsets never carry: "headset" and brands
+    # that also sell USB models (Jabra, Bose, JBL...) would mislead the
+    # operator during an incident.
     if not isinstance(dev_info, dict):
         return False
     name = str(dev_info.get("name") or "").lower()
@@ -60,17 +63,11 @@ def looks_like_bluetooth(dev_info: dict | None) -> bool:
         "hands free",
         "mains-libres",
         "mains libres",
-        "headset",
         "hfp",
         "airpods",
+        "buds",
         "wh-",
         "wf-",
-        "bose",
-        "jabra",
-        "baseus",
-        "bowie",
-        "buds",
-        "jbl",
     )
     return any(n in name for n in needles)
 
@@ -109,9 +106,7 @@ def friendly_audio_open_error(
             f"{sr} Hz requise par py-intercom."
         )
     elif "invalid channel count" in lower or "-9998" in lower:
-        pa_hint = (
-            f"Le périphérique « {label} » ne supporte pas {ch} canal en {role}."
-        )
+        pa_hint = f"Le périphérique « {label} » ne supporte pas {ch} canal en {role}."
     elif "invalid device" in lower or "-9996" in lower:
         pa_hint = f"Le périphérique de {role} sélectionné est introuvable ou indisponible."
     elif "device unavailable" in lower or "unanticipated host error" in lower or "-9999" in lower:

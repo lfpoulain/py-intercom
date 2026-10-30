@@ -21,11 +21,24 @@ SERVER_MIX_QUEUE_MAX = 20  # mixer -> broadcast queue (~200 ms)
 SERVER_RETURN_FRAMES_MAX = 20  # Return bus input queue (~200 ms)
 SERVER_OUT_MAX_BUFFER_S = 0.2  # queue in front of each physical output
 # Latency cap: when a queue stays above its target for this many consecutive
-# frames (0.5 s), one frame is dropped. Clock drift between sound cards and
-# network bursts can therefore never leave a lasting delay behind.
+# frames (0.5 s), one frame is dropped. Clock drift between sound cards can
+# therefore never leave a lasting delay behind.
 LATENCY_TRIM_AFTER_FRAMES = 50
-JB_TRIM_ABOVE_FRAMES = JB_START_FRAMES + 1
-PCM_RING_TRIM_ABOVE_FRAMES = 2
+# Jitter buffer target: what is left after each pop in steady state.
+JB_TRIM_ABOVE_FRAMES = JB_START_FRAMES - 1
+# A network burst or a stalled reader leaves more than JB_BURST_EXCESS_FRAMES
+# above the target: once that lasts JB_BURST_TRIM_AFTER_FRAMES consecutive
+# pops, the whole excess is dropped at once. The delay outlasts the server
+# mixer's own catch-up (at most 100 ms), so a late reader is never starved.
+JB_BURST_EXCESS_FRAMES = 2
+JB_BURST_TRIM_AFTER_FRAMES = 10
+# A jitter buffer underrun is concealed for at most this many frames; after a
+# longer silence playout stops and resumes, without a new pre-buffer, from the
+# first frame that was missing.
+JB_MAX_CONCEALED_FRAMES = 2
+# One frame of margin against the phase jitter between a producer thread and
+# the sound card callback that reads the ring.
+PCM_RING_TRIM_ABOVE_FRAMES = 1
 
 # --- Return ducking (optional, per client) ---------------------------------
 RETURN_DUCK_DEPTH_DB = -15.0  # Return attenuation while voices are heard
@@ -36,7 +49,11 @@ RETURN_DUCK_RELEASE_DB_PER_FRAME = 0.5  # back to full level in 300 ms
 
 # --- Control plane (TCP) ----------------------------------------------------
 CTRL_LIVENESS_TIMEOUT_S = 6.0  # session expires after this long without traffic
-CTRL_PING_INTERVAL_S = 0.05
+CTRL_PING_INTERVAL_S = 0.1  # the pong carries the Return VU: 10 Hz keeps it fluid
+# Reconnection backoff of the client (±20 % jitter). A refused attempt is cheap
+# on a LAN, so a restarted server is found again within a few seconds.
+CTRL_RECONNECT_MIN_S = 1.0
+CTRL_RECONNECT_MAX_S = 2.0
 
 # --- Network ----------------------------------------------------------------
 AUDIO_UDP_PORT = 5000

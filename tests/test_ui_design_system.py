@@ -14,6 +14,7 @@ from py_intercom.common.console import (
     StripRack,
     TalkPad,
     chip,
+    compact_combo,
     format_db,
 )
 from py_intercom.common.theme import TOKENS, apply_theme, make_field
@@ -30,11 +31,9 @@ def qt_app() -> QtWidgets.QApplication:
 def test_field_factory_keeps_label_and_control_associated(qt_app) -> None:
     control = QtWidgets.QLineEdit()
 
-    field = make_field("ADRESSE SERVEUR", control, minimum_width=180)
+    field = make_field("ADRESSE SERVEUR", control)
     label = field.findChild(QtWidgets.QLabel)
 
-    assert field.property("role") == "field"
-    assert field.minimumWidth() == 180
     assert label is not None
     assert label.text() == "ADRESSE SERVEUR"
     assert label.property("role") == "fieldLabel"
@@ -130,6 +129,69 @@ def test_strip_rack_shows_its_empty_state_only_without_strips(qt_app) -> None:
     rack.close()
 
 
+def _wheel(widget: QtWidgets.QWidget, notches: int = -1) -> bool:
+    """Send one wheel notch; return whether the widget kept the event."""
+    pos = QtCore.QPointF(widget.width() / 2, widget.height() / 2)
+    event = QtGui.QWheelEvent(
+        pos,
+        QtCore.QPointF(widget.mapToGlobal(pos.toPoint())),
+        QtCore.QPoint(),
+        QtCore.QPoint(0, 120 * notches),
+        QtCore.Qt.MouseButton.NoButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+        QtCore.Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    QtWidgets.QApplication.sendEvent(widget, event)
+    return event.isAccepted()
+
+
+def test_wheel_only_acts_on_focused_faders_and_strip_combos(qt_app) -> None:
+    host = QtWidgets.QWidget()
+    lay = QtWidgets.QVBoxLayout(host)
+    elsewhere = QtWidgets.QLineEdit()
+    fader = Fader(-60, 20)
+    combo = compact_combo(QtWidgets.QComboBox())
+    combo.addItems(["Carte A", "Carte B"])
+    lay.addWidget(elsewhere)
+    lay.addWidget(fader)
+    lay.addWidget(combo)
+    host.resize(200, 300)
+    host.show()
+    host.activateWindow()
+    QtTest.QTest.qWaitForWindowActive(host)
+    elsewhere.setFocus()
+    assert not fader.hasFocus() and not combo.hasFocus()
+
+    # Hovering while scrolling must neither move a gain nor reroute a card;
+    # the ignored wheel goes on to the container (the strip rack scrolls).
+    assert not _wheel(fader)
+    assert not _wheel(combo)
+    assert fader.value() == 0
+    assert combo.currentIndex() == 0
+    assert not fader.hasFocus() and not combo.hasFocus()
+
+    fader.setFocus()
+    assert fader.hasFocus()
+    _wheel(fader)
+    assert fader.value() < 0
+    combo.setFocus()
+    _wheel(combo)
+    assert combo.currentIndex() == 1
+    host.close()
+
+
+def test_fader_repaints_only_when_its_colour_changes(qt_app) -> None:
+    fader = Fader()
+    repaints: list[bool] = []
+    fader.update = lambda: repaints.append(True)
+
+    fader.set_color("#ff0000")
+    fader.set_color("#ff0000")
+
+    assert repaints == [True]
+
+
 def test_db_readouts_are_signed() -> None:
     assert format_db(3) == "+3 dB"
     assert format_db(0) == "0 dB"
@@ -154,3 +216,20 @@ def test_server_console_splits_team_and_routing(qt_app, monkeypatch) -> None:
     assert window._start_btn.isVisibleTo(window) and not window._stop_btn.isVisibleTo(window)
 
     window.close()
+
+
+def test_talk_pad_press_survives_a_slide_off_and_back(qt_app) -> None:
+    pad = TalkPad("Plateau", "#fbbf24")
+    events: list[str] = []
+    pad.pressed.connect(lambda: events.append("pressed"))
+    pad.released.connect(lambda: events.append("released"))
+    pad.resize(200, 200)
+    pad.show()
+
+    QtTest.QTest.mousePress(pad, QtCore.Qt.MouseButton.LeftButton, pos=QtCore.QPoint(100, 100))
+    QtTest.QTest.mouseMove(pad, QtCore.QPoint(260, 100))
+    QtTest.QTest.mouseMove(pad, QtCore.QPoint(100, 100))
+    QtTest.QTest.mouseRelease(pad, QtCore.Qt.MouseButton.LeftButton, pos=QtCore.QPoint(100, 100))
+
+    assert events == ["pressed", "released"]
+    pad.close()

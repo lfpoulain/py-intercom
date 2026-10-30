@@ -6,6 +6,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 
+# A degraded chain must stay healthy this long before PTT is armed again, so a
+# link flapping around the UDP threshold cannot switch the microphones on and
+# off at every refresh.
+ONLINE_RECOVERY_HOLD_S = 0.5
+
 
 class ClientOperationalState(str, Enum):
     DISCONNECTED = "disconnected"
@@ -56,11 +61,7 @@ def derive_client_operational_status(
             missing.append("accueil serveur")
         elif not control_ready:
             missing.append("configuration audio")
-        state = (
-            ClientOperationalState.RECONNECTING
-            if ever_online
-            else ClientOperationalState.CONNECTING
-        )
+        state = ClientOperationalState.RECONNECTING if ever_online else ClientOperationalState.CONNECTING
         return ClientOperationalStatus(
             state,
             "Reconnexion…" if ever_online else "Connexion…",
@@ -68,12 +69,8 @@ def derive_client_operational_status(
         )
 
     workers_ok = _workers_are_alive(stats.get("network_workers_alive"))
-    input_stream_ok = stats.get(
-        "input_stream_active", stats.get("in_stream_active")
-    ) is True
-    output_stream_ok = stats.get(
-        "output_stream_active", stats.get("out_stream_active")
-    ) is True
+    input_stream_ok = stats.get("in_stream_active") is True
+    output_stream_ok = stats.get("out_stream_active") is True
     try:
         udp_age_s = float(stats.get("udp_rx_age_s"))
     except (TypeError, ValueError):
@@ -105,3 +102,36 @@ def derive_client_operational_status(
         "En ligne",
         "Contrôle, transport UDP et flux audio opérationnels.",
     )
+
+
+class OnlineRecoveryHysteresis:
+    """Keeps a DEGRADED client degraded until its chain has been healthy for a while.
+
+    Only the return from DEGRADED is delayed: going degraded, and coming
+    online after (re)connecting, are reported at once.
+    """
+
+    def __init__(self, hold_s: float = ONLINE_RECOVERY_HOLD_S) -> None:
+        self._hold_s = float(hold_s)
+        self._healthy_since: float | None = None
+
+    def apply(
+        self,
+        status: ClientOperationalStatus,
+        *,
+        previous: ClientOperationalState,
+        now: float,
+    ) -> ClientOperationalStatus:
+        if status.state is not ClientOperationalState.ONLINE or previous is not ClientOperationalState.DEGRADED:
+            self._healthy_since = None
+            return status
+        if self._healthy_since is None:
+            self._healthy_since = float(now)
+        if float(now) - self._healthy_since >= self._hold_s:
+            self._healthy_since = None
+            return status
+        return ClientOperationalStatus(
+            ClientOperationalState.DEGRADED,
+            "Dégradé",
+            "Liaison rétablie, vérification de sa stabilité. PTT suspendu.",
+        )

@@ -1,8 +1,21 @@
 from __future__ import annotations
 
-from PySide6 import QtCore
+import os
+import sys
+from collections.abc import Callable
+from pathlib import Path
+from typing import TypeVar
+
+from loguru import logger
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from .devices import list_devices
+from .logging import best_effort
+from .theme import apply_theme
+
+DEVICE_REFRESH_TIMEOUT_MS = 5000
+
+_Window = TypeVar("_Window", bound=QtWidgets.QWidget)
 
 
 class DeviceWorker(QtCore.QObject):
@@ -27,6 +40,177 @@ class DeviceWorker(QtCore.QObject):
             self.finished.emit(devs, "")
         except Exception as e:
             self.finished.emit([], str(e))
+
+
+class DeviceRefresh(QtCore.QObject):
+    """Runs one audio device inventory at a time, off the Qt thread, for a window.
+
+    PortAudio can stay blocked inside a driver. Past DEVICE_REFRESH_TIMEOUT_MS
+    the window is told (``timed_out``) and the wait cursor goes away, but the
+    inventory keeps running: a slow driver still delivers a usable, late result.
+
+    Closing the window while an inventory runs: before the timeout the close
+    waits for it (``close_must_wait``) and is replayed once it ends or times
+    out; after the timeout the thread is abandoned (``abandon``) to the
+    QApplication, and run_window() ends the process without destroying it,
+    because Qt aborts on the destruction of a running QThread.
+    """
+
+    # (devices, error), delivered on the Qt thread, never while a close waits.
+    inventory = QtCore.Signal(object, str)
+    timed_out = QtCore.Signal()
+    # The inventory thread ended: ``running`` is already False.
+    finished = QtCore.Signal()
+
+    def __init__(self, window: QtWidgets.QWidget) -> None:
+        super().__init__(window)
+        self._window = window
+        self._thread: QtCore.QThread | None = None
+        # The only reference to the parentless worker: it keeps it alive.
+        # Released by the next start(), long after its thread exited: freed
+        # here as the thread finishes, it would race the thread's own exit.
+        self._worker: DeviceWorker | None = None
+        self._timed_out = False
+        self._close_pending = False
+        self._abandoned = False
+        self._cursor_active = False
+        self._timeout = QtCore.QTimer(self)
+        self._timeout.setSingleShot(True)
+        self._timeout.timeout.connect(self._on_timeout)
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None
+
+    def start(self, hostapi_filter: str | None, *, hard_refresh: bool) -> None:
+        if self._thread is not None or self._abandoned:
+            return
+        self._timed_out = False
+        QtWidgets.QApplication.setOverrideCursor(QtGui.QCursor(QtCore.Qt.CursorShape.WaitCursor))
+        self._cursor_active = True
+
+        thread = QtCore.QThread(self)
+        worker = DeviceWorker(hostapi_filter=hostapi_filter, hard_refresh=hard_refresh)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_inventory)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(self._on_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._thread = thread
+        self._worker = worker
+
+        self._timeout.start(DEVICE_REFRESH_TIMEOUT_MS)
+        thread.start()
+
+    def close_must_wait(self) -> bool:
+        """For closeEvent: True while the close has to wait for the inventory."""
+        if self._thread is None or not self._thread.isRunning() or self._timed_out:
+            return False
+        self._close_pending = True
+        self._thread.requestInterruption()
+        return True
+
+    def abandon(self) -> bool:
+        """For closeEvent: hand a hung inventory thread over to the QApplication.
+
+        Returns True when one was still running: the window must then stay
+        away from PortAudio, which that thread may still hold.
+        """
+        if self._thread is None or not self._thread.isRunning():
+            return False
+        logger.warning("closing while the audio device enumeration is still blocked")
+        self._abandoned = True
+        self._timeout.stop()
+        self._thread.requestInterruption()
+        self._thread.setParent(QtWidgets.QApplication.instance())
+        self._restore_cursor()
+        return True
+
+    @QtCore.Slot(object, str)
+    def _on_inventory(self, devs, error: str) -> None:
+        if not self._close_pending and not self._abandoned:
+            self.inventory.emit(devs, error)
+
+    @QtCore.Slot()
+    def _on_timeout(self) -> None:
+        if self._thread is None:
+            return
+        logger.warning("audio device enumeration exceeds {} ms", DEVICE_REFRESH_TIMEOUT_MS)
+        self._timed_out = True
+        self._restore_cursor()
+        if self._close_pending:
+            QtCore.QTimer.singleShot(0, self._window.close)
+        else:
+            self.timed_out.emit()
+
+    @QtCore.Slot()
+    def _on_thread_finished(self) -> None:
+        if self._abandoned:
+            return
+        self._timeout.stop()
+        self._thread = None
+        self._restore_cursor()
+        if not self._close_pending:
+            self.finished.emit()
+        elif not self._timed_out:  # past the timeout, the close is already replayed
+            self._close_pending = False
+            QtCore.QTimer.singleShot(0, self._window.close)
+
+    def _restore_cursor(self) -> None:
+        if not self._cursor_active:
+            return
+        self._cursor_active = False
+        with best_effort("restore the device refresh cursor"):
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+
+def set_app_icon(window: QtWidgets.QWidget, app_user_model_id: str) -> None:
+    """Window and taskbar icon, from the sources or a PyInstaller bundle."""
+    with best_effort("set window icon"):
+        base = getattr(sys, "_MEIPASS", None)
+        if base:
+            candidates = [
+                Path(base) / "py_intercom" / "img" / "logo.ico",
+                Path(base) / "img" / "logo.ico",
+                Path(base) / "logo.ico",
+            ]
+        else:
+            img_dir = Path(__file__).resolve().parents[1] / "img"
+            candidates = [img_dir / "logo.ico", img_dir / "logo.png"]
+        icon_path = next((path for path in candidates if path.is_file()), None)
+        if icon_path is not None:
+            icon = QtGui.QIcon(str(icon_path))
+            window.setWindowIcon(icon)
+            app = QtWidgets.QApplication.instance()
+            if app is not None:
+                app.setWindowIcon(icon)
+    if sys.platform == "win32":
+        with best_effort("set Windows AppUserModelID"):
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_user_model_id)
+
+
+def run_window(make_window: Callable[[], _Window], start_minimized: Callable[[_Window], bool]) -> int:
+    """Runs a py-intercom window until it closes and returns the exit code."""
+    app = QtWidgets.QApplication(sys.argv)
+    apply_theme(app)
+    window = make_window()
+    if start_minimized(window):
+        window.showMinimized()
+    else:
+        window.show()
+    code = int(app.exec())
+    if any(thread.isRunning() for thread in app.findChildren(QtCore.QThread)):
+        # A device inventory abandoned by DeviceRefresh is still blocked in a
+        # driver: destroying its QThread would abort the process. The window
+        # already stopped the engine and flushed its preset.
+        logger.warning("exiting with an audio driver call still blocked")
+        with best_effort("flush logs"):
+            logger.complete()
+        os._exit(code)
+    return code
 
 
 def is_checked(state) -> bool:

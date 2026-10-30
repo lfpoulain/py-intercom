@@ -33,12 +33,16 @@ def _log_directory() -> Path:
 def setup_logging(debug: bool, component: str = "app") -> Path:
     logger.remove()
 
-    level = "DEBUG" if debug else "WARNING"
+    # The console stays quiet in production, but the file keeps the session
+    # history (connections, reconnections, liveness losses) needed to explain
+    # an incident after the show.
+    console_level = "DEBUG" if debug else "WARNING"
+    file_level = "DEBUG" if debug else "INFO"
     sink = sys.stderr if getattr(sys, "stderr", None) is not None else None
     if sink is None:
         sink = sys.stdout if getattr(sys, "stdout", None) is not None else None
     if sink is not None:
-        logger.add(sink, level=level, backtrace=bool(debug), diagnose=False)
+        logger.add(sink, level=console_level, backtrace=bool(debug), diagnose=False)
 
     safe_component = "".join(ch for ch in str(component) if ch.isalnum() or ch in "-_") or "app"
     log_dir = _log_directory()
@@ -47,7 +51,7 @@ def setup_logging(debug: bool, component: str = "app") -> Path:
         log_dir.mkdir(parents=True, exist_ok=True)
         logger.add(
             str(log_path),
-            level=level,
+            level=file_level,
             rotation="10 MB",
             retention="14 days",
             compression="zip",

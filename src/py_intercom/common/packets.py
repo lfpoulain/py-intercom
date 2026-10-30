@@ -1,8 +1,9 @@
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Final
+from typing import Any, Final
 
+from .buses import FIXED_BUS_MASK
 from .constants import (
     AUDIO_PACKET_DIRECTION_FLAGS,
     AUDIO_PACKET_FLAG_CLIENT_TO_SERVER,
@@ -30,9 +31,7 @@ class AudioPacketDirection(IntEnum):
     SERVER_TO_CLIENT = AUDIO_PACKET_FLAG_SERVER_TO_CLIENT
 
 
-_VALID_V2_DIRECTION_FLAGS: Final[frozenset[int]] = frozenset(
-    int(direction) for direction in AudioPacketDirection
-)
+_VALID_V2_DIRECTION_FLAGS: Final[frozenset[int]] = frozenset(int(direction) for direction in AudioPacketDirection)
 
 
 class AudioPacketValidationError(ValueError):
@@ -56,9 +55,36 @@ class AudioPacketV2:
     bus_mask: int
     payload: bytes
 
-    @property
-    def direction(self) -> AudioPacketDirection:
-        return AudioPacketDirection(self.flags)
+
+def is_valid_route(stream_id: int, bus_mask: int) -> bool:
+    """Whether a received datagram targets only buses of the fixed catalog.
+
+    The decoder accepts any 16-bit mask; a receiver applies this rule before
+    an audio frame can reach its jitter buffer.
+    """
+    return stream_id == AUDIO_PACKET_V2_RESERVED_STREAM_ID and bus_mask >= 0 and not bus_mask & ~FIXED_BUS_MASK
+
+
+# Windows reports these per datagram: they never mean the socket is broken.
+WSAEMSGSIZE = 10040  # oversized datagram, already discarded by the stack
+WSAENETRESET = 10052  # ICMP "TTL expired" for an earlier send
+WSAECONNRESET = 10054  # ICMP "port unreachable" for an earlier send
+
+
+def count_rejected_datagram(receiver: Any, reason: str) -> None:
+    """Count one datagram refused by ``unpack_audio_packet_v2`` on ``receiver``.
+
+    The client and the server keep the same ``_rx_invalid_*`` statistics:
+    sharing the classification keeps their diagnostics comparable.
+    """
+    if reason == "invalid_token":
+        receiver._rx_invalid_tokens += 1
+    elif reason == "invalid_direction":
+        receiver._rx_invalid_directions += 1
+    elif reason == "invalid_route":
+        receiver._rx_invalid_route_masks += 1
+    else:
+        receiver._rx_invalid_packets += 1
 
 
 def _require_uint(name: str, value: int, bits: int, *, nonzero: bool = False) -> int:
@@ -76,11 +102,7 @@ def _require_v2_direction(direction: AudioPacketDirection | int) -> int:
         flags = int(direction)
     except (TypeError, ValueError) as exc:
         raise ValueError("direction must be a valid AudioPacketDirection") from exc
-    if (
-        isinstance(direction, bool)
-        or flags & ~AUDIO_PACKET_DIRECTION_FLAGS
-        or flags not in _VALID_V2_DIRECTION_FLAGS
-    ):
+    if isinstance(direction, bool) or flags & ~AUDIO_PACKET_DIRECTION_FLAGS or flags not in _VALID_V2_DIRECTION_FLAGS:
         raise ValueError(
             "direction must contain exactly one supported direction flag "
             f"(0x{AUDIO_PACKET_FLAG_CLIENT_TO_SERVER:04x} or "
@@ -121,9 +143,7 @@ def pack_audio_packet_v2(
     sequence = _require_uint("sequence_number", sequence_number, 32)
     stream = _require_uint("stream_id", stream_id, 16)
     if stream != AUDIO_PACKET_V2_RESERVED_STREAM_ID:
-        raise ValueError(
-            f"stream_id is reserved in protocol V2 and must be {AUDIO_PACKET_V2_RESERVED_STREAM_ID}"
-        )
+        raise ValueError(f"stream_id is reserved in protocol V2 and must be {AUDIO_PACKET_V2_RESERVED_STREAM_ID}")
     routing_mask = _require_uint("bus_mask", bus_mask, 16)
     flags = _require_v2_direction(direction)
 
@@ -150,9 +170,7 @@ def unpack_audio_packet_v2(data: bytes) -> AudioPacketV2:
     except TypeError as exc:
         raise AudioPacketValidationError("invalid_packet", "packet must be bytes-like") from exc
     if packet_size < AUDIO_PACKET_V2_HEADER_BYTES:
-        raise AudioPacketValidationError(
-            "invalid_packet", f"packet too small for V2 header: {packet_size} bytes"
-        )
+        raise AudioPacketValidationError("invalid_packet", f"packet too small for V2 header: {packet_size} bytes")
     if packet_size > AUDIO_PACKET_V2_HEADER_BYTES + MAX_UDP_PAYLOAD_BYTES:
         raise AudioPacketValidationError("invalid_packet", f"packet too large: {packet_size} bytes")
 
@@ -170,16 +188,12 @@ def unpack_audio_packet_v2(data: bytes) -> AudioPacketV2:
             bus_mask,
         ) = _HEADER_V2_STRUCT.unpack_from(data, 0)
     except (struct.error, TypeError) as exc:
-        raise AudioPacketValidationError(
-            "invalid_packet", "packet does not contain a valid V2 header"
-        ) from exc
+        raise AudioPacketValidationError("invalid_packet", "packet does not contain a valid V2 header") from exc
 
     if magic != AUDIO_PACKET_V2_MAGIC:
         raise AudioPacketValidationError("invalid_packet", f"invalid audio packet magic: {magic!r}")
     if version != AUDIO_PACKET_V2_VERSION:
-        raise AudioPacketValidationError(
-            "invalid_packet", f"unsupported audio packet version: {version}"
-        )
+        raise AudioPacketValidationError("invalid_packet", f"unsupported audio packet version: {version}")
     if header_size != AUDIO_PACKET_V2_HEADER_BYTES:
         raise AudioPacketValidationError("invalid_packet", f"invalid V2 header size: {header_size}")
     try:

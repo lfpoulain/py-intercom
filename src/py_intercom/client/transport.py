@@ -19,40 +19,43 @@ from ..common.jitter_buffer import JitterFrameMetadata
 from ..common.logging import best_effort
 from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import (
+    WSAECONNRESET,
+    WSAEMSGSIZE,
+    WSAENETRESET,
     AudioPacketDirection,
     AudioPacketValidationError,
+    count_rejected_datagram,
+    is_valid_route,
     pack_audio_packet_v2,
     unpack_audio_packet_v2,
 )
 
 _PLAYOUT_FRAME_PERIOD_S = float(FRAME_SAMPLES) / float(SAMPLE_RATE)
+# A playout thread descheduled for longer than this many ticks drops them all
+# rather than bursting them into the sound card ring.
+_PLAYOUT_MAX_CATCH_UP_FRAMES = 4
 
 
 class TransportMixin:
-    def _count_invalid_audio_packet(self, reason: str) -> None:
-        if reason == "invalid_token":
-            self._rx_invalid_tokens += 1
-        elif reason == "invalid_direction":
-            self._rx_invalid_directions += 1
-        elif reason == "invalid_route":
-            self._rx_invalid_route_masks += 1
-        else:
-            self._rx_invalid_packets += 1
+    def _resolve_server_address(self) -> None:
+        """Resolve the configured server once per network session.
 
-    def _refresh_expected_server_udp_sources(self) -> None:
-        """Resolve the configured server once for strict UDP source checks."""
+        Audio and control then use the first IPv4 address, so the realtime TX
+        path never resolves a host name. Every resolved address is accepted
+        as a UDP source.
+        """
         host = str(self.config.server_ip or "").strip()
         port = int(self.config.server_port)
-        resolved: set[str] = set()
+        resolved: list[str] = []
         if host:
-            resolved.add(host)
-        try:
-            for info in socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_DGRAM):
-                sockaddr = info[4]
-                if isinstance(sockaddr, tuple) and sockaddr:
-                    resolved.add(str(sockaddr[0]))
-        except Exception as e:
-            logger.debug("could not resolve UDP server {}:{}: {}", host, port, e)
+            try:
+                for info in socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_DGRAM):
+                    address = str(info[4][0])
+                    if address not in resolved:
+                        resolved.append(address)
+            except (OSError, UnicodeError) as e:
+                logger.warning("could not resolve server {}:{}: {}", host, port, e)
+        self._server_addr = (resolved[0] if resolved else host, port)
         self._expected_server_udp_ips = frozenset(resolved)
 
     def _is_expected_udp_source(self, addr: tuple) -> bool:
@@ -142,7 +145,6 @@ class TransportMixin:
                         e,
                     )
                     continue
-                self._enc = encoder
                 encoder_epoch = int(session_epoch)
                 self._opus_encoder_resets += 1
 
@@ -201,6 +203,7 @@ class TransportMixin:
         """Own jitter playout and Opus decoding, publishing fixed PCM frames."""
 
         next_deadline = time.monotonic()
+        card_underflows = self._playout_ring.stats.underflows
         decoder: OpusDecoder | None = None
         decoder_epoch: int | None = None
         while self._network_is_current(stop_event, generation):
@@ -214,14 +217,21 @@ class TransportMixin:
             if now < next_deadline:
                 if stop_event.wait(next_deadline - now):
                     return
-            elif now - next_deadline > _PLAYOUT_FRAME_PERIOD_S * 4.0:
-                next_deadline = now
+                now = time.monotonic()
+            # Ticks missed while this thread was descheduled are made up back
+            # to back, except those the sound card has meanwhile played silence
+            # for: their frames would now only add delay to the ring. They stay
+            # in the jitter buffer instead, whose latency cap removes them.
+            previous_underflows = card_underflows
+            card_underflows = self._playout_ring.stats.underflows
+            missed = int((now - next_deadline) / _PLAYOUT_FRAME_PERIOD_S)
+            if missed > 0:
+                silenced = card_underflows - previous_underflows
+                dropped = missed if missed > _PLAYOUT_MAX_CATCH_UP_FRAMES else min(missed, silenced)
+                next_deadline += dropped * _PLAYOUT_FRAME_PERIOD_S
             next_deadline += _PLAYOUT_FRAME_PERIOD_S
 
-            if (
-                not self._network_is_current(stop_event, generation)
-                or not udp_ready.is_set()
-            ):
+            if not self._network_is_current(stop_event, generation) or not udp_ready.is_set():
                 continue
 
             try:
@@ -238,10 +248,7 @@ class TransportMixin:
                 session_epoch = int(self._audio_session_epoch)
             if session_token == 0:
                 continue
-            if (
-                not bool(jitter_frame.concealed)
-                and int(jitter_frame.metadata.session_token) != session_token
-            ):
+            if not bool(jitter_frame.concealed) and int(jitter_frame.metadata.session_token) != session_token:
                 continue
 
             if decoder is None or decoder_epoch != session_epoch:
@@ -257,14 +264,10 @@ class TransportMixin:
                         e,
                     )
                     continue
-                self._dec = decoder
                 decoder_epoch = int(session_epoch)
                 self._opus_decoder_resets += 1
 
-            decoded = self._decode_playout_frame(
-                jitter_frame.payload,
-                decoder=decoder,
-            )
+            decoded = self._decode_playout_frame(jitter_frame.payload, decoder)
 
             # Prevent a decode from the previous session from being published
             # after reconnect cleared the PCM ring.
@@ -290,9 +293,7 @@ class TransportMixin:
             self._rx_invalid_packets += 1
             return False
 
-        stream_id = int(getattr(pkt, "stream_id", -1))
-        bus_mask = int(getattr(pkt, "bus_mask", -1))
-        if stream_id != 0 or bus_mask < 0 or bus_mask & ~int(FIXED_BUS_MASK):
+        if not is_valid_route(int(getattr(pkt, "stream_id", -1)), int(getattr(pkt, "bus_mask", -1))):
             self._rx_invalid_route_masks += 1
             return False
 
@@ -300,20 +301,11 @@ class TransportMixin:
         payload = bytes(getattr(pkt, "payload", b""))
         with self._tx_lock:
             session_token = int(self._session_token)
-            if (
-                session_token == 0
-                or int(getattr(pkt, "session_token", 0)) != session_token
-            ):
+            if session_token == 0 or int(getattr(pkt, "session_token", 0)) != session_token:
                 self._rx_invalid_tokens += 1
                 return False
-            metadata = JitterFrameMetadata(
-                session_token=session_token,
-                client_id=int(pkt.client_id),
-                timestamp_ms=int(pkt.timestamp_ms),
-                stream_id=stream_id,
-                bus_mask=bus_mask,
-                flags=int(pkt.flags),
-            )
+            # Playout only checks the session; the downlink route is not used.
+            metadata = JitterFrameMetadata(session_token=session_token)
             try:
                 self._jb.push(seq, payload, metadata)
             except Exception:
@@ -336,9 +328,13 @@ class TransportMixin:
             except TimeoutError:
                 continue
             except OSError as e:
+                err_code = getattr(e, "winerror", None) or getattr(e, "errno", None)
+                if err_code == WSAEMSGSIZE:
+                    self._rx_invalid_packets += 1
+                    continue
                 self._rx_socket_errors += 1
-                err_code = getattr(e, 'winerror', None) or getattr(e, 'errno', None)
-                if err_code == 10054:
+                # Per-datagram reports: never pause reception.
+                if err_code in (WSAENETRESET, WSAECONNRESET):
                     continue
                 if stop_event.is_set() or not self._network_is_current(stop_event, generation):
                     return
@@ -358,7 +354,7 @@ class TransportMixin:
             try:
                 pkt = unpack_audio_packet_v2(data)
             except AudioPacketValidationError as exc:
-                self._count_invalid_audio_packet(exc.reason)
+                count_rejected_datagram(self, exc.reason)
                 continue
             except Exception:
                 self._rx_invalid_packets += 1
@@ -370,52 +366,44 @@ class TransportMixin:
             now = time.monotonic()
             if now - self._last_stats_log >= 5.0:
                 self._last_stats_log = now
-                try:
-                    playback_samples = int(self._jb.buffered_frames) * int(FRAME_SAMPLES)
-                except Exception:
-                    playback_samples = 0
-                try:
-                    jb_stats = self._jb.stats
-                    jb_buf = int(self._jb.buffered_frames)
-                except Exception:
-                    jb_stats = None
-                    jb_buf = 0
-                logger.debug(
-                    "stats: tx_pkts={} rx_pkts={} enc_err={} dec_err={} tx_sock_err={} rx_sock_err={} rx_source_drop={} rx_not_ready_drop={} rx_invalid={} rx_token={} rx_direction={} rx_route={} playback_samples={} jb_buf={} jb_missing={} jb_late_dropped={} jb_concealed={} playout_underflows={}",
-                    self._tx_packets,
-                    self._rx_packets,
-                    self._opus_encode_errors,
-                    self._opus_decode_errors,
-                    self._tx_socket_errors,
-                    self._rx_socket_errors,
-                    self._rx_source_dropped,
-                    self._rx_not_ready_dropped,
-                    self._rx_invalid_packets,
-                    self._rx_invalid_tokens,
-                    self._rx_invalid_directions,
-                    self._rx_invalid_route_masks,
-                    playback_samples,
-                    jb_buf,
-                    0 if jb_stats is None else int(jb_stats.missing),
-                    0 if jb_stats is None else int(jb_stats.late_dropped),
-                    0 if jb_stats is None else int(jb_stats.concealed),
-                    int(self._playout_underflows),
-                )
+                self._log_stats()
 
-    def _decode_playout_frame(
-        self,
-        payload: bytes,
-        *,
-        decoder: OpusDecoder | None = None,
-    ) -> np.ndarray:
+    def _log_stats(self) -> None:
+        jb_stats = self._jb.stats
+        logger.debug(
+            "stats: tx_pkts={} rx_pkts={} enc_err={} dec_err={} tx_sock_err={} rx_sock_err={} "
+            "rx_source_drop={} rx_not_ready_drop={} rx_invalid={} rx_token={} rx_direction={} rx_route={} "
+            "jb_buf={} jb_missing={} jb_late_dropped={} jb_concealed={} jb_trimmed={} jb_resets={} "
+            "playout_underflows={} in_callback_errors={} out_callback_errors={}",
+            self._tx_packets,
+            self._rx_packets,
+            self._opus_encode_errors,
+            self._opus_decode_errors,
+            self._tx_socket_errors,
+            self._rx_socket_errors,
+            self._rx_source_dropped,
+            self._rx_not_ready_dropped,
+            self._rx_invalid_packets,
+            self._rx_invalid_tokens,
+            self._rx_invalid_directions,
+            self._rx_invalid_route_masks,
+            self._jb.buffered_frames,
+            jb_stats.missing,
+            jb_stats.late_dropped,
+            jb_stats.concealed,
+            jb_stats.trimmed,
+            jb_stats.resets,
+            self._playout_ring.stats.underflows,
+            self._input_callback_errors,
+            self._output_callback_errors,
+        )
+
+    def _decode_playout_frame(self, payload: bytes, decoder: OpusDecoder) -> np.ndarray:
         """Decode exactly one protocol frame, failing to silence on mismatch."""
         try:
-            active_decoder = self._dec if decoder is None else decoder
-            decoded = np.asarray(active_decoder.decode(payload), dtype=np.float32)
+            decoded = np.asarray(decoder.decode(payload), dtype=np.float32)
             if decoded.ndim != 1 or int(decoded.shape[0]) != int(FRAME_SAMPLES):
-                raise ValueError(
-                    f"decoded Opus frame has {int(decoded.size)} samples; expected {int(FRAME_SAMPLES)}"
-                )
+                raise ValueError(f"decoded Opus frame has {int(decoded.size)} samples; expected {int(FRAME_SAMPLES)}")
             if not np.all(np.isfinite(decoded)):
                 raise ValueError("decoded Opus frame contains non-finite samples")
             return decoded

@@ -20,7 +20,7 @@ Client                                   Serveur
   │── state {ptt_buses, gains, écoutes} ───►│
   │══ audio UDP (token, bus_mask) ═════════►│
   │◄═════════════ mix-minus UDP (token) ═════│
-  │── ping ─────────────────────────────────►│  toutes les 50 ms
+  │── ping ─────────────────────────────────►│  toutes les 100 ms
   │◄─────────────────────────── pong ────────│
 ```
 
@@ -31,11 +31,12 @@ Objets JSON UTF-8, un par ligne (`\n`).
 | Message | Sens | Contenu |
 |---|---|---|
 | `hello` | client → serveur | `version`, `client_id`, `client_uuid`, `name`, `udp_port`, `applies_input_gain_locally` |
-| `welcome` | serveur → client | `version`, `session_token` (16 caractères hexadécimaux minuscules), `server_time_ms` |
-| `update` | serveur → client | `config` : `client_id`, `input_gain_db`, `buses`, `return_vu_dbfs` |
-| `state` | client → serveur | `ptt_buses`, `listen_regie`, `listen_return_bus`, `duck_return`, `input_gain_db`, `return_gain_db` |
-| `ping` / `pong` | les deux | vivacité ; le `pong` porte le VU du Return |
+| `welcome` | serveur → client | `version`, `session_token` (16 caractères hexadécimaux minuscules) |
+| `update` | serveur → client | `config` : `client_id`, `buses`, `return_vu_dbfs` ; `input_gain_db` seulement dans la configuration qui suit le `welcome` et quand l'opérateur change le gain de ce poste |
+| `state` | client → serveur | `ptt_buses`, `listen_regie`, `listen_return_bus`, `duck_return`, `input_gain_db`, `return_gain_db` ; jamais avant la première configuration |
+| `ping` / `pong` | les deux | vivacité ; le `pong` porte seulement `return_vu_dbfs` |
 | `kick` | serveur → client | éjection demandée par l'opérateur |
+| `error` | serveur → client | `message` (motif) et `retry`, envoyés juste avant la fermeture |
 
 Règles :
 
@@ -47,7 +48,7 @@ Règles :
 - 64 sessions simultanées au maximum ;
 - une session sans trafic pendant 6 s expire, et son token est révoqué.
 
-Toute violation ferme la connexion ; le client se reconnecte avec un backoff exponentiel (1 à 10 s).
+Toute violation ferme la connexion ; le client se reconnecte avec un backoff exponentiel (1 puis 2 s, ±20 %), qui ne revient à 1 s qu'après un `welcome`. Un `error` avec `"retry": false` reçu avant le `welcome` est un refus du poste (version, identité, nom) : le client ne réessaie pas, se déconnecte et affiche le motif à l'opérateur. Avec `"retry": true` (serveur qui s'arrête, `hello` trop lent, session impossible à créer), le client se reconnecte normalement.
 
 ## Audio UDP
 
@@ -90,6 +91,7 @@ Désactivé par défaut. Activé dans le client, il écoute sur `127.0.0.1:5080`
 | Méthode | Chemin | Effet |
 |---|---|---|
 | `POST` | `/ptt/<bus>/on` | Active le bus |
+| `POST` | `/ptt/<bus>/on?hold_ms=N` | Active le bus pour `N` ms au plus (bail renouvelable) |
 | `POST` | `/ptt/<bus>/off` | Désactive le bus |
 | `POST` | `/ptt/<bus>/toggle` | Inverse le bus |
 | `POST` | `/ptt/all/off` | Relâche tous les bus |
@@ -114,7 +116,8 @@ Réponse de `/status` et des commandes réussies :
 | Code | Cas |
 |---|---|
 | `200` | Commande appliquée ; l'état à jour est renvoyé |
-| `409` | Client pas « En ligne » (PTT désarmé), ou `off` sur un bus en mode Always On |
+| `409` | `on` ou `toggle` alors que le client n'est pas « En ligne » (PTT désarmé), ou `off` sur un bus en mode Always On |
+| `400` | `hold_ms` hors de 100 à 10000, ou ailleurs que sur `POST /ptt/<bus>/on` |
 | `404` | Bus ou route inconnus |
 | `405` | Mauvaise méthode (commande PTT en `GET`) |
 | `403` | Requête de navigateur (en-tête `Origin` ou `Referer`) |
@@ -127,7 +130,10 @@ Sémantique :
 - **Mode PTT** : `on`/`off` maintiennent ou relâchent un appui distant, qui s'ajoute au raccourci clavier. Un `off` distant ne coupe pas une touche tenue par l'opérateur.
 - **Mode Toggle** : `on`/`off`/`toggle` fixent l'état de bascule, synchronisé avec le raccourci.
 - **Mode Always On** : le bus reste actif ; `off` renvoie `409`.
-- Hors ligne ou à la perte de connexion, tout appui distant est effacé.
+- **Bail (`hold_ms`)** : un `on?hold_ms=N` (entier de 100 à 10000) est relâché automatiquement après `N` ms, sauf si une nouvelle commande sur ce bus arrive avant : un autre `on?hold_ms` renouvelle le bail, un `on` sans `hold_ms` le transforme en appui sans limite, un `off` l'arrête. Pour un bouton « talkback », envoyer `on?hold_ms=1000` à l'appui puis toutes les 500 ms tant qu'il est tenu, et `off` au relâchement : si le contrôleur plante ou perd le réseau, le micro se referme seul en une seconde. Sans `hold_ms`, l'appui dure jusqu'au `off`. En mode Toggle, l'expiration coupe la bascule ; un appui sur son raccourci ou un clic sur son pad annule le bail.
+- Couper (`off`) est accepté dans tous les états ; activer (`on`, `toggle`) exige « En ligne ».
+- **Dégradé** (contrôle établi, audio UDP interrompu ou flux carte son arrêté) : la transmission est coupée aussitôt, mais les appuis distants, les bascules et les touches tenues sont conservés et reprennent quand la chaîne est revenue stable 0,5 s. Pendant ce temps, un appui sur le raccourci d'une bascule ne peut que la couper.
+- À la perte du contrôle (Reconnexion), à la déconnexion ou au refus du serveur, tout appui distant et toute bascule sont effacés.
 
 Les commandes sont exécutées sur le thread de l'interface, par le même chemin que les raccourcis clavier.
 

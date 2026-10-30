@@ -251,9 +251,7 @@ def test_disconnect_revokes_the_session_on_the_server(server, connect):
 
     alice.disconnect_network()
 
-    assert _wait_until(
-        lambda: not server.get_clients_snapshot()[alice.client_id]["control_connected"]
-    )
+    assert _wait_until(lambda: not server.get_clients_snapshot()[alice.client_id]["control_connected"])
     assert server.get_clients_snapshot()[bob.client_id]["control_connected"]
 
 

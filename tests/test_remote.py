@@ -45,10 +45,34 @@ def qt_app() -> QtWidgets.QApplication:
         ("POST", "/ptt/all/off", RemoteCommand("off", None)),
         ("GET", "/status", RemoteCommand("status")),
         ("GET", "/status?x=1", RemoteCommand("status")),
+        ("POST", "/ptt/regie/on?hold_ms=1000", RemoteCommand("on", REGIE_BUS_ID, 1000)),
+        ("POST", "/ptt/plateau/on?hold_ms=100", RemoteCommand("on", PLATEAU_BUS_ID, 100)),
+        ("POST", "/ptt/vmix/on?hold_ms=10000", RemoteCommand("on", VMIX_BUS_ID, 10000)),
     ],
 )
 def test_routes(method, path, expected) -> None:
     assert route(method, path) == expected
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/ptt/regie/on?hold_ms=99",
+        "/ptt/regie/on?hold_ms=10001",
+        "/ptt/regie/on?hold_ms=abc",
+        "/ptt/regie/on?hold_ms=-5",
+        "/ptt/regie/on?hold_ms=",
+        "/ptt/regie/on?hold_ms=500&hold_ms=600",
+        "/ptt/regie/off?hold_ms=500",
+        "/ptt/regie/toggle?hold_ms=500",
+        "/ptt/all/off?hold_ms=500",
+    ],
+)
+def test_invalid_hold_is_a_bad_request(path) -> None:
+    reply = route("POST", path)
+    assert isinstance(reply, RemoteReply)
+    assert reply.status == HTTPStatus.BAD_REQUEST
+    assert "hold_ms" in reply.body["error"]
 
 
 @pytest.mark.parametrize(
@@ -176,6 +200,9 @@ class _FakeHotkeys:
     def set_toggle_state(self, bus_id: int, active: bool) -> None:
         self.toggle_sync.append((bus_id, active))
 
+    def release_all(self) -> None:
+        self.held.clear()
+
 
 def _window(*, online: bool = True, modes: dict[int, str] | None = None, held: dict[int, bool] | None = None):
     sent: list[tuple[int, bool]] = []
@@ -188,15 +215,19 @@ def _window(*, online: bool = True, modes: dict[int, str] | None = None, held: d
         _ptt_bus_toggle_state={},
         _ptt_remote_active={},
         _ptt_pad_held={},
+        _remote_lease_generation={},
         _operational_status=ClientOperationalStatus(state, state.value, ""),
         _refresh_state_labels=lambda: None,
         sent=sent,
     )
     for name in (
         "_ptt_bus_active",
+        "_ptt_bus_armed",
         "_apply_ptt_bus",
         "_remote_status_payload",
         "_handle_remote_command",
+        "_set_remote_target",
+        "_cancel_remote_lease",
         "_on_pad_pressed",
         "_on_pad_released",
         "_release_pad_holds",
@@ -258,12 +289,25 @@ def test_all_off_releases_remote_and_toggle_buses_but_not_always_on() -> None:
 def test_nothing_is_armed_while_the_client_is_not_online() -> None:
     window = _window(online=False)
 
-    reply = window._handle_remote_command(RemoteCommand("on", REGIE_BUS_ID))
-
-    assert reply.status == HTTPStatus.CONFLICT
-    assert "pas en ligne" in reply.body["error"]
+    for action in ("on", "toggle"):
+        reply = window._handle_remote_command(RemoteCommand(action, REGIE_BUS_ID))
+        assert reply.status == HTTPStatus.CONFLICT
+        assert "pas en ligne" in reply.body["error"]
     assert window.sent == []
     assert window._ptt_remote_active == {}
+
+
+def test_off_is_accepted_while_not_online() -> None:
+    window = _window(online=False)
+    window._ptt_bus_toggle_state[PLATEAU_BUS_ID] = True  # kept through a degraded link
+    window._ptt_remote_active[REGIE_BUS_ID] = True
+
+    reply = window._handle_remote_command(RemoteCommand("off", None))
+
+    assert reply.status == HTTPStatus.OK
+    assert window._ptt_bus_toggle_state[PLATEAU_BUS_ID] is False
+    assert window._ptt_remote_active[REGIE_BUS_ID] is False
+    assert window._global_ptt.toggle_sync == [(PLATEAU_BUS_ID, False)]
 
 
 # --- Talk pads (mouse) follow the same rules -------------------------------------
@@ -325,3 +369,27 @@ def test_release_all_frees_pads_toggles_and_remote_holds() -> None:
     assert window._ptt_pad_held == {}
     assert window._ptt_bus_toggle_state[PLATEAU_BUS_ID] is False
     assert (REGIE_BUS_ID, False) in window.sent and (PLATEAU_BUS_ID, False) in window.sent
+
+
+def test_release_all_frees_a_key_the_hook_never_saw_released() -> None:
+    window = _window(held={REGIE_BUS_ID: True})
+    assert window._ptt_bus_active(REGIE_BUS_ID)
+
+    window._release_all_talk()
+
+    assert not window._ptt_bus_active(REGIE_BUS_ID)
+    assert (REGIE_BUS_ID, False) in window.sent
+
+
+def test_disabling_http_control_drops_its_holds_but_keeps_toggles() -> None:
+    window = _window()
+    window._remote_server = None
+    window._stop_remote_server = ClientWindow._stop_remote_server.__get__(window)
+    window._handle_remote_command(RemoteCommand("on", REGIE_BUS_ID))
+    window._handle_remote_command(RemoteCommand("toggle", PLATEAU_BUS_ID))
+
+    window._stop_remote_server()
+
+    assert window._ptt_bus_active(REGIE_BUS_ID) is False
+    assert window._ptt_bus_active(PLATEAU_BUS_ID) is True
+    assert window.sent[-1] == (REGIE_BUS_ID, False)

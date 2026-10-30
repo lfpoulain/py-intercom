@@ -8,6 +8,7 @@ import weakref
 import numpy as np
 import pytest
 
+from py_intercom.common.constants import JB_BURST_TRIM_AFTER_FRAMES
 from py_intercom.common.frame_ring import FrameRingBuffer
 
 
@@ -104,9 +105,7 @@ def test_wait_pop_is_interruptible_without_recording_underflow() -> None:
     def consume() -> None:
         output = np.empty(4, dtype=np.float32)
         waiter_started.set()
-        result.append(
-            ring.wait_pop_into(output, stop_event=stop_event, timeout=None)
-        )
+        result.append(ring.wait_pop_into(output, stop_event=stop_event, timeout=None))
 
     thread = threading.Thread(target=consume)
     thread.start()
@@ -238,3 +237,22 @@ def test_latency_cap_is_disabled_by_default() -> None:
 
     assert ring.depth == 5
     assert ring.stats.trimmed == 0
+
+
+def test_latency_cap_drops_a_producer_burst_at_once() -> None:
+    ring = FrameRingBuffer(capacity=20, frame_samples=4, trim_above=2, trim_after=50)
+    frame = np.zeros(4, dtype=np.float32)
+    out = np.empty(4, dtype=np.float32)
+    for _ in range(3):
+        ring.push(frame)
+    # The producer stalled 80 ms, then pushes every missed frame at once.
+    for _ in range(8):
+        ring.push(frame)
+    depths = []
+    for _ in range(JB_BURST_TRIM_AFTER_FRAMES + 1):
+        ring.push(frame)
+        ring.pop_into(out)
+        depths.append(ring.depth)
+
+    assert depths[-1] == 2
+    assert ring.stats.trimmed == 9

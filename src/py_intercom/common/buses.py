@@ -13,7 +13,6 @@ class BusDefinition:
     name: str
     color: str
     default_feed_to_regie: bool
-    client_can_listen: bool
 
 
 REGIE_BUS_ID: Final = 0
@@ -27,7 +26,6 @@ FIXED_BUSES: Final[tuple[BusDefinition, ...]] = (
         name="Regie",
         color="#38bdf8",
         default_feed_to_regie=False,
-        client_can_listen=True,
     ),
     BusDefinition(
         bus_id=PLATEAU_BUS_ID,
@@ -35,7 +33,6 @@ FIXED_BUSES: Final[tuple[BusDefinition, ...]] = (
         name="Plateau",
         color="#fbbf24",
         default_feed_to_regie=False,
-        client_can_listen=False,
     ),
     BusDefinition(
         bus_id=VMIX_BUS_ID,
@@ -43,7 +40,6 @@ FIXED_BUSES: Final[tuple[BusDefinition, ...]] = (
         name="VMix",
         color="#a78bfa",
         default_feed_to_regie=False,
-        client_can_listen=False,
     ),
 )
 

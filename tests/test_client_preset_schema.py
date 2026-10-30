@@ -56,9 +56,7 @@ def test_client_legacy_preset_is_migrated_only_in_memory(tmp_path) -> None:
         },
     ],
 )
-def test_incompatible_client_preset_is_blocked_without_overwrite(
-    tmp_path, incompatible
-) -> None:
+def test_incompatible_client_preset_is_blocked_without_overwrite(tmp_path, incompatible) -> None:
     path = tmp_path / "client.json"
     path.write_text(json.dumps(incompatible), encoding="utf-8")
     original = path.read_bytes()

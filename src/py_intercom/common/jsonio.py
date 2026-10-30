@@ -5,10 +5,22 @@ import os
 import shutil
 import tempfile
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+from .logging import best_effort
+
+# Antivirus scanners and sync clients (Defender, OneDrive) briefly lock a file
+# while they inspect it; Windows then refuses to replace or copy it (WinError
+# 5 or 32). Each retried operation (backup copy, replace) blocks its caller
+# for up to ~200 ms while the file stays locked: never call this from the
+# audio path or the Qt thread (both GUIs go through DebouncedJsonWriter).
+_LOCKED_FILE_ATTEMPTS = 5
+_LOCKED_FILE_RETRY_S = 0.05
 
 
 class JsonFileStatus(str, Enum):
@@ -77,11 +89,20 @@ def atomic_write_json(path: Path, data: Any, *, backup: bool = True) -> None:
 
             if backup and path.exists():
                 backup_path = path.with_suffix(path.suffix + ".bak")
-                shutil.copy2(path, backup_path)
+                _retry_while_locked(lambda: shutil.copy2(path, backup_path))
 
-            os.replace(tmp_path, path)
+            _retry_while_locked(lambda: os.replace(tmp_path, path))
         finally:
-            try:
+            with best_effort("remove temporary JSON file"):
                 tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+
+
+def _retry_while_locked(operation: Callable[[], object]) -> None:
+    for attempt in range(1, _LOCKED_FILE_ATTEMPTS + 1):
+        try:
+            operation()
+            return
+        except PermissionError:
+            if attempt == _LOCKED_FILE_ATTEMPTS:
+                raise
+            time.sleep(_LOCKED_FILE_RETRY_S)

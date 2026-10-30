@@ -12,8 +12,8 @@ class ClientIdentityError(ValueError):
 def client_id_from_uuid(client_uuid: str) -> int:
     try:
         return int(zlib.crc32(str(client_uuid).encode("utf-8")) & 0xFFFFFFFF)
-    except Exception:
-        return 0
+    except UnicodeEncodeError:  # lone surrogate: not a valid UUID string
+        return 0  # the reserved id, refused by validate_client_identity
 
 
 def validate_client_identity(client_id: object, client_uuid: object) -> tuple[int, str]:
@@ -34,17 +34,13 @@ def validate_client_identity(client_id: object, client_uuid: object) -> tuple[in
     if not canonical_uuid:
         raise ClientIdentityError("client_uuid must not be empty")
     if len(canonical_uuid) > MAX_CLIENT_UUID_LENGTH:
-        raise ClientIdentityError(
-            f"client_uuid exceeds {MAX_CLIENT_UUID_LENGTH} characters"
-        )
+        raise ClientIdentityError(f"client_uuid exceeds {MAX_CLIENT_UUID_LENGTH} characters")
 
     expected = client_id_from_uuid(canonical_uuid)
     if expected == 0:
         raise ClientIdentityError("client_uuid maps to the reserved client id 0")
     if int(client_id) != int(expected):
-        raise ClientIdentityError(
-            f"client_id does not match client_uuid (expected {expected})"
-        )
+        raise ClientIdentityError(f"client_id does not match client_uuid (expected {expected})")
     return int(expected), canonical_uuid
 
 
@@ -68,8 +64,4 @@ def find_client_id_collisions(client_uuids: object) -> dict[int, tuple[str, ...]
             continue
         by_id.setdefault(int(client_id), set()).add(canonical)
 
-    return {
-        client_id: tuple(sorted(uuids))
-        for client_id, uuids in by_id.items()
-        if len(uuids) > 1
-    }
+    return {client_id: tuple(sorted(uuids)) for client_id, uuids in by_id.items() if len(uuids) > 1}

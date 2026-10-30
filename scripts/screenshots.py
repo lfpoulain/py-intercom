@@ -198,7 +198,7 @@ def main() -> None:
     server_window._server_name.setText("Régie principale")
     server_window._discovery_cb.setChecked(False)
     server_window.show()
-    wait_for(lambda: server_window._device_thread is None and server_window._return_input_device.count() > 0)
+    wait_for(lambda: not server_window._device_refresh.running and server_window._return_input_device.count() > 0)
     server_window._start_server()
     server = server_window._server
     assert server is not None, "server did not start"
@@ -224,7 +224,7 @@ def main() -> None:
     def first_device(combo: QtWidgets.QComboBox) -> int | None:
         return next((i for i in range(combo.count()) if combo.itemData(i) is not None), None)
 
-    wait_for(lambda: client_window._device_thread is None and all(first_device(c) is not None for c in combos))
+    wait_for(lambda: not client_window._device_refresh.running and all(first_device(c) is not None for c in combos))
     for combo in combos:
         combo.setCurrentIndex(first_device(combo))
     client_window._connect()

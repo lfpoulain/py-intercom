@@ -8,10 +8,9 @@ from types import MappingProxyType
 
 import numpy as np
 
+from .audio import limit_peak_inplace, rms_dbfs
 from .buses import FIXED_BUS_IDS, FIXED_BUS_MASK, FIXED_BUSES, REGIE_BUS_ID
 from .constants import FRAME_SAMPLES
-
-VALID_BUS_MASK = FIXED_BUS_MASK
 
 
 class RoutingError(ValueError):
@@ -33,9 +32,7 @@ def _strict_frame(frame: object, *, name: str, copy: bool) -> np.ndarray:
     if frame.dtype != np.dtype(np.float32):
         raise TypeError(f"{name} must use float32 samples, got {frame.dtype}")
     if frame.shape != (int(FRAME_SAMPLES),):
-        raise RoutingError(
-            f"{name} must have shape ({int(FRAME_SAMPLES)},), got {frame.shape}"
-        )
+        raise RoutingError(f"{name} must have shape ({int(FRAME_SAMPLES)},), got {frame.shape}")
     if not bool(np.isfinite(frame).all()):
         raise RoutingError(f"{name} contains NaN or infinite samples")
     return np.array(frame, dtype=np.float32, copy=True) if copy else frame
@@ -60,9 +57,7 @@ def _immutable_frame(frame: np.ndarray) -> np.ndarray:
 
 
 def _immutable_frame_map(frames: Mapping[int, np.ndarray]) -> Mapping[int, np.ndarray]:
-    return MappingProxyType(
-        {int(key): _immutable_frame(value) for key, value in frames.items()}
-    )
+    return MappingProxyType({int(key): _immutable_frame(value) for key, value in frames.items()})
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +89,7 @@ class RoutedSource:
     def valid_bus_mask(self) -> int:
         """Return only catalogued routes; unknown bits are deliberately closed."""
 
-        return int(self.bus_mask) & int(VALID_BUS_MASK)
+        return int(self.bus_mask) & int(FIXED_BUS_MASK)
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,12 +202,9 @@ def route_sources(
         raise RoutingError("sources must contain at most one frame per client_id")
 
     bus_frames: dict[int, np.ndarray] = {
-        int(definition.bus_id): np.zeros((int(FRAME_SAMPLES),), dtype=np.float32)
-        for definition in FIXED_BUSES
+        int(definition.bus_id): np.zeros((int(FRAME_SAMPLES),), dtype=np.float32) for definition in FIXED_BUSES
     }
-    contribution_by_bus: dict[int, dict[int, np.ndarray]] = {
-        int(definition.bus_id): {} for definition in FIXED_BUSES
-    }
+    contribution_by_bus: dict[int, dict[int, np.ndarray]] = {int(definition.bus_id): {} for definition in FIXED_BUSES}
 
     for source in source_list:
         valid_mask = int(source.valid_bus_mask)
@@ -262,6 +254,39 @@ def route_sources(
     )
 
 
+def _mix_minus(
+    regie_linear: np.ndarray,
+    own_regie_contribution: np.ndarray | None,
+    *,
+    listen_regie: bool,
+) -> np.ndarray:
+    """Return a new frame: the Régie monitor minus one destination's own voice.
+
+    A destination that does not listen to Régie gets silence. Inputs are never
+    mutated, and the subtraction uses the exact linear contribution.
+    """
+
+    linear = _strict_frame(regie_linear, name="regie_linear", copy=False)
+    own = (
+        None
+        if own_regie_contribution is None
+        else _strict_frame(own_regie_contribution, name="own_regie_contribution", copy=False)
+    )
+    if not isinstance(listen_regie, (bool, np.bool_)):
+        raise TypeError("listen_regie must be bool")
+    if not bool(listen_regie):
+        return np.zeros((int(FRAME_SAMPLES),), dtype=np.float32)
+
+    mix = np.array(linear, dtype=np.float32, copy=True)
+    if own is not None:
+        try:
+            with np.errstate(over="raise", invalid="raise"):
+                np.subtract(mix, own, out=mix)
+        except FloatingPointError as exc:
+            raise RoutingError("mix-minus overflowed while subtracting contribution") from exc
+    return mix
+
+
 def heard_voice_dbfs(
     regie_linear: np.ndarray,
     own_regie_contribution: np.ndarray | None,
@@ -269,15 +294,8 @@ def heard_voice_dbfs(
     listen_regie: bool,
 ) -> float:
     """Level of the voices one destination hears (its Régie mix-minus), in dBFS."""
-    if not bool(listen_regie):
-        return -120.0
-    voice = _strict_frame(regie_linear, name="regie_linear", copy=True)
-    if own_regie_contribution is not None:
-        np.subtract(voice, _strict_frame(own_regie_contribution, name="own_regie_contribution", copy=False), out=voice)
-    mean_square = float(np.dot(voice, voice)) / float(voice.size)
-    if not math.isfinite(mean_square) or mean_square <= 0.0:
-        return -120.0
-    return 10.0 * math.log10(mean_square)
+    voice = _mix_minus(regie_linear, own_regie_contribution, listen_regie=listen_regie)
+    return rms_dbfs(voice, floor_db=-120.0)
 
 
 def build_destination_mix(
@@ -297,34 +315,9 @@ def build_destination_mix(
     limits the completed destination. Inputs are never mutated.
     """
 
-    linear = _strict_frame(regie_linear, name="regie_linear", copy=False)
-    if own_regie_contribution is not None:
-        own = _strict_frame(
-            own_regie_contribution,
-            name="own_regie_contribution",
-            copy=False,
-        )
-    else:
-        own = None
-
-    if not isinstance(listen_regie, (bool, np.bool_)):
-        raise TypeError("listen_regie must be bool")
+    mix = _mix_minus(regie_linear, own_regie_contribution, listen_regie=listen_regie)
     if not isinstance(listen_return, (bool, np.bool_)):
         raise TypeError("listen_return must be bool")
-
-    mix = (
-        np.array(linear, dtype=np.float32, copy=True)
-        if bool(listen_regie)
-        else np.zeros((int(FRAME_SAMPLES),), dtype=np.float32)
-    )
-    if bool(listen_regie) and own is not None:
-        try:
-            with np.errstate(over="raise", invalid="raise"):
-                np.subtract(mix, own, out=mix)
-        except FloatingPointError as exc:
-            raise RoutingError(
-                "mix-minus overflowed while subtracting contribution"
-            ) from exc
 
     gain_db = _finite_float(return_gain_db, name="return_gain_db")
     if bool(listen_return):
@@ -343,11 +336,4 @@ def build_destination_mix(
     peak_limit = _finite_float(limit, name="limit")
     if not 0.0 < peak_limit <= 1.0:
         raise RoutingError("limit must be greater than 0 and at most 1")
-
-    peak = float(np.max(np.abs(mix)))
-    if peak > 1.0:
-        mix *= float(peak_limit) / peak
-    np.clip(mix, -1.0, 1.0, out=mix)
-    if not bool(np.isfinite(mix).all()):
-        raise RoutingError("destination mix produced non-finite samples")
-    return mix.astype(np.float32, copy=False)
+    return limit_peak_inplace(mix, peak_limit)

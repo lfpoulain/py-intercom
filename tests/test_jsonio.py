@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 
+import pytest
+
+from py_intercom.common import jsonio
 from py_intercom.common.jsonio import (
     JsonFileStatus,
     atomic_write_json,
@@ -28,9 +32,7 @@ def test_atomic_write_json_keeps_previous_version_as_backup(tmp_path) -> None:
     atomic_write_json(path, {"revision": 2})
 
     assert read_json_file_result(path).value == {"revision": 2}
-    assert json.loads((tmp_path / "preset.json.bak").read_text(encoding="utf-8")) == {
-        "revision": 1
-    }
+    assert json.loads((tmp_path / "preset.json.bak").read_text(encoding="utf-8")) == {"revision": 1}
 
 
 def test_concurrent_atomic_writes_never_leave_partial_json(tmp_path) -> None:
@@ -60,4 +62,43 @@ def test_concurrent_atomic_writes_never_leave_partial_json(tmp_path) -> None:
     assert not errors
     assert all(not thread.is_alive() for thread in threads)
     assert read_json_file_result(path).status is JsonFileStatus.OK
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_atomic_write_json_retries_while_the_file_is_locked(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "preset.json"
+    atomic_write_json(path, {"revision": 1})
+    real_replace = os.replace
+    attempts: list[int] = []
+
+    def locked_twice(src, dst) -> None:
+        attempts.append(1)
+        if len(attempts) <= 2:
+            raise PermissionError(13, "file in use by another process")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(jsonio, "_LOCKED_FILE_RETRY_S", 0.0)
+    monkeypatch.setattr(jsonio.os, "replace", locked_twice)
+
+    atomic_write_json(path, {"revision": 2})
+
+    assert len(attempts) == 3
+    assert read_json_file_result(path).value == {"revision": 2}
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_atomic_write_json_gives_up_on_a_lasting_lock(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "preset.json"
+    atomic_write_json(path, {"revision": 1})
+
+    def always_locked(src, dst) -> None:
+        raise PermissionError(13, "file in use by another process")
+
+    monkeypatch.setattr(jsonio, "_LOCKED_FILE_RETRY_S", 0.0)
+    monkeypatch.setattr(jsonio.os, "replace", always_locked)
+
+    with pytest.raises(PermissionError):
+        atomic_write_json(path, {"revision": 2})
+
+    assert read_json_file_result(path).value == {"revision": 1}
     assert not list(tmp_path.glob("*.tmp"))

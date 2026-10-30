@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import queue
 import time
+from typing import NamedTuple
 
 import numpy as np
 from loguru import logger
 
-from ..common.audio import apply_gain_db, limit_peak, rms_dbfs
+from ..common.audio import apply_gain_db, rms_dbfs
 from ..common.buses import (
     FIXED_BUS_MASK,
 )
@@ -19,8 +20,13 @@ from ..common.constants import (
 from ..common.jitter_buffer import JitterFrameMetadata, OpusPacketJitterBuffer
 from ..common.opus_codec import OpusDecoder
 from ..common.packets import (
+    WSAECONNRESET,
+    WSAEMSGSIZE,
+    WSAENETRESET,
     AudioPacketDirection,
     AudioPacketValidationError,
+    count_rejected_datagram,
+    is_valid_route,
     pack_audio_packet_v2,
     unpack_audio_packet_v2,
 )
@@ -34,18 +40,31 @@ from ..common.routing import (
 )
 from .models import ClientState, _RoutingEnvelope
 
+# Windows reports these per datagram: the socket itself is still healthy.
+# A client meter with no frame this tick falls at the same rate as the
+# client's own bus meters, instead of freezing on its last value.
+_VU_RELEASE_DB_PER_FRAME = 3.0
+
+
+class _MixSource(NamedTuple):
+    """What the mix worker needs from one client, snapshotted under the lock.
+
+    A NamedTuple: built for every client on every tick while the engine lock
+    is held, so it must be as cheap as a plain tuple.
+    """
+
+    client_id: int
+    state: ClientState
+    jitter: OpusPacketJitterBuffer
+    decoder: OpusDecoder
+    control_connected: bool
+    last_control_monotonic: float
+    input_gain_db: float
+    applies_input_gain_locally: bool
+    session_token: int
+
 
 class MixerMixin:
-    def _count_invalid_audio_packet(self, reason: str) -> None:
-        if reason == "invalid_token":
-            self._rx_invalid_tokens += 1
-        elif reason == "invalid_direction":
-            self._rx_invalid_directions += 1
-        elif reason == "invalid_route":
-            self._rx_invalid_route_masks += 1
-        else:
-            self._rx_invalid_packets += 1
-
     @classmethod
     def _live_frame_bus_mask(
         cls,
@@ -59,13 +78,10 @@ class MixerMixin:
         # second fail-closed gate, never the source of the route itself.
         if not cls._control_is_live(control_connected, last_control_monotonic, now=now):
             return 0
-        try:
-            mask = int(frame_bus_mask)
-        except (TypeError, ValueError):
-            return 0
+        mask = int(frame_bus_mask)
         if mask < 0 or mask & ~int(FIXED_BUS_MASK):
             return 0
-        return int(mask)
+        return mask
 
     def _normalize_decoded_frame(self, frame: object) -> np.ndarray | None:
         try:
@@ -100,6 +116,56 @@ class MixerMixin:
             # newest item if the queue filled again before this retry.
             self._mix_queue_drops += 1
 
+    def _pull_mix_source(self, source: _MixSource, *, now: float) -> tuple[RoutedSource | None, float | None]:
+        """Decode the next frame of one client and attach its live bus route.
+
+        Returns the routed source (None when there is nothing to mix) and the
+        client's new meter level (None: no frame this tick, let it fall).
+        """
+        try:
+            jitter_frame = source.jitter.pop_frame()
+        except Exception as exc:
+            self._mix_pop_errors += 1
+            logger.debug("jitter pop failed for client {}: {}", source.client_id, exc)
+            return None, None
+        if jitter_frame is None:
+            return None, None
+
+        if jitter_frame.concealed:
+            # Deep PLC continues the last real frame, so it inherits that
+            # frame's route, never one from another session.
+            route_token, route_mask = source.state.last_frame_route
+            bus_mask = route_mask if route_token == source.session_token else 0
+        else:
+            metadata = jitter_frame.metadata
+            bus_mask = int(metadata.bus_mask) if int(metadata.session_token) == source.session_token else 0
+            source.state.last_frame_route = (source.session_token, bus_mask)
+        bus_mask = self._live_frame_bus_mask(
+            bus_mask,
+            source.control_connected,
+            source.last_control_monotonic,
+            now=now,
+        )
+
+        try:
+            decoded = source.decoder.decode(bytes(jitter_frame.payload))
+        except Exception as exc:
+            self._rx_decode_errors += 1
+            logger.debug("Opus decode failed for client {}: {}", source.client_id, exc)
+            return None, None
+        frame = self._normalize_decoded_frame(decoded)
+        if frame is None:
+            return None, -60.0
+
+        if not source.applies_input_gain_locally:
+            frame = apply_gain_db(frame, source.input_gain_db)
+        try:
+            routed = RoutedSource(client_id=source.client_id, frame=frame, bus_mask=bus_mask)
+        except (RoutingError, TypeError, ValueError):
+            self._rx_invalid_frame_sizes += 1
+            return None, -60.0
+        return routed, rms_dbfs(frame)
+
     def _mix_loop(self) -> None:
         tick_s = float(FRAME_SAMPLES) / float(SAMPLE_RATE)
         next_t = time.monotonic()
@@ -122,158 +188,60 @@ class MixerMixin:
                 produced += 1
 
                 with self._lock:
-                    buses = {
-                        bus_id: (float(bus.gain_db), bool(bus.feed_to_regie))
-                        for bus_id, bus in self._buses.items()
-                    }
-                    clients_snapshot: list[
-                        tuple[
-                            int,
-                            ClientState,
-                            OpusPacketJitterBuffer,
-                            OpusDecoder,
-                            dict[int, bool],
-                            bool,
-                            float,
-                            float,
-                            bool,
-                            int,
-                        ]
-                    ] = []
-                    for client_id, st in list(self._clients.items()):
-                        try:
-                            clients_snapshot.append(
-                                (
-                                    int(client_id),
-                                    st,
-                                    st.jb,
-                                    st.decoder,
-                                    dict(st.ptt_buses),
-                                    bool(st.control_connected),
-                                    float(st.last_control_monotonic),
-                                    float(st.input_gain_db),
-                                    bool(st.applies_input_gain_locally),
-                                    int(st.session_token),
-                                )
-                            )
-                        except Exception:
-                            clients_snapshot.append(
-                                (
-                                    int(client_id),
-                                    st,
-                                    st.jb,
-                                    st.decoder,
-                                    {},
-                                    False,
-                                    0.0,
-                                    0.0,
-                                    False,
-                                    0,
-                                )
-                            )
+                    bus_gain_db = {bus_id: float(bus.gain_db) for bus_id, bus in self._buses.items()}
+                    feed_to_regie = {bus_id: bool(bus.feed_to_regie) for bus_id, bus in self._buses.items()}
+                    sources = [
+                        _MixSource(
+                            client_id=int(client_id),
+                            state=st,
+                            jitter=st.jb,
+                            decoder=st.decoder,
+                            control_connected=bool(st.control_connected),
+                            last_control_monotonic=float(st.last_control_monotonic),
+                            input_gain_db=float(st.input_gain_db),
+                            applies_input_gain_locally=bool(st.applies_input_gain_locally),
+                            session_token=int(st.session_token),
+                        )
+                        for client_id, st in self._clients.items()
+                    ]
                     outputs = list(self._outputs.values())
                     routing_epoch = int(self._routing_epoch)
 
                 routed_sources: list[RoutedSource] = []
-                vu_updates: dict[int, float] = {}
-
-                for (
-                    client_id,
-                    _st,
-                    jitter_buffer,
-                    decoder,
-                    ptt_buses,
-                    ctrl_ok,
-                    last_ctrl,
-                    input_gain_db,
-                    applies_input_gain_locally,
-                    session_token,
-                ) in clients_snapshot:
-                    try:
-                        jitter_frame = jitter_buffer.pop_frame()
-                    except Exception:
-                        jitter_frame = None
-                    if jitter_frame is None:
-                        if bool(ctrl_ok) and not any(bool(v) for v in ptt_buses.values()):
-                            vu_updates[int(client_id)] = -60.0
-                        continue
-                    payload = bytes(jitter_frame.payload)
-                    try:
-                        frame_bus_mask = int(jitter_frame.metadata.bus_mask)
-                        if int(jitter_frame.metadata.session_token) != int(session_token):
-                            frame_bus_mask = 0
-                    except Exception:
-                        frame_bus_mask = 0
-                    frame_bus_mask = self._live_frame_bus_mask(
-                        frame_bus_mask,
-                        bool(ctrl_ok),
-                        float(last_ctrl),
-                        now=now,
-                    )
-                    try:
-                        frame = decoder.decode(payload)
-                    except Exception:
-                        self._rx_decode_errors += 1
-                        continue
-
-                    frame = self._normalize_decoded_frame(frame)
-                    if frame is None:
-                        vu_updates[int(client_id)] = -60.0
-                        continue
-
-                    if not bool(applies_input_gain_locally):
-                        try:
-                            frame = apply_gain_db(frame, float(input_gain_db))
-                        except Exception:
-                            # Keep the source at unity gain rather than drop it.
-                            self._mix_gain_errors += 1
-
-                    vu = rms_dbfs(frame)
-                    vu_updates[int(client_id)] = float(vu)
-
-                    try:
-                        routed_sources.append(
-                            RoutedSource(
-                                client_id=int(client_id),
-                                frame=frame,
-                                bus_mask=int(frame_bus_mask),
-                            )
-                        )
-                    except (RoutingError, TypeError, ValueError):
-                        self._rx_invalid_frame_sizes += 1
-                        vu_updates[int(client_id)] = -60.0
+                vu_updates: dict[int, float | None] = {}
+                for source in sources:
+                    routed, vu = self._pull_mix_source(source, now=now)
+                    if routed is not None:
+                        routed_sources.append(routed)
+                    vu_updates[source.client_id] = vu
 
                 with self._lock:
                     if int(self._routing_epoch) != int(routing_epoch):
                         self._stale_mix_epochs_dropped += 1
                         continue
-                    if vu_updates:
-                        for cid, vu in vu_updates.items():
-                            st2 = self._clients.get(int(cid))
-                            if st2 is not None:
-                                st2.vu_dbfs = float(vu)
+                    for cid, vu in vu_updates.items():
+                        st2 = self._clients.get(int(cid))
+                        if st2 is None:
+                            continue
+                        st2.vu_dbfs = (
+                            float(vu) if vu is not None else max(-60.0, float(st2.vu_dbfs) - _VU_RELEASE_DB_PER_FRAME)
+                        )
 
-                routing_config = RoutingConfig(
-                    bus_gain_db={bus_id: values[0] for bus_id, values in buses.items()},
-                    feed_to_regie={bus_id: values[1] for bus_id, values in buses.items()},
+                routing_result = route_sources(
+                    routed_sources,
+                    RoutingConfig(bus_gain_db=bus_gain_db, feed_to_regie=feed_to_regie),
                 )
-                routing_result = route_sources(routed_sources, routing_config)
-                regie_monitor_mix = build_destination_mix(
-                    routing_result.regie_linear,
-                    None,
-                    listen_regie=True,
-                )
-
-                try:
-                    regie_vu_dbfs = float(rms_dbfs(regie_monitor_mix))
-                except Exception:
-                    regie_vu_dbfs = -60.0
+                regie_vu_dbfs = rms_dbfs(build_destination_mix(routing_result.regie_linear, None, listen_regie=True))
 
                 with self._lock:
                     if int(self._routing_epoch) != int(routing_epoch):
                         self._stale_mix_epochs_dropped += 1
                         continue
                     self._regie_vu_dbfs = float(regie_vu_dbfs)
+                    # Bus level after its fader, whether or not an output plays
+                    # it. Updated in place: the mixer allocates nothing here.
+                    for bus_id, bus_frame in routing_result.bus_frames.items():
+                        self._bus_vu_dbfs[bus_id] = rms_dbfs(bus_frame)
                     self._enqueue_latest_mix(
                         _RoutingEnvelope(
                             routing_epoch=int(routing_epoch),
@@ -281,14 +249,11 @@ class MixerMixin:
                         )
                     )
 
+                    # Physical outputs get the linear bus sum (the ring copies
+                    # it). Each output callback applies its own gain, then the
+                    # final limiter, so a gain above 0 dB never hard-clips.
                     for out in outputs:
-                        linear_mix = routing_result.bus_frames.get(int(out.bus_id))
-                        if linear_mix is None:
-                            linear_mix = np.zeros((FRAME_SAMPLES,), dtype=np.float32)
-                        # A physical output is a destination: preserve the shared
-                        # bus sum and limit only the frame copied into this output.
-                        mix = limit_peak(np.array(linear_mix, dtype=np.float32, copy=True))
-                        out.ring.push(mix.astype(np.float32, copy=False))
+                        out.ring.push(routing_result.bus_frames[int(out.bus_id)])
 
     def _accept_udp_packet(self, pkt, addr: tuple[str, int], *, now: float | None = None) -> bool:
         received_at = time.monotonic() if now is None else float(now)
@@ -298,9 +263,8 @@ class MixerMixin:
         client_id = int(pkt.client_id) & 0xFFFFFFFF
         seq = int(getattr(pkt, "sequence_number", 0)) & 0xFFFFFFFF
         payload = bytes(getattr(pkt, "payload", b""))
-        stream_id = int(getattr(pkt, "stream_id", -1))
         bus_mask = int(getattr(pkt, "bus_mask", -1))
-        if stream_id != 0 or bus_mask < 0 or bus_mask & ~int(FIXED_BUS_MASK):
+        if not is_valid_route(int(getattr(pkt, "stream_id", -1)), bus_mask):
             self._rx_invalid_route_masks += 1
             return False
 
@@ -316,53 +280,31 @@ class MixerMixin:
                 now=received_at,
             ):
                 self._rx_inactive_clients += 1
-                self._expire_client_session(st)
+                # Revoke a session once. Datagrams still in flight from an
+                # already expired client must not flush everybody's audio.
+                if st.control_connected:
+                    self._expire_client_session(st)
                 return False
 
             session_token = int(getattr(pkt, "session_token", 0))
-            if (
-                session_token == 0
-                or int(st.session_token) == 0
-                or session_token != int(st.session_token)
-            ):
+            if session_token == 0 or int(st.session_token) == 0 or session_token != int(st.session_token):
                 self._rx_invalid_tokens += 1
-                return False
-
-            try:
-                expected_addr = (str(st.addr[0]), int(st.addr[1]))
-                source_addr = (str(addr[0]), int(addr[1]))
-            except (IndexError, TypeError, ValueError):
-                self._rx_wrong_source += 1
                 return False
 
             # The UDP endpoint is declared by the TCP hello. UDP is never
             # allowed to learn or overwrite it, otherwise a forged datagram can
             # hijack both the jitter stream and return audio.
-            if expected_addr[1] <= 0 or source_addr != expected_addr:
+            if (str(addr[0]), int(addr[1])) != (str(st.addr[0]), int(st.addr[1])):
                 self._rx_wrong_source += 1
                 return False
 
-            try:
-                if received_at - float(st.last_packet_monotonic) > 2.0:
-                    st.jb.reset()
-            except (TypeError, ValueError):
+            if received_at - float(st.last_packet_monotonic) > 2.0:
                 st.jb.reset()
 
             st.last_packet_monotonic = received_at
             st.last_timestamp_ms = int(pkt.timestamp_ms)
             st.last_sequence_number = int(pkt.sequence_number)
-            st.jb.push(
-                seq,
-                payload,
-                JitterFrameMetadata(
-                    session_token=session_token,
-                    client_id=client_id,
-                    timestamp_ms=int(pkt.timestamp_ms),
-                    stream_id=stream_id,
-                    bus_mask=bus_mask,
-                    flags=int(pkt.flags),
-                ),
-            )
+            st.jb.push(seq, payload, JitterFrameMetadata(session_token=session_token, bus_mask=bus_mask))
             self._rx_packets += 1
             self._last_valid_udp_monotonic = received_at
             return True
@@ -396,6 +338,13 @@ class MixerMixin:
                 )
             return destinations
 
+    def _log_bad_packet(self, addr, error: object) -> None:
+        # A misconfigured device or a stray stream on the audio port can send
+        # hundreds of datagrams per second: one line per source and window.
+        note = self._bad_packet_log.allow(str(addr[0]), now=time.monotonic())
+        if note is not None:
+            logger.warning("bad packet from {}: {}{}", addr, error, note)
+
     def _rx_loop(self) -> None:
         while not self._stop.is_set():
             try:
@@ -403,13 +352,13 @@ class MixerMixin:
             except TimeoutError:
                 continue
             except OSError as e:
+                err_code = getattr(e, "winerror", None) or getattr(e, "errno", None)
+                if err_code == WSAEMSGSIZE:
+                    self._rx_invalid_packets += 1
+                    continue
                 self._rx_socket_errors += 1
-                # WinError 10054 (WSAECONNRESET): Windows reports ICMP
-                # "port unreachable" when a previous sendto() targeted a
-                # closed client port.  This is harmless — just retry
-                # immediately so we don't block reception from other clients.
-                err_code = getattr(e, 'winerror', None) or getattr(e, 'errno', None)
-                if err_code == 10054:
+                # Per-datagram reports: never pause reception of every client.
+                if err_code in (WSAENETRESET, WSAECONNRESET):
                     continue
                 logger.debug("_rx_loop OSError: {} sock_err_count={}", e, self._rx_socket_errors)
                 if self._stop.is_set():
@@ -423,18 +372,18 @@ class MixerMixin:
             try:
                 pkt = unpack_audio_packet_v2(data)
             except AudioPacketValidationError as e:
-                self._count_invalid_audio_packet(e.reason)
-                logger.warning("bad packet from {}: {}", addr, e)
+                count_rejected_datagram(self, e.reason)
+                self._log_bad_packet(addr, e)
                 continue
             except Exception as e:
                 self._rx_invalid_packets += 1
-                logger.warning("bad packet from {}: {}", addr, e)
+                self._log_bad_packet(addr, e)
                 continue
 
             try:
                 self._accept_udp_packet(pkt, addr)
             except Exception as e:
-                self._rx_decode_errors += 1
+                self._rx_accept_errors += 1
                 logger.debug("UDP packet rejected after parsing from {}: {}", addr, e)
 
             now2 = time.monotonic()
@@ -444,12 +393,14 @@ class MixerMixin:
                     clients = len(self._clients)
                     mix_q = self._mix_queue.qsize()
                 logger.debug(
-                    "stats: clients={} rx_pkts={} tx_pkts={} rx_dec_err={} rx_unknown={} rx_inactive={} "
-                    "rx_wrong_source={} rx_invalid={} rx_token={} rx_direction={} rx_route={} tx_enc_err={} tx_sock_err={} mix_q={}",
+                    "stats: clients={} rx_pkts={} tx_pkts={} rx_dec_err={} rx_accept_err={} rx_unknown={} "
+                    "rx_inactive={} rx_wrong_source={} rx_invalid={} rx_token={} rx_direction={} rx_route={} "
+                    "tx_enc_err={} tx_sock_err={} mix_q={}",
                     clients,
                     self._rx_packets,
                     self._tx_packets,
                     self._rx_decode_errors,
+                    self._rx_accept_errors,
                     self._rx_unknown_clients,
                     self._rx_inactive_clients,
                     self._rx_wrong_source,
@@ -490,30 +441,12 @@ class MixerMixin:
                     self._stale_mix_epochs_dropped += 1
                     continue
 
+            # The Return ring only ever holds limited, finite frames.
             return_frame = _zero_frame
-            if bool(self._return_enabled):
-                if self._return_frames.pop_into(_return_scratch) is not None:
-                    if bool(np.isfinite(_return_scratch).all()):
-                        return_frame = _return_scratch
+            if bool(self._return_enabled) and self._return_frames.pop_into(_return_scratch) is not None:
+                return_frame = _return_scratch
 
             for client_id, addr, enc, listen_return, listen_regie, return_gain_db, session_token, ducker in dests:
-                try:
-                    udp_port = int(addr[1])
-                except Exception:
-                    udp_port = 0
-                if udp_port <= 0:
-                    # The TCP hello did not declare a valid UDP endpoint. Log
-                    # once per client instead of silently dropping forever.
-                    if not self._silent_dest_logged.get(int(client_id), False):
-                        self._silent_dest_logged[int(client_id)] = True
-                        logger.info(
-                            "client {} declared no valid UDP port; broadcast skipped",
-                            int(client_id),
-                        )
-                    continue
-                else:
-                    if self._silent_dest_logged.get(int(client_id), False):
-                        self._silent_dest_logged.pop(int(client_id), None)
                 try:
                     c = contrib.get(int(client_id))
                     if ducker is not None and listen_return:

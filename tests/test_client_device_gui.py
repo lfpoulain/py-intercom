@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from py_intercom.client.gui import (
     ClientWindow,
     _preset_requires_all_devices,
@@ -65,24 +67,30 @@ class _FakeLabel:
 class _FakeWindow:
     def __init__(self, preset: dict) -> None:
         self._preset = dict(preset)
-        self._device_refresh_timed_out_flag = False
         self._last_device_error = ""
         self._last_device_count = 0
         self._device_cache: dict[int, object] = {}
-        self._device_thread = None
+        self._device_refresh = SimpleNamespace(running=False)
         self._connected = False
         self._input_device = _FakeCombo()
         self._output_device = _FakeCombo()
         self._connect_btn = _FakeButton()
         self._preflight_btn = _FakeButton()
         self._device_status = _FakeLabel()
+        self._selection_hint_shown = False
         self.refresh_requests = 0
 
     def _preset_get(self, key: str, default=None):
         return self._preset.get(key, default)
 
+    def _preset_int(self, key: str, default: int) -> int:
+        return ClientWindow._preset_int(self, key, default)
+
     def _preset_set(self, key: str, value) -> None:
         self._preset[str(key)] = value
+
+    def _remember_device(self, direction: str, device: int) -> None:
+        ClientWindow._remember_device(self, direction, device)
 
     def _update_device_selection_state(self) -> None:
         ClientWindow._update_device_selection_state(self)
@@ -93,6 +101,14 @@ class _FakeWindow:
 
 def _refresh(window: _FakeWindow, devices: list[DeviceInfo]) -> None:
     ClientWindow._on_devices_refreshed(window, devices, "")
+
+
+def test_unusable_preset_numbers_fall_back_to_the_default() -> None:
+    window = _FakeWindow({"input_gain_db": float("inf"), "output_gain_db": "loud", "input_device": None})
+
+    assert window._preset_int("input_gain_db", 0) == 0
+    assert window._preset_int("output_gain_db", 3) == 3
+    assert window._preset_int("input_device", -1) == -1
 
 
 def test_non_wasapi_preset_automatically_requires_full_inventory() -> None:
@@ -158,12 +174,8 @@ def test_duplicate_bluetooth_twins_restore_by_direction_and_show_the_api() -> No
     assert window._input_device.currentData() == 93
     assert window._output_device.currentData() == 92
     assert window._connect_btn.enabled is True
-    assert window._input_device.items == [
-        (f"{twin_name} — Windows WDM-KS — #93", 93)
-    ]
-    assert window._output_device.items == [
-        (f"{twin_name} — Windows WDM-KS — #92", 92)
-    ]
+    assert window._input_device.items == [(f"{twin_name} — Windows WDM-KS — #93", 93)]
+    assert window._output_device.items == [(f"{twin_name} — Windows WDM-KS — #92", 92)]
 
 
 def test_direction_compatibility_filters_each_selector_independently() -> None:

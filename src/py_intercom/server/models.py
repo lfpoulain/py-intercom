@@ -5,16 +5,15 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import sounddevice as sd
 
 from ..common import opus_codec
+from ..common.audio import clamp_gain_db
 from ..common.constants import (
     FRAME_SAMPLES,
     LATENCY_TRIM_AFTER_FRAMES,
-    MAX_GAIN_DB,
     PCM_RING_TRIM_ABOVE_FRAMES,
     SAMPLE_RATE,
     SERVER_OUT_MAX_BUFFER_S,
@@ -25,14 +24,6 @@ from ..common.jitter_buffer import OpusPacketJitterBuffer, new_realtime_jitter_b
 from ..common.jsonio import JsonFileStatus
 from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.routing import RoutingResult
-
-
-def _profile_gain(value: Any) -> float:
-    try:
-        gain = float(value)
-    except (TypeError, ValueError):
-        gain = 0.0
-    return max(-60.0, min(float(MAX_GAIN_DB), gain))
 
 
 @dataclass
@@ -48,27 +39,59 @@ class ClientProfile:
     name: str = ""
     input_gain_db: float = 0.0
 
-    @classmethod
-    def from_preset(cls, client_uuid: str, value: Any) -> ClientProfile:
-        raw = value if isinstance(value, dict) else {}
-        return cls(
-            client_uuid=str(client_uuid),
-            name=str(raw.get("name") or ""),
-            input_gain_db=_profile_gain(raw.get("input_gain_db", 0.0)),
-        )
-
     def to_preset(self) -> dict:
         return {
             "name": str(self.name or ""),
-            "input_gain_db": _profile_gain(self.input_gain_db),
+            "input_gain_db": clamp_gain_db(self.input_gain_db),
         }
 
     def copy(self) -> ClientProfile:
         return ClientProfile(
             client_uuid=str(self.client_uuid),
             name=str(self.name or ""),
-            input_gain_db=_profile_gain(self.input_gain_db),
+            input_gain_db=clamp_gain_db(self.input_gain_db),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class SavedDevice:
+    """A sound card as a preset names it.
+
+    PortAudio indexes move when cards come and go: the name and host API are
+    what identify the card, the index only separates identical names.
+    """
+
+    index: int | None = None
+    name: str = ""
+    hostapi: str = ""
+
+    @property
+    def is_set(self) -> bool:
+        return self.index is not None or bool(self.name)
+
+
+@dataclass(frozen=True, slots=True)
+class PresetOutput:
+    """One physical output of a preset.
+
+    ``device`` is its card in the current inventory, None while that card is
+    absent: such an output is kept in the preset, never dropped.
+    """
+
+    device: int | None
+    saved: SavedDevice
+    bus_id: int
+    gain_db: float
+
+    def to_preset(self) -> dict:
+        """The entry as the preset saved it, for an output whose card is absent."""
+        return {
+            "device": self.saved.index,
+            "device_name": self.saved.name,
+            "device_hostapi": self.saved.hostapi,
+            "bus_id": int(self.bus_id),
+            "gain_db": float(self.gain_db),
+        }
 
 
 _OUTPUT_RING_CAPACITY_FRAMES = max(
@@ -84,8 +107,7 @@ class PresetLoadError(RuntimeError):
         self.status = status
         self.detail = str(detail or "unknown error")
         super().__init__(
-            f"Preset cannot be loaded ({status.value}): {self.path}. "
-            f"Backup: {self.backup_path}. Detail: {self.detail}"
+            f"Preset cannot be loaded ({status.value}): {self.path}. Backup: {self.backup_path}. Detail: {self.detail}"
         )
 
 
@@ -120,6 +142,10 @@ class ClientState:
     duck_return: bool = False
     # Owned by the broadcast worker only.
     ducker: ReturnDucker = field(default_factory=ReturnDucker, repr=False)
+    # Owned by the mix worker only: (session_token, bus_mask) of the last real
+    # frame. Packet-loss concealment continues that frame, so it inherits this
+    # route, and only within the same session.
+    last_frame_route: tuple[int, int] = (0, 0)
 
 
 @dataclass
@@ -137,7 +163,6 @@ class OutputState:
     bus_id: int
     gain_db: float = 0.0
     stream: sd.OutputStream | None = None
-    samplerate: int = int(SAMPLE_RATE)
     ring: FrameRingBuffer = field(
         default_factory=lambda: FrameRingBuffer(
             capacity=_OUTPUT_RING_CAPACITY_FRAMES,
@@ -152,13 +177,47 @@ class OutputState:
         repr=False,
     )
     underflows: int = 0
+    callback_statuses: int = 0
     vu_dbfs: float = -60.0
+    # Last sign of life of the stream: its latest callback, or its start time
+    # so a fresh stream gets one full stall window for its first callback.
     last_callback_monotonic: float = 0.0
     stream_error: str = ""
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # Serializes (re)opening this output's stream. Never taken by the audio
+    # callback, so it may be held across PortAudio calls.
+    open_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class _RoutingEnvelope:
     routing_epoch: int
     result: RoutingResult
+
+
+class LogThrottle:
+    """Let one log line per key (e.g. a peer IP) through per time window.
+
+    ``allow`` returns None while the key's window is still closed. Otherwise
+    it returns a suffix for the log line counting the lines suppressed since
+    the previous one (empty when none). The key table is bounded so a flood
+    of spoofed sources cannot grow it.
+    """
+
+    def __init__(self, window_s: float, *, max_keys: int = 256) -> None:
+        self._window_s = float(window_s)
+        self._max_keys = int(max_keys)
+        self._lock = threading.Lock()
+        self._entries: dict[str, tuple[float, int]] = {}
+
+    def allow(self, key: str, *, now: float) -> str | None:
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None and now - entry[0] < self._window_s:
+                self._entries[key] = (entry[0], entry[1] + 1)
+                return None
+            if entry is None and len(self._entries) >= self._max_keys:
+                self._entries.clear()
+            self._entries[key] = (float(now), 0)
+        suppressed = 0 if entry is None else int(entry[1])
+        return f" ({suppressed} similar line(s) suppressed)" if suppressed else ""

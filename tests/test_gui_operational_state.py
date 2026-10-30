@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from PySide6 import QtWidgets
 
 import py_intercom.common.opus_codec as opus_codec_mod
 import py_intercom.server.server as server_mod
@@ -15,6 +20,7 @@ from py_intercom.client.gui import (
 from py_intercom.client.status import (
     ClientOperationalState,
     ClientOperationalStatus,
+    OnlineRecoveryHysteresis,
     derive_client_operational_status,
 )
 from py_intercom.server.gui import (
@@ -36,9 +42,7 @@ def test_vu_refresh_is_decoupled_from_slower_structural_updates() -> None:
     assert 50 <= SERVER_VU_REFRESH_INTERVAL_MS <= 67
 
 
-def test_server_snapshot_contract_exposes_ui_audio_health(
-    monkeypatch, tmp_path
-) -> None:
+def test_server_snapshot_contract_exposes_ui_audio_health(monkeypatch, tmp_path) -> None:
     class Encoder:
         def __init__(self, *args, **kwargs) -> None:
             pass
@@ -157,9 +161,7 @@ def test_client_missing_stream_health_never_fails_open_to_online() -> None:
 )
 def test_every_non_online_ui_state_forces_all_ptt_routes_off(state) -> None:
     sent: list[tuple[int, bool]] = []
-    fake_client = SimpleNamespace(
-        set_ptt_bus=lambda bus_id, active: sent.append((int(bus_id), bool(active)))
-    )
+    fake_client = SimpleNamespace(set_ptt_bus=lambda bus_id, active: sent.append((int(bus_id), bool(active))))
     fake_window = SimpleNamespace(
         _client=fake_client,
         _global_ptt=None,
@@ -178,6 +180,147 @@ def test_every_non_online_ui_state_forces_all_ptt_routes_off(state) -> None:
     assert sent == [(0, False), (1, False), (2, False)]
 
 
+@pytest.fixture(scope="module")
+def qt_app() -> QtWidgets.QApplication:
+    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+
+def _status_window(*, start_fails: bool = False) -> SimpleNamespace:
+    """Window stub recording when the global shortcuts are armed or disarmed."""
+    window = SimpleNamespace(
+        _client=None,
+        _global_ptt=None,
+        _ever_online=False,
+        _ptt_start_failed=False,
+        _operational_status=ClientOperationalStatus(ClientOperationalState.DISCONNECTED, "Déconnecté", ""),
+        _status_label=QtWidgets.QLabel(),
+        _connection_state_banner=QtWidgets.QLabel(),
+        _refresh_state_labels=lambda: None,
+        calls=[],
+    )
+
+    def start() -> None:
+        if window._global_ptt is not None:
+            return  # like the window: a running hook is kept
+        window.calls.append("start")
+        if start_fails:
+            raise RuntimeError("hook refused")
+        window._global_ptt = object()
+
+    def disarm() -> None:
+        window.calls.append("disarm")
+        window._global_ptt = None
+
+    window._start_global_ptt = start
+    window._disarm_ptt_for_safety = disarm
+    window._suspend_ptt = lambda: window.calls.append("suspend")
+    window._apply_ptt_modes_to_client = lambda: window.calls.append("apply")
+    return window
+
+
+def _tick(window: SimpleNamespace, state: ClientOperationalState) -> None:
+    ClientWindow._set_operational_status(window, ClientOperationalStatus(state, state.value, ""))
+
+
+def test_shortcuts_are_never_armed_while_not_online(qt_app) -> None:
+    window = _status_window()
+
+    for state in (
+        ClientOperationalState.CONNECTING,
+        ClientOperationalState.CONNECTING,
+        ClientOperationalState.RECONNECTING,
+        ClientOperationalState.DEGRADED,
+        ClientOperationalState.DEGRADED,
+        ClientOperationalState.DISCONNECTED,
+    ):
+        _tick(window, state)
+
+    assert "start" not in window.calls and "apply" not in window.calls
+    assert window._global_ptt is None
+    assert window._ever_online is False
+
+
+def test_shortcuts_are_armed_once_online_and_disarmed_once_on_loss(qt_app) -> None:
+    window = _status_window()
+
+    for state in (
+        ClientOperationalState.CONNECTING,
+        ClientOperationalState.ONLINE,
+        ClientOperationalState.ONLINE,
+        ClientOperationalState.RECONNECTING,
+        ClientOperationalState.RECONNECTING,
+        ClientOperationalState.ONLINE,
+    ):
+        _tick(window, state)
+
+    assert window.calls == ["start", "apply", "disarm", "start", "apply"]
+    assert window._ever_online is True
+
+
+def test_udp_gap_suspends_ptt_without_restarting_the_shortcuts(qt_app) -> None:
+    window = _status_window()
+
+    for state in (
+        ClientOperationalState.ONLINE,
+        ClientOperationalState.DEGRADED,
+        ClientOperationalState.DEGRADED,
+        ClientOperationalState.ONLINE,
+    ):
+        _tick(window, state)
+
+    assert window.calls == ["start", "apply", "suspend", "apply"]
+    hook = window._global_ptt
+
+    _tick(window, ClientOperationalState.DEGRADED)
+    _tick(window, ClientOperationalState.RECONNECTING)
+
+    assert hook is not None
+    assert window.calls[-2:] == ["suspend", "disarm"]
+    assert window._global_ptt is None
+
+
+def _client_status(state: ClientOperationalState) -> ClientOperationalStatus:
+    return ClientOperationalStatus(state, state.value, "")
+
+
+def test_degraded_client_comes_back_online_only_once_stable() -> None:
+    gate = OnlineRecoveryHysteresis(hold_s=0.5)
+    online = _client_status(ClientOperationalState.ONLINE)
+    degraded = _client_status(ClientOperationalState.DEGRADED)
+    previous = ClientOperationalState.DEGRADED
+
+    assert gate.apply(online, previous=previous, now=10.0).state is ClientOperationalState.DEGRADED
+    assert gate.apply(online, previous=previous, now=10.3).state is ClientOperationalState.DEGRADED
+    # A relapse restarts the wait.
+    assert gate.apply(degraded, previous=previous, now=10.4) is degraded
+    assert gate.apply(online, previous=previous, now=10.6).state is ClientOperationalState.DEGRADED
+    assert gate.apply(online, previous=previous, now=11.0).state is ClientOperationalState.DEGRADED
+    assert gate.apply(online, previous=previous, now=11.2) is online
+
+
+@pytest.mark.parametrize(
+    "previous",
+    [ClientOperationalState.CONNECTING, ClientOperationalState.RECONNECTING, ClientOperationalState.ONLINE],
+)
+def test_coming_online_after_connecting_is_not_delayed(previous) -> None:
+    online = _client_status(ClientOperationalState.ONLINE)
+
+    assert OnlineRecoveryHysteresis().apply(online, previous=previous, now=0.0) is online
+
+
+def test_shortcut_start_failure_is_reported_as_degraded_and_not_retried(qt_app) -> None:
+    window = _status_window(start_fails=True)
+
+    _tick(window, ClientOperationalState.CONNECTING)
+    _tick(window, ClientOperationalState.ONLINE)
+    _tick(window, ClientOperationalState.ONLINE)
+
+    assert window.calls == ["start", "disarm"]
+    assert window._ptt_start_failed is True
+    assert window._operational_status.state is ClientOperationalState.DEGRADED
+    assert "Raccourcis PTT indisponibles" in window._operational_status.detail
+
+
 def _healthy_server_stats() -> dict:
     return {
         "running": True,
@@ -189,7 +332,6 @@ def _healthy_server_stats() -> dict:
         },
         "worker_errors": {},
         "control_connected_clients": 1,
-        "clients_waiting_udp": 0,
         "return_enabled": False,
     }
 
@@ -279,20 +421,6 @@ def test_server_dead_worker_is_a_visible_operational_error() -> None:
     assert health.engine.state is ServerHealthState.ERROR
     assert health.overall.state is ServerHealthState.ERROR
     assert "mix" in health.engine.detail
-
-
-def test_server_waiting_udp_is_degraded_not_green() -> None:
-    stats = _healthy_server_stats()
-    stats["clients_waiting_udp"] = 1
-
-    health = derive_server_operational_health(
-        stats,
-        {42: {"control_connected": True, "addr": None, "age_s": None}},
-        {0: {"stream_active": True}},
-    )
-
-    assert health.udp.state is ServerHealthState.DEGRADED
-    assert health.overall.state is ServerHealthState.DEGRADED
 
 
 def test_server_explicitly_inactive_output_is_an_error() -> None:
