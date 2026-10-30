@@ -22,7 +22,11 @@ OPUS_EXPECTED_LOSS_PERCENT = 10
 # --- Latency budget ---------------------------------------------------------
 # Every queue is bounded and drops its oldest frame when full: latency can
 # never grow past these caps, at the cost of a short glitch.
-JB_START_FRAMES = 4  # network pre-buffer before playout (~40 ms)
+# Network pre-buffer before playout (~30 ms, ~20 ms kept after each pop).
+# Opus FEC rebuilds a packet that arrives too late as long as the next one is
+# on time, so isolated spikes beyond this margin cost no audible glitch; only
+# a delay that hits several packets in a row (Wi-Fi stall) falls back to PLC.
+JB_START_FRAMES = 3
 JB_MAX_FRAMES = 30  # jitter buffer hard cap (~300 ms)
 SERVER_MIX_QUEUE_MAX = 20  # mixer -> broadcast queue (~200 ms)
 SERVER_RETURN_FRAMES_MAX = 20  # Return bus input queue (~200 ms)

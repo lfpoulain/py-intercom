@@ -140,7 +140,7 @@ Le catalogue `common/buses.py` est la source unique des bus. Chaque paquet audio
 | Étape | Contribution |
 |---|---|
 | Trame de capture | 10 ms |
-| Pré-buffer réseau (jitter buffer) | ~40 ms par saut (`JB_START_FRAMES = 4`) |
+| Pré-buffer réseau (jitter buffer) | ~30 ms par saut (`JB_START_FRAMES = 3`) ; un paquet en retard isolé au-delà est rattrapé par le FEC |
 | Encodage / décodage Opus | quelques ms |
 | Réseau LAN, ordonnanceur | variable |
 | Buffers WASAPI et carte son | dépend du pilote |
@@ -149,7 +149,7 @@ Le test d'intégration vérifie qu'en boucle locale, sans carte son, la voix d'u
 
 **Toutes les files sont bornées et jettent leur trame la plus ancienne quand elles sont pleines** (constantes dans `common/constants.py`) : le retard ne peut jamais dépasser leur capacité, au prix d'une coupure brève. Le jitter buffer démarre sur la fenêtre la plus récente et saute en avant sur un grand trou.
 
-**Plafond de latence.** Deux horloges ne battent jamais exactement au même rythme : carte son du client, horloge du serveur, carte son d'une sortie. Une rafale réseau peut aussi laisser des trames en trop. Côté client, la lecture est cadencée par la carte son du casque elle-même : chaque callback demande la trame suivante, le jitter buffer est donc lu exactement au rythme de la carte et cette dérive-là disparaît. Ailleurs, le jitter buffer et les rings de lecture surveillent leur profondeur : si elle reste au-dessus de sa cible pendant 0,5 s (`LATENCY_TRIM_AFTER_FRAMES`), une trame de 10 ms est retirée. Un excédent de plus de 2 trames qui dure 10 lectures (rafale réseau, lecteur bloqué) est retiré d'un coup. La latence revient ainsi toujours vers la cible (~30 ms de jitter buffer, ≤ 20 ms par ring), et un retard ne peut jamais s'installer. Après un silence, la lecture reprend sur la première trame attendue, sans nouveau pré-buffer. Chaque retrait est compté (`jb_trimmed`, `playout_ring_trimmed`, `queue_trimmed`, `return_queue_trimmed`).
+**Plafond de latence.** Deux horloges ne battent jamais exactement au même rythme : carte son du client, horloge du serveur, carte son d'une sortie. Une rafale réseau peut aussi laisser des trames en trop. Côté client, la lecture est cadencée par la carte son du casque elle-même : chaque callback demande la trame suivante, le jitter buffer est donc lu exactement au rythme de la carte et cette dérive-là disparaît. Ailleurs, le jitter buffer et les rings de lecture surveillent leur profondeur : si elle reste au-dessus de sa cible pendant 0,5 s (`LATENCY_TRIM_AFTER_FRAMES`), une trame de 10 ms est retirée. Un excédent de plus de 2 trames qui dure 10 lectures (rafale réseau, lecteur bloqué) est retiré d'un coup. La latence revient ainsi toujours vers la cible (~20 ms de jitter buffer, ≤ 20 ms par ring), et un retard ne peut jamais s'installer. Après un silence, la lecture reprend sur la première trame attendue, sans nouveau pré-buffer. Chaque retrait est compté (`jb_trimmed`, `playout_ring_trimmed`, `queue_trimmed`, `return_queue_trimmed`).
 
 
 ## Audio et Opus

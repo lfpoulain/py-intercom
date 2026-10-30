@@ -20,7 +20,12 @@ from py_intercom.common.buses import (
     REGIE_BUS_ID,
     VMIX_BUS_ID,
 )
-from py_intercom.common.constants import CTRL_LIVENESS_TIMEOUT_S, FRAME_SAMPLES, JB_MAX_CONCEALED_FRAMES
+from py_intercom.common.constants import (
+    CTRL_LIVENESS_TIMEOUT_S,
+    FRAME_SAMPLES,
+    JB_MAX_CONCEALED_FRAMES,
+    JB_START_FRAMES,
+)
 from py_intercom.common.control_protocol import (
     CONTROL_PROTOCOL_VERSION,
     MAX_CONTROL_LINE_BYTES,
@@ -2390,12 +2395,14 @@ def test_real_jitter_buffer_concealment_is_routed_on_the_talk_bus(server, monkey
     with server._lock:
         server._clients[7] = state
     # Seq 7 is lost in the middle of the talk spurt (seq 8 rebuilds it from
-    # its FEC), then the stream stops and PLC takes over.
-    for sequence in (*range(1, 7), 8, 9, 10):
+    # its FEC), then the stream stops and PLC takes over. The packets fill
+    # exactly the pre-buffer, so playout starts on the first of them.
+    before_loss = list(range(7 - (JB_START_FRAMES - 2), 7))
+    for sequence in (*before_loss, 8, 9):
         packet = _client_packet(7, bus_mask=1 << PLATEAU_BUS_ID, sequence_number=sequence)
         assert server._accept_udp_packet(packet, state.addr, now=now)
 
-    played = ["real", "fec", "real", "real", "real"] + ["plc"] * JB_MAX_CONCEALED_FRAMES
+    played = ["real"] * len(before_loss) + ["fec", "real", "real"] + ["plc"] * JB_MAX_CONCEALED_FRAMES
     calls = _run_mix_ticks(server, monkeypatch, len(played) + 1)
 
     # Every concealment frame plays on the bus of the talk it continues,

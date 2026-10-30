@@ -301,9 +301,12 @@ def test_short_network_hole_is_concealed_and_depth_returns_to_target():
         jb.push(late_seq, _payload(late_seq))
     seq = _run_ticks(jb, seq + 5, ticks=3 * LATENCY_TRIM_AFTER_FRAMES, frames=frames, depths=depths)
 
-    assert all(frame is not None for frame in frames)
-    concealed = [frame for frame in frames if frame.concealed]
+    # A hole longer than the margin plus the concealment plays silence, then
+    # playout resumes on the delayed packets.
+    concealed = [frame for frame in frames if frame is not None and frame.concealed]
     assert 1 <= len(concealed) <= JB_MAX_CONCEALED_FRAMES
+    played = [frame.sequence_number for frame in frames if frame is not None and not frame.concealed]
+    assert played == sorted(played) and delayed[0] in played
     # A late packet is still played: nothing was lost, only delayed.
     assert jb.stats.late_dropped == 0
     assert jb.stats.missing == 0
@@ -360,9 +363,9 @@ def test_slower_sender_is_concealed_without_dropping_audio():
         frames.append(jb.pop_frame())
 
     assert all(frame is not None for frame in frames)
-    # The initial margin absorbs three missing ticks, then each one is
-    # concealed once and the late packet still plays.
-    assert jb.stats.concealed == 7
+    # The initial margin absorbs its JB_START_FRAMES - 1 first missing ticks,
+    # then each one is concealed once and the late packet still plays.
+    assert jb.stats.concealed == 10 - (JB_START_FRAMES - 1)
     assert jb.stats.missing == 0
     assert jb.stats.late_dropped == 0
 
