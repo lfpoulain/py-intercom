@@ -11,6 +11,7 @@ from .constants import (
     OPUS_BITRATE,
     OPUS_COMPLEXITY,
     OPUS_DECODER_COMPLEXITY,
+    OPUS_EXPECTED_LOSS_PERCENT,
     SAMPLE_RATE,
 )
 
@@ -88,12 +89,17 @@ class OpusEncoder:
         _validate_config(self.config)
         try:
             import opuslib
+            import opuslib.api.ctl as opus_ctl_api
+            import opuslib.api.encoder as opus_encoder_api
         except Exception as e:
             raise RuntimeError("opuslib is required") from e
         try:
-            self._encoder = opuslib.Encoder(self.config.sample_rate, self.config.channels, opuslib.APPLICATION_AUDIO)
+            self._encoder = opuslib.Encoder(self.config.sample_rate, self.config.channels, opuslib.APPLICATION_VOIP)
             self._encoder.bitrate = self.config.bitrate
             self._encoder.complexity = self.config.complexity
+            # opuslib's inband_fec setter drops its value: call the CTL directly.
+            opus_encoder_api.encoder_ctl(self._encoder.encoder_state, opus_ctl_api.set_inband_fec, 1)
+            self._encoder.packet_loss_perc = OPUS_EXPECTED_LOSS_PERCENT
         except Exception as e:
             raise RuntimeError("failed to initialize Opus encoder (libopus missing?)") from e
 
@@ -151,7 +157,13 @@ class OpusDecoder:
                 "failed to initialize the Deep PLC Opus decoder (libopus 1.5+ built with Deep PLC is required)"
             ) from e
 
-    def decode(self, payload: bytes) -> np.ndarray:
+    def decode(self, payload: bytes, *, fec: bool = False) -> np.ndarray:
+        """Decode one frame; an empty payload runs Deep PLC.
+
+        With ``fec``, ``payload`` is the packet that *follows* a lost frame:
+        the lost frame is rebuilt from its in-band redundancy. That packet is
+        then decoded again normally when its own turn comes.
+        """
         if not isinstance(payload, (bytes, bytearray, memoryview)):
             raise TypeError("Opus payload must be bytes-like")
         payload = bytes(payload)
@@ -169,7 +181,7 @@ class OpusDecoder:
                 channels=self.config.channels,
             )
         else:
-            pcm = self._decoder.decode(payload, self.config.frame_samples, decode_fec=False)
+            pcm = self._decoder.decode(payload, self.config.frame_samples, decode_fec=bool(fec))
 
         if not isinstance(pcm, (bytes, bytearray, memoryview)):
             raise TypeError("Opus decoder returned non-bytes PCM")

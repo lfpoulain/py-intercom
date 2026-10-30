@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from .constants import (
     JB_BURST_EXCESS_FRAMES,
@@ -15,6 +15,11 @@ from .constants import (
     LATENCY_TRIM_AFTER_FRAMES,
 )
 
+if TYPE_CHECKING:
+    import numpy as np
+
+    from .opus_codec import OpusDecoder
+
 
 def _seq_distance(a: int, b: int) -> int:
     return int(((int(a) - int(b) + (1 << 31)) & 0xFFFFFFFF) - (1 << 31))
@@ -25,6 +30,7 @@ class JitterStats:
     late_dropped: int = 0
     missing: int = 0
     concealed: int = 0
+    fec: int = 0
     resets: int = 0
     trimmed: int = 0
 
@@ -46,19 +52,29 @@ FAIL_CLOSED_METADATA: Final[JitterFrameMetadata] = JitterFrameMetadata()
 
 @dataclass(frozen=True, slots=True)
 class JitterFrame:
+    """One playout slot.
+
+    A ``concealed`` slot has no payload of its own. When the packet that
+    follows the lost one is already buffered, ``fec_payload`` holds it: the
+    decoder rebuilds the lost frame from its in-band FEC instead of running
+    PLC.
+    """
+
     sequence_number: int
     payload: bytes
     metadata: JitterFrameMetadata = FAIL_CLOSED_METADATA
     concealed: bool = False
+    fec_payload: bytes = b""
 
 
-def _concealed_frame(sequence_number: int) -> JitterFrame:
+def _concealed_frame(sequence_number: int, fec_payload: bytes = b"") -> JitterFrame:
     """Packet-loss concealment slot: no payload and fail-closed metadata."""
     return JitterFrame(
         sequence_number=sequence_number,
         payload=b"",
         metadata=FAIL_CLOSED_METADATA,
         concealed=True,
+        fec_payload=fec_payload,
     )
 
 
@@ -229,8 +245,12 @@ class OpusPacketJitterBuffer:
                     # expected one is lost: conceal it at its deadline.
                     self._expected_seq = (exp + 1) & 0xFFFFFFFF
                     self.stats.missing += 1
-                    self.stats.concealed += 1
                     self._underrun_pops = 0
+                    following = self._buf.get((exp + 1) & 0xFFFFFFFF)
+                    if following is not None and following.payload:
+                        self.stats.fec += 1
+                        return _concealed_frame(exp, following.payload)
+                    self.stats.concealed += 1
                     return _concealed_frame(exp)
 
             # Underrun: the expected frame is not here yet. Conceal the tick
@@ -286,3 +306,10 @@ def new_realtime_jitter_buffer() -> OpusPacketJitterBuffer:
         trim_above=JB_TRIM_ABOVE_FRAMES,
         trim_after=LATENCY_TRIM_AFTER_FRAMES,
     )
+
+
+def decode_jitter_frame(decoder: OpusDecoder, frame: JitterFrame) -> np.ndarray:
+    """Decode one playout slot: its own packet, the next packet's FEC, or PLC."""
+    if frame.fec_payload:
+        return decoder.decode(frame.fec_payload, fec=True)
+    return decoder.decode(frame.payload)

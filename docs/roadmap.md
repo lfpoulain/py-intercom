@@ -24,6 +24,7 @@ Un intercom LAN desktop fiable pour le live : latence bornée, comportement fail
 - Octobre 2026 : contrôle HTTP du PTT côté client (Stream Deck, Companion, scripts).
 - Octobre 2026 : nouvelle interface façon console : pads de parole cliquables côté client, tranches de mixage côté serveur.
 - Octobre 2026 : audit complet (latence, stabilité, PTT, code mort), priorité temps réel Windows, options de sockets, VU micro hors PTT, Return stéréo, diagnostic RTT / tampons / PLC.
+- Octobre 2026 : Opus en mode voix avec FEC intégré ; lecture client cadencée par la carte son ; banc de latence déterministe (`scripts/latency_bench.py`).
 
 ## Travaux ouverts
 

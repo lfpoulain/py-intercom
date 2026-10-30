@@ -23,8 +23,7 @@ from py_intercom.common.constants import (
     CTRL_RECONNECT_MIN_S,
     FRAME_SAMPLES,
     MAX_GAIN_DB,
-    PCM_RING_TRIM_ABOVE_FRAMES,
-    SAMPLE_RATE,
+    PLAYOUT_LEAD_FRAMES,
 )
 from py_intercom.common.control_protocol import (
     CONTROL_PROTOCOL_VERSION,
@@ -662,7 +661,7 @@ def test_unexpected_decoded_opus_frame_fails_to_exact_silence(client_factory, de
             return decoded
 
     before = client._opus_decode_errors
-    frame = client._decode_playout_frame(b"valid-opus-packet", _UnexpectedDecoder())
+    frame = client._decode_playout_frame(JitterFrame(1, b"valid-opus-packet"), _UnexpectedDecoder())
 
     assert frame.shape == (int(FRAME_SAMPLES),)
     assert np.array_equal(frame, np.zeros((int(FRAME_SAMPLES),), dtype=np.float32))
@@ -811,6 +810,7 @@ def test_playout_worker_exclusively_decodes_before_output_callback(
     )
     client._playout_thread = playout_thread
     playout_thread.start()
+    client._playout_tick.set()  # the card asks for its next frame
 
     assert _wait_until(lambda: client._playout_ring.depth == 1)
     output = np.empty((int(FRAME_SAMPLES), 1), dtype=np.float32)
@@ -997,10 +997,12 @@ def test_playout_worker_recreates_decoder_for_each_authenticated_epoch(
     )
     client._playout_thread = playout_thread
     playout_thread.start()
+    client._playout_tick.set()  # the card asks for its next frame
 
     assert _wait_until(lambda: client._playout_ring.depth == 1)
     first_pcm = np.empty((int(FRAME_SAMPLES),), dtype=np.float32)
     assert client._playout_ring.pop_into(first_pcm) == 1
+    client._playout_tick.set()
 
     next_token = SESSION_TOKEN + 1
     client._activate_session_token(next_token, client._stop)
@@ -1105,6 +1107,7 @@ def test_decoder_reset_failure_publishes_no_pcm(client_factory, monkeypatch):
     )
     client._playout_thread = playout_thread
     playout_thread.start()
+    client._playout_tick.set()  # the card asks for its next frame
 
     assert _wait_until(lambda: client._opus_decoder_reset_errors == 1)
     assert client._playout_ring.depth == 0
@@ -1641,62 +1644,43 @@ def test_server_bus_config_must_be_a_list(client_factory):
     receiver.close()
 
 
-_PLAYOUT_PERIOD_S = float(FRAME_SAMPLES) / float(SAMPLE_RATE)
-
-
-def _run_playout_against_simulated_card(
-    client: IntercomClient,
-    monkeypatch,
-    *,
-    frames: int = 30,
-    late_wakes: dict[int, float] | None = None,
-    stalls_after_push: dict[int, float] | None = None,
-    card_runs_during_stalls: bool = True,
+def _run_playout_on_card_clock(
+    client: IntercomClient, monkeypatch, *, reads: int, burst_reads: dict[int, int] | None = None
 ) -> SimpleNamespace:
-    """Run the playout worker on a simulated clock against a simulated sound card.
+    """Run the playout worker in step with a simulated sound card.
 
-    The card reads the PCM ring every period, three quarters of a period after
-    each worker tick. One frame is queued beforehand, so the ring starts with
-    its steady-state margin of one frame. ``late_wakes[n]`` makes the worker
-    wake up that late before its n-th jitter pop; ``stalls_after_push[n]``
-    deschedules it right after it published its n-th frame.
+    Each wait of the worker on ``_playout_tick`` is one card period: the card
+    reads the PCM ring once, or ``burst_reads[n]`` times when the worker was
+    descheduled for that many periods before its n-th wake-up.
 
-    Returns the jitter pop times and, for each card read, the ring depth left
-    behind (-1 when the card found the ring empty and played silence).
+    Returns, for each card read, the ring depth left behind (-1 when the card
+    found the ring empty and played silence), and the jitter pops.
     """
-    late_wakes = dict(late_wakes or {})
-    stalls_after_push = dict(stalls_after_push or {})
+    burst_reads = dict(burst_reads or {})
     ring = client._playout_ring
-    real_push = ring.push
-    clock = [1000.0]
-    next_card_read = [clock[0] + 0.75 * _PLAYOUT_PERIOD_S]
     card_output = np.empty((int(FRAME_SAMPLES),), dtype=np.float32)
     card_reads: list[int] = []
-    pops: list[float] = []
+    pops: list[int] = []
+    stop_event = threading.Event()
 
-    def advance(seconds: float, *, card_runs: bool = True) -> None:
-        target = clock[0] + float(seconds)
-        while next_card_read[0] <= target:
-            clock[0] = next_card_read[0]
-            if card_runs:
+    class _CardTick:
+        wakes = 0
+
+        def wait(self, timeout=None) -> bool:
+            self.wakes += 1
+            for _ in range(burst_reads.pop(self.wakes, 1)):
                 played = ring.pop_into(card_output) is not None
                 card_reads.append(ring.depth if played else -1)
-            next_card_read[0] += _PLAYOUT_PERIOD_S
-        clock[0] = target
+            if len(card_reads) >= reads:
+                stop_event.set()
+            return True
 
-    class _SimulatedStopEvent(threading.Event):
-        def wait(self, timeout=None) -> bool:
-            advance(float(timeout))
-            advance(late_wakes.pop(len(pops) + 1, 0.0), card_runs=card_runs_during_stalls)
-            return self.is_set()
-
-    stop_event = _SimulatedStopEvent()
+        def clear(self) -> None:
+            pass
 
     class _EndlessJitterBuffer:
         def pop_frame(self):
-            pops.append(clock[0])
-            if len(pops) == frames:
-                stop_event.set()
+            pops.append(len(card_reads))
             return JitterFrame(
                 sequence_number=len(pops),
                 payload=b"opus",
@@ -1706,97 +1690,61 @@ def _run_playout_against_simulated_card(
         def reset(self) -> None:
             pass
 
-    def push_then_stall(frame, metadata=0) -> None:
-        real_push(frame, metadata=metadata)
-        advance(stalls_after_push.pop(len(pops), 0.0), card_runs=card_runs_during_stalls)
-
-    monkeypatch.setattr(ring, "push", push_then_stall)
-    monkeypatch.setattr(transport_mod, "time", SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
+    monkeypatch.setattr(
+        opus_codec_mod, "OpusDecoder", lambda: SimpleNamespace(decode=lambda *_a, **_k: np.zeros(FRAME_SAMPLES))
+    )
     client._jb = _EndlessJitterBuffer()
+    client._playout_tick = _CardTick()
     udp_ready = threading.Event()
     udp_ready.set()
     with client._network_state_lock:
         client._stop = stop_event
         client._udp_ready = udp_ready
     client._session_token = SESSION_TOKEN
-    real_push(np.zeros((int(FRAME_SAMPLES),), dtype=np.float32))
 
     client._playout_loop(stop_event, client._network_generation, udp_ready)
-    return SimpleNamespace(pops=pops, card_reads=card_reads)
+    return SimpleNamespace(card_reads=card_reads, pops=pops)
 
 
-def _elapsed_ticks(pops: list[float]) -> int:
-    return round((pops[-1] - pops[0]) / _PLAYOUT_PERIOD_S)
+def test_playout_reads_the_jitter_buffer_at_the_card_rate(client_factory, monkeypatch):
+    client = client_factory(server_port=9)
+
+    run = _run_playout_on_card_clock(client, monkeypatch, reads=50)
+
+    # Only the very first read finds the ring empty; afterwards every card
+    # period takes exactly the frame decoded during the previous one.
+    assert run.card_reads[0] == -1
+    assert run.card_reads[1:] == [PLAYOUT_LEAD_FRAMES - 1] * 49
+    # One jitter pop per card read (the worker stops right after the last).
+    assert len(run.pops) == len(run.card_reads) - 1
 
 
-@pytest.mark.parametrize(
-    "delay",
-    [
-        {"late_wakes": {10: 0.012}},
-        {"late_wakes": {10: 0.015}},
-        {"stalls_after_push": {10: 0.022}},
-    ],
-    ids=["woken-12ms-late", "woken-15ms-late", "descheduled-22ms"],
-)
-def test_playout_makes_up_the_ticks_a_late_worker_missed(client_factory, monkeypatch, delay):
-    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    receiver.bind(("127.0.0.1", 0))
-    client = client_factory(server_port=receiver.getsockname()[1])
+def test_a_late_playout_worker_never_bursts_frames_into_the_ring(client_factory, monkeypatch):
+    client = client_factory(server_port=9)
 
-    run = _run_playout_against_simulated_card(client, monkeypatch, **delay)
+    # The worker misses three card periods at its 20th wake-up.
+    run = _run_playout_on_card_clock(client, monkeypatch, reads=50, burst_reads={20: 4})
 
-    # The ring margin covered the delay: the card never played silence, every
-    # tick still produced its frame and the margin is whole again afterwards.
-    assert -1 not in run.card_reads
-    assert len(run.pops) - 1 == _elapsed_ticks(run.pops)
-    assert run.card_reads[-5:] == [PCM_RING_TRIM_ABOVE_FRAMES] * 5
-    receiver.close()
+    # The card played silence for the missed periods, then the worker queued
+    # a single frame again: the late frames stay in the jitter buffer (its
+    # latency cap removes them) instead of delaying everything after.
+    assert run.card_reads.count(-1) == 1 + 3
+    assert max(run.card_reads) == PLAYOUT_LEAD_FRAMES - 1
+    assert run.card_reads[-10:] == [PLAYOUT_LEAD_FRAMES - 1] * 10
+    assert len(run.pops) == len(run.card_reads) - 1 - 3
 
 
-@pytest.mark.parametrize(
-    "delay",
-    [{"late_wakes": {10: 0.045}}, {"stalls_after_push": {10: 0.045}}],
-    ids=["woken-45ms-late", "descheduled-45ms"],
-)
-def test_playout_drops_the_ticks_the_card_already_played_silence_for(client_factory, monkeypatch, delay):
-    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    receiver.bind(("127.0.0.1", 0))
-    client = client_factory(server_port=receiver.getsockname()[1])
+def test_output_callback_asks_the_worker_for_the_next_frame(client_factory):
+    client = client_factory(server_port=9)
+    client._stop = threading.Event()
+    client._udp_ready = threading.Event()
+    client._udp_ready.set()
+    client._playout_tick.clear()
+    output = np.empty((int(FRAME_SAMPLES), 1), dtype=np.float32)
 
-    run = _run_playout_against_simulated_card(client, monkeypatch, **delay)
+    client._out_callback(output, int(FRAME_SAMPLES), None, None)
 
-    silenced = run.card_reads.count(-1)
-    assert silenced > 0
-    # Exactly the ticks covered by silence are dropped (their frames are left
-    # to the jitter buffer's latency cap): bursting them into the ring would
-    # delay everything played afterwards.
-    assert len(run.pops) - 1 + silenced == _elapsed_ticks(run.pops)
-    after_silence = run.card_reads[run.card_reads.index(-1) :]
-    assert max(after_silence) <= PCM_RING_TRIM_ABOVE_FRAMES
-    assert run.card_reads[-5:] == [PCM_RING_TRIM_ABOVE_FRAMES] * 5
-    receiver.close()
-
-
-def test_playout_drops_a_stall_too_long_to_make_up(client_factory, monkeypatch):
-    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    receiver.bind(("127.0.0.1", 0))
-    client = client_factory(server_port=receiver.getsockname()[1])
-
-    # The whole process was descheduled for 100 ms, sound card callback
-    # included: no silence was counted, but ten ticks are overdue.
-    run = _run_playout_against_simulated_card(
-        client,
-        monkeypatch,
-        stalls_after_push={10: 0.100},
-        card_runs_during_stalls=False,
-    )
-
-    resumed_at = run.pops[10]
-    assert run.pops.count(resumed_at) == 1
-    receiver.close()
-
-
-# --- Server refusal and reconnection backoff ------------------------------------------
+    assert client._playout_tick.is_set()
 
 
 def _welcome_line() -> bytes:

@@ -15,6 +15,7 @@ from py_intercom.common.jitter_buffer import (
     JitterFrameMetadata,
     OpusPacketJitterBuffer,
     _seq_distance,
+    decode_jitter_frame,
     new_realtime_jitter_buffer,
 )
 
@@ -77,19 +78,20 @@ def test_far_future_resets_buffer():
     assert jb.pop_frame().sequence_number == far
 
 
-def test_plc_emits_empty_payload_on_small_gap():
+def test_plc_emits_empty_payload_when_the_next_packet_is_lost_too():
     jb = OpusPacketJitterBuffer(start_frames=2, max_frames=20)
     jb.push(0, _payload(0))
     jb.push(1, _payload(1))
     jb.pop_frame()  # consume one
-    # Skip seq 2, push seq 3 and 4: seq 2 is lost and must be concealed.
-    jb.push(3, _payload(3))
+    # Seq 2 and 3 are lost: no following packet to rebuild seq 2 from.
     jb.push(4, _payload(4))
+    jb.push(5, _payload(5))
 
     assert jb.pop_frame().sequence_number == 1
     concealed = jb.pop_frame()
     assert concealed.concealed is True
     assert concealed.payload == b""
+    assert concealed.fec_payload == b""
     assert concealed.sequence_number == 2
     assert jb.stats.concealed == 1
     assert jb.stats.missing == 1
@@ -283,7 +285,7 @@ def test_single_loss_is_concealed_at_its_deadline_without_adding_delay():
     lags = [JB_START_FRAMES + tick - frame.sequence_number for tick, frame in enumerate(frames)]
     assert set(lags) == {JB_TRIM_ABOVE_FRAMES}
     assert depths[-1] == JB_TRIM_ABOVE_FRAMES
-    assert (jb.stats.missing, jb.stats.concealed) == (1, 1)
+    assert (jb.stats.missing, jb.stats.fec, jb.stats.concealed) == (1, 1, 0)
 
 
 def test_short_network_hole_is_concealed_and_depth_returns_to_target():
@@ -460,3 +462,28 @@ def test_latency_cap_absorbs_clock_drift() -> None:
 
     assert max(depths[500:]) <= JB_TRIM_ABOVE_FRAMES + 1
     assert jb.stats.trimmed > 0
+
+
+def test_a_lost_frame_carries_the_next_packet_for_fec():
+    jb = new_realtime_jitter_buffer()
+
+    frames, _depths, _seq = _steady_stream(jb, ticks=40, skip={10})
+
+    rebuilt = [frame for frame in frames if frame.concealed]
+    assert [frame.sequence_number for frame in rebuilt] == [10]
+    assert rebuilt[0].fec_payload == _payload(11)
+    assert (jb.stats.fec, jb.stats.concealed, jb.stats.missing) == (1, 0, 1)
+
+
+def test_decode_uses_fec_only_when_the_next_packet_is_there():
+    calls = []
+
+    class _Decoder:
+        def decode(self, payload, *, fec=False):
+            calls.append((payload, fec))
+
+    decode_jitter_frame(_Decoder(), JitterFrame(5, b"own"))
+    decode_jitter_frame(_Decoder(), JitterFrame(6, b"", concealed=True, fec_payload=b"next"))
+    decode_jitter_frame(_Decoder(), JitterFrame(7, b"", concealed=True))
+
+    assert calls == [(b"own", False), (b"next", True), (b"", False)]

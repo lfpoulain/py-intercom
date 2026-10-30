@@ -11,6 +11,13 @@ MAX_GAIN_DB = 20.0
 OPUS_BITRATE = 64000
 OPUS_COMPLEXITY = 5
 OPUS_DECODER_COMPLEXITY = 5  # 5 is the threshold that enables Deep PLC.
+# The intercom only carries voice: the VoIP mode codes it in hybrid (SILK +
+# CELT) and each packet carries a low-rate copy of the previous frame. A lost
+# frame is rebuilt from the next packet, already in the jitter buffer, with no
+# added delay (same 6.5 ms lookahead). Measured on speech with 5 % isolated
+# losses: lost frames come back at ~20 dB SNR, against ~4 dB with Deep PLC.
+# This percentage sizes that redundancy, it is not a loss threshold.
+OPUS_EXPECTED_LOSS_PERCENT = 10
 
 # --- Latency budget ---------------------------------------------------------
 # Every queue is bounded and drops its oldest frame when full: latency can
@@ -37,8 +44,16 @@ JB_BURST_TRIM_AFTER_FRAMES = 10
 # first frame that was missing.
 JB_MAX_CONCEALED_FRAMES = 2
 # One frame of margin against the phase jitter between a producer thread and
-# the sound card callback that reads the ring.
+# the sound card callback that reads the ring (server outputs and Return).
 PCM_RING_TRIM_ABOVE_FRAMES = 1
+# Client playout runs on the headphones' clock: each output callback asks the
+# decoder for the next frame, which is queued this many frames ahead.
+PLAYOUT_LEAD_FRAMES = 1
+# The jitter buffer is read this long before the card needs the frame, not
+# right after its callback: a frame arriving meanwhile (start of a talk spurt)
+# is then played one period sooner. It leaves the decoder 4 ms to wake up and
+# decode (~0.5 ms); see scripts/latency_bench.py.
+PLAYOUT_DECODE_AHEAD_MS = 4.0
 
 # --- Return ducking (optional, per client) ---------------------------------
 RETURN_DUCK_DEPTH_DB = -15.0  # Return attenuation while voices are heard

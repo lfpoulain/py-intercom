@@ -45,15 +45,16 @@ class _FakeStream:
 
 def _free_port_pair() -> int:
     """Return a UDP port whose TCP neighbour (control port) is also free."""
+    # Start from a TCP port the system grants: Windows reserves whole TCP
+    # ranges (Hyper-V), and UDP ephemeral ports are handed out next to each
+    # other, so probing from the UDP side can stay inside such a range.
     for _ in range(50):
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
-            udp.bind(("127.0.0.1", 0))
-            port = int(udp.getsockname()[1])
-        if port >= 65535:
-            continue
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
+            tcp.bind(("127.0.0.1", 0))
+            port = int(tcp.getsockname()[1]) - 1
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
-                tcp.bind(("127.0.0.1", port + 1))
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+                udp.bind(("127.0.0.1", port))
         except OSError:
             continue
         return port
@@ -107,15 +108,22 @@ class _Microphone:
         self._thread.join(timeout=2.0)
 
 
+def _play_one_period(client: IntercomClient, outdata: np.ndarray) -> np.ndarray:
+    """Run the headphone callback once, as the sound card would every 10 ms."""
+    client._out_callback(outdata, FRAME_SAMPLES, None, None)
+    return outdata[:, 0].copy()
+
+
 def _listen(client: IntercomClient, duration_s: float) -> np.ndarray:
-    """Drain a client's playout ring for ``duration_s`` like a headphone callback."""
-    frame = np.empty(FRAME_SAMPLES, dtype=np.float32)
+    """Play a client's headphones for ``duration_s`` on a real-time card clock."""
+    outdata = np.empty((FRAME_SAMPLES, 1), dtype=np.float32)
     received: list[np.ndarray] = []
-    deadline = time.monotonic() + duration_s
+    next_tick = time.monotonic()
+    deadline = next_tick + duration_s
     while time.monotonic() < deadline:
-        while client._playout_ring.pop_into(frame) is not None:
-            received.append(frame.copy())
-        time.sleep(FRAME_PERIOD_S / 2)
+        received.append(_play_one_period(client, outdata))
+        next_tick += FRAME_PERIOD_S
+        time.sleep(max(0.0, next_tick - time.monotonic()))
     return np.concatenate(received) if received else np.zeros(0, dtype=np.float32)
 
 
@@ -233,13 +241,15 @@ def test_end_to_end_latency_stays_low(server, connect):
 
     with _Microphone(alice):
         started = time.monotonic()
-        frame = np.empty(FRAME_SAMPLES, dtype=np.float32)
+        outdata = np.empty((FRAME_SAMPLES, 1), dtype=np.float32)
         first_audio_s = None
+        next_tick = started
         while time.monotonic() - started < 2.0:
-            if bob._playout_ring.pop_into(frame) is not None and _rms_dbfs(frame) > SPEECH_DBFS:
+            if _rms_dbfs(_play_one_period(bob, outdata)) > SPEECH_DBFS:
                 first_audio_s = time.monotonic() - started
                 break
-            time.sleep(0.001)
+            next_tick += FRAME_PERIOD_S
+            time.sleep(max(0.0, next_tick - time.monotonic()))
 
     assert first_audio_s is not None, "Bob never heard Alice"
     # Network + jitter pre-buffering on both hops, without the sound cards.

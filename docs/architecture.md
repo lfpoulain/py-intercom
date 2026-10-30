@@ -90,8 +90,8 @@ Règle d'or : **aucun callback PortAudio ne fait d'I/O, n'encode, ne décode, ne
 | Callback d'entrée | Valide la trame, applique le gain, calcule le VU, pousse dans le ring TX |
 | Worker TX | Seul propriétaire de l'encodeur Opus, de la séquence et de l'envoi UDP |
 | Worker RX | Valide les datagrammes et alimente le jitter buffer |
-| Worker playout | Cadence le jitter buffer toutes les 10 ms, décode, pousse dans le ring de lecture |
-| Callback de sortie | Dépile une trame, applique le volume, joue du silence en cas de manque |
+| Worker playout | Réveillé par le callback de sortie : lit le jitter buffer 4 ms avant la lecture suivante de la carte, décode, met une trame d'avance dans le ring de lecture |
+| Callback de sortie | Dépile une trame, applique le volume, joue du silence en cas de manque, et demande la trame suivante |
 | Worker contrôle | Connexion TCP, handshake, pings, reconnexion avec backoff |
 
 Le processus tourne en priorité `ABOVE_NORMAL` (jamais `HIGH` : vMix ou un encodeur doivent continuer de tourner), avec un passage du GIL toutes les 1 ms au lieu de 5. Les workers TX, RX et playout, et côté serveur `udp-rx`, `mix` et `udp-tx`, sont inscrits auprès de MMCSS comme threads « Pro Audio ». Les sockets UDP ignorent les ICMP « port injoignable » (`SIO_UDP_CONNRESET`) et le contrôle TCP envoie chaque ligne sans délai de Nagle (`TCP_NODELAY`).
@@ -122,7 +122,7 @@ Le token lie le flux UDP à la session TCP. Ce n'est ni un chiffrement ni une au
 
 ## Routage et mix-minus
 
-Le catalogue `common/buses.py` est la source unique des bus. Chaque paquet audio porte son **`bus_mask`** : la route voyage avec la trame, jamais séparément. Une trame reconstruite par PLC porte un masque nul et ne peut donc ouvrir aucune route.
+Le catalogue `common/buses.py` est la source unique des bus. Chaque paquet audio porte son **`bus_mask`** : la route voyage avec la trame, jamais séparément. Une trame reconstruite (FEC ou PLC) reprend la route de la dernière trame reçue de la même session, jamais une autre.
 
 `common/routing.py` est une fonction pure :
 
@@ -149,7 +149,7 @@ Le test d'intégration vérifie qu'en boucle locale, sans carte son, la voix d'u
 
 **Toutes les files sont bornées et jettent leur trame la plus ancienne quand elles sont pleines** (constantes dans `common/constants.py`) : le retard ne peut jamais dépasser leur capacité, au prix d'une coupure brève. Le jitter buffer démarre sur la fenêtre la plus récente et saute en avant sur un grand trou.
 
-**Plafond de latence.** Deux horloges ne battent jamais exactement au même rythme : carte son du client, horloge du serveur, carte son d'une sortie. Une rafale réseau peut aussi laisser des trames en trop. Le jitter buffer et les rings de lecture surveillent donc leur profondeur : si elle reste au-dessus de sa cible pendant 0,5 s (`LATENCY_TRIM_AFTER_FRAMES`), une trame de 10 ms est retirée. Un excédent de plus de 2 trames qui dure 10 lectures (rafale réseau, lecteur bloqué) est retiré d'un coup. La latence revient ainsi toujours vers la cible (~30 ms de jitter buffer, ≤ 20 ms par ring), et un retard ne peut jamais s'installer. Après un silence, la lecture reprend sur la première trame attendue, sans nouveau pré-buffer. Chaque retrait est compté (`jb_trimmed`, `playout_ring_trimmed`, `queue_trimmed`, `return_queue_trimmed`).
+**Plafond de latence.** Deux horloges ne battent jamais exactement au même rythme : carte son du client, horloge du serveur, carte son d'une sortie. Une rafale réseau peut aussi laisser des trames en trop. Côté client, la lecture est cadencée par la carte son du casque elle-même : chaque callback demande la trame suivante, le jitter buffer est donc lu exactement au rythme de la carte et cette dérive-là disparaît. Ailleurs, le jitter buffer et les rings de lecture surveillent leur profondeur : si elle reste au-dessus de sa cible pendant 0,5 s (`LATENCY_TRIM_AFTER_FRAMES`), une trame de 10 ms est retirée. Un excédent de plus de 2 trames qui dure 10 lectures (rafale réseau, lecteur bloqué) est retiré d'un coup. La latence revient ainsi toujours vers la cible (~30 ms de jitter buffer, ≤ 20 ms par ring), et un retard ne peut jamais s'installer. Après un silence, la lecture reprend sur la première trame attendue, sans nouveau pré-buffer. Chaque retrait est compté (`jb_trimmed`, `playout_ring_trimmed`, `queue_trimmed`, `return_queue_trimmed`).
 
 
 ## Audio et Opus
@@ -158,8 +158,9 @@ Le test d'intégration vérifie qu'en boucle locale, sans carte son, la voix d'u
 |---|---|
 | Fréquence | 48 000 Hz, mono |
 | Trame | 480 échantillons (10 ms) |
-| Codec | Opus 1.6.1 (`bin/opus.dll`), 64 kbit/s, complexité 5 |
-| PLC | Deep PLC activé (complexité décodeur 5) ; DRED et OSCE désactivés |
+| Codec | Opus 1.6.1 (`bin/opus.dll`), mode VoIP (hybride SILK + CELT), 64 kbit/s, complexité 5 |
+| FEC | FEC intégré (`OPUS_EXPECTED_LOSS_PERCENT = 10`) : une trame perdue est reconstruite depuis le paquet suivant, déjà dans le jitter buffer, sans latence ajoutée |
+| PLC | Deep PLC (complexité décodeur 5) quand le paquet suivant manque aussi ; DRED et OSCE désactivés |
 | DSP interne | `numpy.float32` dans `[-1, 1]` |
 
 Le wrapper refuse une forme, un type ou des valeurs invalides, et tout paquet vide ou surdimensionné. Un auto-test encode/décode tourne au démarrage de chaque moteur ; son résultat est visible dans les diagnostics.
@@ -186,6 +187,6 @@ Le serveur garde des `ClientProfile` légers pour les clients hors ligne ; codec
 
 - Trois bus fixes, un flux mono par client, pas de matrice dynamique.
 - Pas de chiffrement ni d'authentification forte.
-- Jitter buffer à cible fixe (pas d'adaptation à la gigue mesurée), pas de FEC Opus.
+- Jitter buffer à cible fixe (pas d'adaptation à la gigue mesurée), par choix : la latence reste au plus près du temps réel.
 - WASAPI exclusif non pris en charge.
 - Pas encore de banc matériel ni d'endurance qualifiés : voir la [roadmap](roadmap.md).

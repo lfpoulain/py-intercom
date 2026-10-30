@@ -13,9 +13,11 @@ from ..common import opus_codec
 from ..common.buses import FIXED_BUS_MASK
 from ..common.constants import (
     FRAME_SAMPLES,
+    PLAYOUT_DECODE_AHEAD_MS,
+    PLAYOUT_LEAD_FRAMES,
     SAMPLE_RATE,
 )
-from ..common.jitter_buffer import JitterFrameMetadata
+from ..common.jitter_buffer import JitterFrame, JitterFrameMetadata, decode_jitter_frame
 from ..common.logging import best_effort
 from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import (
@@ -30,10 +32,10 @@ from ..common.packets import (
     unpack_audio_packet_v2,
 )
 
-_PLAYOUT_FRAME_PERIOD_S = float(FRAME_SAMPLES) / float(SAMPLE_RATE)
-# A playout thread descheduled for longer than this many ticks drops them all
-# rather than bursting them into the sound card ring.
-_PLAYOUT_MAX_CATCH_UP_FRAMES = 4
+# How long the playout worker waits for the card before re-checking its state.
+_PLAYOUT_IDLE_WAIT_S = 0.1
+# When to read the jitter buffer, counted from the card's previous callback.
+_PLAYOUT_DECODE_AT_S = (float(FRAME_SAMPLES) / float(SAMPLE_RATE)) - PLAYOUT_DECODE_AHEAD_MS / 1000.0
 
 
 class TransportMixin:
@@ -200,89 +202,84 @@ class TransportMixin:
         generation: int,
         udp_ready: threading.Event,
     ) -> None:
-        """Own jitter playout and Opus decoding, publishing fixed PCM frames."""
+        """Own jitter playout and Opus decoding, on the headphones' clock.
 
-        next_deadline = time.monotonic()
-        card_underflows = self._playout_ring.stats.underflows
+        Each output callback sets ``_playout_tick`` when the card takes a
+        frame; this worker then pops the jitter buffer PLAYOUT_DECODE_AHEAD_MS
+        before the card's next read and queues the next frame,
+        PLAYOUT_LEAD_FRAMES ahead. The jitter buffer is therefore read
+        exactly as fast as the card plays: no second clock, no drift between
+        them, and no PCM ring margin to trim. A slot the card had to play as
+        silence (late worker) is not made up: its frame stays in the jitter
+        buffer, whose latency cap removes it.
+        """
+
         decoder: OpusDecoder | None = None
         decoder_epoch: int | None = None
         while self._network_is_current(stop_event, generation):
             if not udp_ready.is_set():
-                next_deadline = time.monotonic()
-                if stop_event.wait(_PLAYOUT_FRAME_PERIOD_S):
+                if stop_event.wait(_PLAYOUT_IDLE_WAIT_S):
                     return
                 continue
+            if not self._playout_tick.wait(_PLAYOUT_IDLE_WAIT_S):
+                continue  # output stream stopped or not started: check again
+            self._playout_tick.clear()
+            delay = self._playout_tick_at + _PLAYOUT_DECODE_AT_S - time.monotonic()
+            if delay > 0.0:
+                time.sleep(delay)  # high-resolution timer on Windows (Python 3.11+)
 
-            now = time.monotonic()
-            if now < next_deadline:
-                if stop_event.wait(next_deadline - now):
-                    return
-                now = time.monotonic()
-            # Ticks missed while this thread was descheduled are made up back
-            # to back, except those the sound card has meanwhile played silence
-            # for: their frames would now only add delay to the ring. They stay
-            # in the jitter buffer instead, whose latency cap removes them.
-            previous_underflows = card_underflows
-            card_underflows = self._playout_ring.stats.underflows
-            missed = int((now - next_deadline) / _PLAYOUT_FRAME_PERIOD_S)
-            if missed > 0:
-                silenced = card_underflows - previous_underflows
-                dropped = missed if missed > _PLAYOUT_MAX_CATCH_UP_FRAMES else min(missed, silenced)
-                next_deadline += dropped * _PLAYOUT_FRAME_PERIOD_S
-            next_deadline += _PLAYOUT_FRAME_PERIOD_S
-
-            if not self._network_is_current(stop_event, generation) or not udp_ready.is_set():
-                continue
-
-            try:
-                jitter_frame = self._jb.pop_frame()
-            except Exception as e:
-                self._playout_worker_failures += 1
-                logger.debug("jitter playout failed: {}", e)
-                continue
-            if jitter_frame is None:
-                continue
-
-            with self._tx_lock:
-                session_token = int(self._session_token)
-                session_epoch = int(self._audio_session_epoch)
-            if session_token == 0:
-                continue
-            if not bool(jitter_frame.concealed) and int(jitter_frame.metadata.session_token) != session_token:
-                continue
-
-            if decoder is None or decoder_epoch != session_epoch:
+            while self._playout_ring.depth < PLAYOUT_LEAD_FRAMES:
+                if not self._network_is_current(stop_event, generation) or not udp_ready.is_set():
+                    break
                 try:
-                    decoder = opus_codec.OpusDecoder()
+                    jitter_frame = self._jb.pop_frame()
                 except Exception as e:
-                    decoder = None
-                    decoder_epoch = None
-                    self._opus_decoder_reset_errors += 1
-                    logger.error(
-                        "Opus playout reset failed for audio epoch {}: {}",
-                        session_epoch,
-                        e,
+                    self._playout_worker_failures += 1
+                    logger.debug("jitter playout failed: {}", e)
+                    break
+                if jitter_frame is None:
+                    break  # pre-buffering or silence: the card plays silence
+
+                with self._tx_lock:
+                    session_token = int(self._session_token)
+                    session_epoch = int(self._audio_session_epoch)
+                if session_token == 0:
+                    break
+                if not bool(jitter_frame.concealed) and int(jitter_frame.metadata.session_token) != session_token:
+                    break
+
+                if decoder is None or decoder_epoch != session_epoch:
+                    try:
+                        decoder = opus_codec.OpusDecoder()
+                    except Exception as e:
+                        decoder = None
+                        decoder_epoch = None
+                        self._opus_decoder_reset_errors += 1
+                        logger.error(
+                            "Opus playout reset failed for audio epoch {}: {}",
+                            session_epoch,
+                            e,
+                        )
+                        break
+                    decoder_epoch = int(session_epoch)
+                    self._opus_decoder_resets += 1
+
+                decoded = self._decode_playout_frame(jitter_frame, decoder)
+
+                # Prevent a decode from the previous session from being published
+                # after reconnect cleared the PCM ring.
+                with self._tx_lock:
+                    if (
+                        int(self._session_token) != session_token
+                        or int(self._audio_session_epoch) != session_epoch
+                        or stop_event.is_set()
+                        or not udp_ready.is_set()
+                    ):
+                        break
+                    self._playout_ring.push(
+                        decoded,
+                        metadata=int(jitter_frame.sequence_number),
                     )
-                    continue
-                decoder_epoch = int(session_epoch)
-                self._opus_decoder_resets += 1
-
-            decoded = self._decode_playout_frame(jitter_frame.payload, decoder)
-
-            # Prevent a decode from the previous session from being published
-            # after reconnect cleared the PCM ring.
-            with self._tx_lock:
-                if (
-                    int(self._session_token) != session_token
-                    or int(self._audio_session_epoch) != session_epoch
-                    or stop_event.is_set()
-                    or not udp_ready.is_set()
-                ):
-                    continue
-                self._playout_ring.push(
-                    decoded,
-                    metadata=int(jitter_frame.sequence_number),
-                )
 
     def _accept_server_udp_packet(self, pkt) -> bool:
         if int(getattr(pkt, "flags", 0)) != int(AudioPacketDirection.SERVER_TO_CLIENT):
@@ -398,10 +395,10 @@ class TransportMixin:
             self._output_callback_errors,
         )
 
-    def _decode_playout_frame(self, payload: bytes, decoder: OpusDecoder) -> np.ndarray:
+    def _decode_playout_frame(self, jitter_frame: JitterFrame, decoder: OpusDecoder) -> np.ndarray:
         """Decode exactly one protocol frame, failing to silence on mismatch."""
         try:
-            decoded = np.asarray(decoder.decode(payload), dtype=np.float32)
+            decoded = np.asarray(decode_jitter_frame(decoder, jitter_frame), dtype=np.float32)
             if decoded.ndim != 1 or int(decoded.shape[0]) != int(FRAME_SAMPLES):
                 raise ValueError(f"decoded Opus frame has {int(decoded.size)} samples; expected {int(FRAME_SAMPLES)}")
             if not np.all(np.isfinite(decoded)):

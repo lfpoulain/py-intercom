@@ -30,7 +30,7 @@ from ..common.console import (
 )
 from ..common.constants import AUDIO_UDP_PORT, MAX_GAIN_DB
 from ..common.devices import DeviceInfo, format_device_label, list_devices
-from ..common.diagnostics import CounterRates, format_rate
+from ..common.diagnostics import CounterRates
 from ..common.gui_utils import DEVICE_REFRESH_TIMEOUT_MS, DeviceRefresh, is_checked, run_window, set_app_icon
 from ..common.identity import client_id_from_uuid
 from ..common.jsonio import JsonFileStatus, atomic_write_json, read_json_file_result
@@ -1594,7 +1594,10 @@ class ServerWindow(QtWidgets.QMainWindow):
         diag = QtWidgets.QLabel("")
         diag.setProperty("role", "diag")
         diag.setFont(mono_font(10))
-        diag.setToolTip("Trames reconstruites (PLC) par seconde : paquets perdus ou en retard sur ce poste.")
+        diag.setToolTip(
+            "Trames perdues par seconde sur ce poste. FEC : reconstruites à partir du paquet suivant "
+            "(quasi inaudible). PLC : extrapolées, plus audible."
+        )
         strip.reserve_top(2)
         strip.top.addWidget(lamps_row)
         strip.top.addWidget(diag)
@@ -1640,9 +1643,9 @@ class ServerWindow(QtWidgets.QMainWindow):
             rates.reset()
             label.setText("")
             return
-        concealed = rates.update({"concealed": int(st.get("jb_concealed", 0))}, now)["concealed"]
-        label.setText(f"PLC {format_rate(concealed)}")
-        alert = concealed > 0.0
+        per_second = rates.update({"fec": int(st.get("jb_fec", 0)), "plc": int(st.get("jb_concealed", 0))}, now)
+        label.setText(f"FEC {per_second['fec']:.0f} · PLC {per_second['plc']:.0f}")
+        alert = per_second["fec"] > 0.0 or per_second["plc"] > 0.0
         if bool(label.property("alert")) != alert:
             label.setProperty("alert", alert)
             repolish(label)

@@ -386,8 +386,8 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._diag_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self._diag_label.setToolTip(
             "RTT : aller-retour réseau vers le serveur. Tampons : audio en attente dans ce poste.\n"
-            "Carte son : latence annoncée par le pilote. Pertes et PLC : paquets manquants et "
-            "trames reconstruites, par seconde."
+            "Carte son : latence annoncée par le pilote. Pertes : paquets manquants par seconde ; "
+            "FEC : reconstruits à partir du paquet suivant ; PLC : extrapolés."
         )
         talk.body.addWidget(self._diag_label)
         talk.body.addStretch(0)
@@ -1937,7 +1937,11 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._diag_label.setText("")
             return
         rates = self._diag_rates.update(
-            {"missing": int(st.get("jitter_missing", 0)), "concealed": int(st.get("jitter_concealed", 0))},
+            {
+                "missing": int(st.get("jitter_missing", 0)),
+                "fec": int(st.get("jitter_fec", 0)),
+                "concealed": int(st.get("jitter_concealed", 0)),
+            },
             time.monotonic(),
         )
         frames = sum(int(st.get(key, 0)) for key in ("jitter_buffered_frames", "playout_ring_depth", "tx_ring_depth"))
@@ -1945,7 +1949,8 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._diag_label.setText(
             f"RTT {format_ms(st.get('control_rtt_ms'))} · tampons {format_ms(buffered_ms)} · "
             f"carte son {format_ms(st.get('audio_latency_ms'))} · "
-            f"pertes {format_rate(rates['missing'])} · PLC {format_rate(rates['concealed'])}"
+            f"pertes {format_rate(rates['missing'])} · FEC {format_rate(rates['fec'])} · "
+            f"PLC {format_rate(rates['concealed'])}"
         )
         alert = rates["missing"] > 0.0 or rates["concealed"] > 0.0
         if bool(self._diag_label.property("alert")) != alert:

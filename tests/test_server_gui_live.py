@@ -663,5 +663,5 @@ def test_station_strip_shows_its_concealment_rate(window, running, monkeypatch) 
     window._refresh_client_strips(running.get_clients_snapshot())
 
     label, _rates = window._client_diag[7]
-    assert label.text() == "PLC 4/s"
+    assert label.text() == "FEC 0 · PLC 4"
     assert label.property("alert") is True

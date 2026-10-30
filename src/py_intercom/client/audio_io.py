@@ -7,6 +7,8 @@ a lock shared with the GUI could make a callback miss its deadline.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import sounddevice as sd
 from loguru import logger
@@ -283,7 +285,11 @@ class AudioIOMixin:
             outdata.fill(0.0)
             return
 
-        if self._playout_ring.pop_into(self._output_work) is None:
+        played = self._playout_ring.pop_into(self._output_work) is not None
+        # The card took its frame (or found none): ask for the next one.
+        self._playout_tick_at = time.monotonic()
+        self._playout_tick.set()
+        if not played:
             outdata.fill(0.0)
             self._out_vu_dbfs = -60.0
             return

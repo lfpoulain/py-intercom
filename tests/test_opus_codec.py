@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from py_intercom.common.bootstrap import prepare_windows_runtime
+from py_intercom.common.constants import OPUS_EXPECTED_LOSS_PERCENT
 from py_intercom.common.opus_codec import OpusConfig, OpusDecoder, OpusEncoder
 
 VALID_48K_FRAME_SAMPLES = (120, 240, 480, 960)
@@ -27,6 +28,9 @@ def fake_opus(monkeypatch):
             self.application = application
             self.bitrate = None
             self.complexity = None
+            self.packet_loss_perc = None
+            self.inband_fec = None
+            self.encoder_state = self
             self.result = b"fake-opus"
             self.calls = []
             encoder_instances.append(self)
@@ -77,7 +81,7 @@ def fake_opus(monkeypatch):
 
     opuslib = types.ModuleType("opuslib")
     opuslib.__path__ = []
-    opuslib.APPLICATION_AUDIO = 2049
+    opuslib.APPLICATION_VOIP = 2048
     opuslib.Encoder = FakeEncoderBackend
     opuslib.Decoder = FakeDecoderBackend
 
@@ -88,6 +92,16 @@ def fake_opus(monkeypatch):
     ctl_api = types.ModuleType("opuslib.api.ctl")
     ctl_api.set_complexity = object()
     ctl_api.get_complexity = object()
+    ctl_api.set_inband_fec = object()
+    encoder_api = types.ModuleType("opuslib.api.encoder")
+
+    def fake_encoder_ctl(encoder_state, request, *args):
+        if request is ctl_api.set_inband_fec:
+            encoder_state.inband_fec = int(args[0])
+            return None
+        raise AssertionError("unexpected encoder CTL request")
+
+    encoder_api.encoder_ctl = fake_encoder_ctl
 
     def fake_decoder_ctl(decoder_state, request, *args):
         decoder_ctl.calls.append((decoder_state, request, args))
@@ -103,12 +117,14 @@ def fake_opus(monkeypatch):
     decoder_api.decoder_ctl = fake_decoder_ctl
     opuslib.api = api
     api.decoder = decoder_api
+    api.encoder = encoder_api
     api.ctl = ctl_api
 
     monkeypatch.setitem(sys.modules, "opuslib", opuslib)
     monkeypatch.setitem(sys.modules, "opuslib.api", api)
     monkeypatch.setitem(sys.modules, "opuslib.api.ctl", ctl_api)
     monkeypatch.setitem(sys.modules, "opuslib.api.decoder", decoder_api)
+    monkeypatch.setitem(sys.modules, "opuslib.api.encoder", encoder_api)
 
     return SimpleNamespace(
         encoder_instances=encoder_instances,
@@ -402,3 +418,52 @@ def test_real_long_duration_packet_fails_closed_on_short_decoder(real_opus_backe
 
     with pytest.raises(opuslib.OpusError):
         decoder.decode(packet)
+
+
+def test_encoder_codes_voice_with_in_band_fec(fake_opus):
+    OpusEncoder()
+    backend = fake_opus.encoder_instances[-1]
+
+    assert backend.application == 2048  # OPUS_APPLICATION_VOIP
+    assert backend.inband_fec == 1
+    assert backend.packet_loss_perc == OPUS_EXPECTED_LOSS_PERCENT
+
+
+def test_fec_decode_reads_the_following_packet(fake_opus):
+    decoder = OpusDecoder()
+    backend = fake_opus.decoder_instances[-1]
+
+    decoder.decode(b"next-packet", fec=True)
+
+    assert backend.decode_calls == [(b"next-packet", 480, True)]
+    assert backend.plc_calls == []
+
+
+def _voice_like(frames: int) -> np.ndarray:
+    t = np.arange(frames * 480) / 48_000
+    phase = np.cumsum(2 * np.pi * (120 + 25 * np.sin(2 * np.pi * 0.8 * t)) / 48_000)
+    voice = sum(np.sin(k * phase) / k for k in range(1, 25)) * (0.4 + 0.6 * np.sin(2 * np.pi * 2.5 * t) ** 2)
+    return (0.3 * voice / np.abs(voice).max()).astype(np.float32)
+
+
+def test_real_voice_packets_are_hybrid_and_carry_usable_fec(real_opus_backend):
+    encoder = OpusEncoder()
+    signal = _voice_like(60)
+    packets = [encoder.encode(signal[i * 480 : (i + 1) * 480]) for i in range(60)]
+
+    # TOC configurations 12..15 are hybrid (SILK + CELT): the mode that
+    # carries in-band FEC. 16..31 would be CELT only, with no FEC.
+    assert all(12 <= packet[0] >> 3 <= 15 for packet in packets[5:])
+
+    reference, rebuilt = OpusDecoder(), OpusDecoder()
+    lost = 40
+    for index in range(lost):
+        expected = reference.decode(packets[index])
+        rebuilt.decode(packets[index])
+    expected = reference.decode(packets[lost])
+    recovered = rebuilt.decode(packets[lost + 1], fec=True)
+
+    error = float(np.sqrt(np.mean((recovered - expected) ** 2)))
+    level = float(np.sqrt(np.mean(expected**2)))
+    assert level > 0.01
+    assert error < level  # a real reconstruction, not silence or noise

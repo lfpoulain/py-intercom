@@ -17,7 +17,7 @@ from ..common.constants import (
     FRAME_SAMPLES,
     SAMPLE_RATE,
 )
-from ..common.jitter_buffer import JitterFrameMetadata, OpusPacketJitterBuffer
+from ..common.jitter_buffer import JitterFrameMetadata, OpusPacketJitterBuffer, decode_jitter_frame
 from ..common.opus_codec import OpusDecoder
 from ..common.packets import (
     WSAECONNRESET,
@@ -148,7 +148,7 @@ class MixerMixin:
         )
 
         try:
-            decoded = source.decoder.decode(bytes(jitter_frame.payload))
+            decoded = decode_jitter_frame(source.decoder, jitter_frame)
         except Exception as exc:
             self._rx_decode_errors += 1
             logger.debug("Opus decode failed for client {}: {}", source.client_id, exc)

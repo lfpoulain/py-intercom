@@ -17,8 +17,6 @@ from ..common.constants import (
     CONTROL_PORT_OFFSET,
     FRAME_SAMPLES,
     JB_START_FRAMES,
-    LATENCY_TRIM_AFTER_FRAMES,
-    PCM_RING_TRIM_ABOVE_FRAMES,
     SAMPLE_RATE,
 )
 from ..common.frame_ring import FrameRingBuffer
@@ -108,12 +106,16 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
             capacity=_TX_RING_CAPACITY,
             frame_samples=int(FRAME_SAMPLES),
         )
+        # Filled on the card's own clock (see _playout_loop): it never holds
+        # more than PLAYOUT_LEAD_FRAMES, so it needs no latency cap.
         self._playout_ring = FrameRingBuffer(
             capacity=_PLAYOUT_RING_CAPACITY,
             frame_samples=int(FRAME_SAMPLES),
-            trim_above=PCM_RING_TRIM_ABOVE_FRAMES,
-            trim_after=LATENCY_TRIM_AFTER_FRAMES,
         )
+        # Set by the output callback each time the card takes a frame, at
+        # _playout_tick_at (monotonic seconds).
+        self._playout_tick = threading.Event()
+        self._playout_tick_at = 0.0
         self._capture_work = np.empty((int(FRAME_SAMPLES),), dtype=np.float32)
         self._output_work = np.empty((int(FRAME_SAMPLES),), dtype=np.float32)
         self._silence_frame = np.zeros((int(FRAME_SAMPLES),), dtype=np.float32)
@@ -213,6 +215,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
                 "jitter_trimmed": int(jitter_stats.trimmed),
                 "jitter_missing": int(jitter_stats.missing),
                 "jitter_concealed": int(jitter_stats.concealed),
+                "jitter_fec": int(jitter_stats.fec),
                 "control_rtt_ms": self._ctrl_rtt_ms,
                 "audio_latency_ms": audio_latency_ms,
                 "tx_ring_depth": int(tx_ring_stats.depth),
@@ -541,6 +544,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
                 playout_thread = self._playout_thread
                 stop_event.set()
                 udp_ready.clear()
+                self._playout_tick.set()  # wake the playout worker at once
 
             self._reset_session_token()
 

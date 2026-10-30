@@ -2376,10 +2376,11 @@ def test_physical_outputs_accept_any_fixed_bus_through_one_factory(monkeypatch, 
 
 
 class _PlcAwareDecoder:
-    """Real frames decode to 0.25, packet-loss concealment (empty payload) to 0.5."""
+    """Real frames decode to 0.25, PLC (empty payload) to 0.5, FEC recovery to 0.75."""
 
-    def decode(self, payload):
-        return np.full((FRAME_SAMPLES,), 0.5 if payload == b"" else 0.25, dtype=np.float32)
+    def decode(self, payload, *, fec=False):
+        value = 0.75 if fec else 0.5 if payload == b"" else 0.25
+        return np.full((FRAME_SAMPLES,), value, dtype=np.float32)
 
 
 def test_real_jitter_buffer_concealment_is_routed_on_the_talk_bus(server, monkeypatch):
@@ -2388,17 +2389,19 @@ def test_real_jitter_buffer_concealment_is_routed_on_the_talk_bus(server, monkey
     state.jb = new_realtime_jitter_buffer()
     with server._lock:
         server._clients[7] = state
-    # Seq 7 is lost in the middle of the talk spurt, then the stream stops.
+    # Seq 7 is lost in the middle of the talk spurt (seq 8 rebuilds it from
+    # its FEC), then the stream stops and PLC takes over.
     for sequence in (*range(1, 7), 8, 9, 10):
         packet = _client_packet(7, bus_mask=1 << PLATEAU_BUS_ID, sequence_number=sequence)
         assert server._accept_udp_packet(packet, state.addr, now=now)
 
-    played = ["real", "plc", "real", "real", "real"] + ["plc"] * JB_MAX_CONCEALED_FRAMES
+    played = ["real", "fec", "real", "real", "real"] + ["plc"] * JB_MAX_CONCEALED_FRAMES
     calls = _run_mix_ticks(server, monkeypatch, len(played) + 1)
 
     # Every concealment frame plays on the bus of the talk it continues,
     # instead of a hole; after the last one the stream is silent.
-    assert [[("plc" if s.frame[0] == 0.5 else "real", s.bus_mask) for s in sources] for sources in calls] == [
+    kinds = {0.25: "real", 0.5: "plc", 0.75: "fec"}
+    assert [[(kinds[float(s.frame[0])], s.bus_mask) for s in sources] for sources in calls] == [
         [(kind, 1 << PLATEAU_BUS_ID)] for kind in played
     ] + [[]]
 
