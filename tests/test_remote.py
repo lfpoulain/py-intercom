@@ -187,11 +187,21 @@ def _window(*, online: bool = True, modes: dict[int, str] | None = None, held: d
         _ptt_bus_modes=modes or {REGIE_BUS_ID: "ptt", PLATEAU_BUS_ID: "toggle", VMIX_BUS_ID: "always_on"},
         _ptt_bus_toggle_state={},
         _ptt_remote_active={},
+        _ptt_pad_held={},
         _operational_status=ClientOperationalStatus(state, state.value, ""),
         _refresh_state_labels=lambda: None,
         sent=sent,
     )
-    for name in ("_ptt_bus_active", "_apply_ptt_bus", "_remote_status_payload", "_handle_remote_command"):
+    for name in (
+        "_ptt_bus_active",
+        "_apply_ptt_bus",
+        "_remote_status_payload",
+        "_handle_remote_command",
+        "_on_pad_pressed",
+        "_on_pad_released",
+        "_release_pad_holds",
+        "_release_all_talk",
+    ):
         setattr(window, name, getattr(ClientWindow, name).__get__(window))
     return window
 
@@ -254,3 +264,64 @@ def test_nothing_is_armed_while_the_client_is_not_online() -> None:
     assert "pas en ligne" in reply.body["error"]
     assert window.sent == []
     assert window._ptt_remote_active == {}
+
+
+# --- Talk pads (mouse) follow the same rules -------------------------------------
+
+
+def test_pad_holds_a_ptt_bus_only_while_pressed() -> None:
+    window = _window()
+
+    window._on_pad_pressed(REGIE_BUS_ID)
+    assert window.sent == [(REGIE_BUS_ID, True)]
+
+    window._on_pad_released(REGIE_BUS_ID)
+    assert window.sent[-1] == (REGIE_BUS_ID, False)
+    assert window._ptt_pad_held == {}
+
+
+def test_pad_release_does_not_cut_a_remote_hold() -> None:
+    window = _window()
+    window._handle_remote_command(RemoteCommand("on", REGIE_BUS_ID))
+    window._on_pad_pressed(REGIE_BUS_ID)
+    window.sent.clear()
+
+    window._on_pad_released(REGIE_BUS_ID)
+
+    assert window.sent == [(REGIE_BUS_ID, True)]
+
+
+def test_pad_click_flips_a_toggle_bus_and_syncs_hotkeys() -> None:
+    window = _window()
+
+    window._on_pad_pressed(PLATEAU_BUS_ID)
+    window._on_pad_released(PLATEAU_BUS_ID)
+    assert window._ptt_bus_toggle_state[PLATEAU_BUS_ID] is True
+    assert window._global_ptt.toggle_sync == [(PLATEAU_BUS_ID, True)]
+
+    window._on_pad_pressed(PLATEAU_BUS_ID)
+    assert window._ptt_bus_toggle_state[PLATEAU_BUS_ID] is False
+    assert window.sent[-1] == (PLATEAU_BUS_ID, False)
+
+
+def test_pads_do_nothing_while_offline_or_always_on() -> None:
+    offline = _window(online=False)
+    offline._on_pad_pressed(REGIE_BUS_ID)
+    assert offline.sent == [] and offline._ptt_pad_held == {}
+
+    online = _window()
+    online._on_pad_pressed(VMIX_BUS_ID)
+    assert online.sent == [] and online._ptt_pad_held == {}
+
+
+def test_release_all_frees_pads_toggles_and_remote_holds() -> None:
+    window = _window()
+    window._on_pad_pressed(REGIE_BUS_ID)
+    window._on_pad_pressed(PLATEAU_BUS_ID)
+    window.sent.clear()
+
+    window._release_all_talk()
+
+    assert window._ptt_pad_held == {}
+    assert window._ptt_bus_toggle_state[PLATEAU_BUS_ID] is False
+    assert (REGIE_BUS_ID, False) in window.sent and (PLATEAU_BUS_ID, False) in window.sent

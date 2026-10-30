@@ -33,7 +33,7 @@ Push-to-talk, mix-minus et retours plateau en temps réel, avec de simples PC Wi
 <td width="33%" valign="top">
 
 ### 🎙️ Push-to-talk par bus
-Trois destinations : **Régie**, **Plateau** et **VMix**. Chaque bus a sa touche, en mode PTT, Toggle ou micro ouvert.
+Trois destinations : **Régie**, **Plateau** et **VMix**. Chaque bus a son pad et sa touche, en mode PTT, Bascule ou micro ouvert.
 
 </td>
 <td width="33%" valign="top">
@@ -64,8 +64,8 @@ Aucune prise de parole fantôme : un micro ne s'ouvre que sur une session vérif
 </td>
 <td valign="top">
 
-### 🩺 État lisible d'un coup d'œil
-En ligne, dégradé, au repos : chaque client et chaque flux est visible, avec ses VU-mètres et ses diagnostics.
+### 🩺 Une vraie console
+Le serveur se lit comme une table de mixage : une tranche par poste avec voyants de parole, faders et vu-mètres LED, puis les bus et les sorties.
 
 </td>
 </tr>
@@ -77,14 +77,19 @@ En ligne, dégradé, au repos : chaque client et chaque flux est visible, avec s
 <img src="docs/images/client.png" alt="Fenêtre du client" width="700">
 </div>
 
-Choisissez le serveur (découvert automatiquement sur le réseau), votre micro et votre casque, puis parlez avec vos raccourcis.
+Un grand pad par destination, qui s'allume quand vous parlez : maintenez-le à la souris ou utilisez votre raccourci clavier, même fenêtre réduite. À droite, vos niveaux d'écoute. Le serveur (découvert automatiquement), le micro, le casque et les touches se règlent dans l'onglet **Réglages**.
+
+<details>
+<summary><b>Voir l'onglet Réglages</b></summary>
+<div align="center"><img src="docs/images/client-settings.png" alt="Réglages du client" width="700"></div>
+</details>
 
 <table>
 <tr>
 <td width="50%" valign="top">
 
 ### ✅ Tester avant le live
-Le bouton **Tester…** vérifie en 15 secondes le réseau, les raccourcis PTT, le micro et le casque. Ce qui passe le test s'ouvrira à la connexion.
+Le bouton **Tester micro et casque…** vérifie en 15 secondes le réseau, les raccourcis PTT, le micro et le casque. Ce qui passe le test s'ouvrira à la connexion.
 
 </td>
 <td width="50%" valign="top">
@@ -97,10 +102,10 @@ Le bouton **Tester…** vérifie en 15 secondes le réseau, les raccourcis PTT, 
 <td colspan="2">
 
 ### 🎛️ Pilotable depuis un Stream Deck
-Option **Contrôle HTTP** : `POST /ptt/regie/on`, `/off`, `/toggle` et `GET /status` pour Stream Deck, Bitfocus Companion ou vos scripts. Voir le [protocole](docs/protocole.md#contrôle-à-distance-http-du-client).
+Option **Contrôle à distance** : `POST /ptt/regie/on`, `/off`, `/toggle` et `GET /status` pour Stream Deck, Bitfocus Companion ou vos scripts. Voir le [protocole](docs/protocole.md#contrôle-à-distance-http-du-client).
 
 ### 🔉 Le programme s'efface quand on vous parle
-Option à cocher : pendant qu'on vous parle, le Return (le programme) baisse de 15 dB dans votre casque, puis remonte en douceur.
+Bouton **DUCKING** sur la tranche Return : pendant qu'on vous parle, le Return (le programme) baisse de 15 dB dans votre casque, puis remonte en douceur.
 
 </td>
 </tr>

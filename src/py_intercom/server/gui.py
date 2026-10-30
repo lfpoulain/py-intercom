@@ -9,6 +9,21 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from .. import __version__
 from ..common.buses import BUS_BY_ID, FIXED_BUSES, REGIE_BUS_ID
+from ..common.console import (
+    Card,
+    ChannelStrip,
+    Fader,
+    Lamp,
+    LevelMeter,
+    Section,
+    SegmentedNav,
+    StripRack,
+    TopBar,
+    chip,
+    compact_combo,
+    format_db,
+    readout,
+)
 from ..common.constants import AUDIO_UDP_PORT, MAX_GAIN_DB
 from ..common.devices import format_device_label, list_devices, resolve_device
 from ..common.gui_utils import DeviceWorker, is_checked
@@ -17,12 +32,9 @@ from ..common.jsonio import JsonFileStatus, atomic_write_json, read_json_file_re
 from ..common.logging import best_effort
 from ..common.preset_schema import PresetSchemaError, migrate_preset, stamp_preset
 from ..common.theme import (
-    EmptyStateTableWidget,
+    TOKENS,
     StatusIndicator,
-    VuMeter,
     apply_theme,
-    cell_vu,
-    centered_checkbox,
     make_field,
     patch_combo,
     set_status_label,
@@ -38,12 +50,19 @@ SERVER_STRUCTURE_REFRESH_INTERVAL_MS = 500
 SERVER_VU_REFRESH_INTERVAL_MS = 67
 
 
+def _db_value(raw: object) -> int:
+    try:
+        return int(round(float(raw)))
+    except (TypeError, ValueError):
+        return 0
+
+
 class ServerWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"Py-Intercom Server {__version__}")
-        self.setMinimumSize(1040, 720)
-        self.resize(1280, 820)
+        self.setMinimumSize(1040, 680)
+        self.resize(1320, 820)
         self._set_app_icon()
 
         self._server: IntercomServer | None = None
@@ -85,339 +104,252 @@ class ServerWindow(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget(self)
         self.setCentralWidget(central)
 
-        # -- Server configuration --
-        config_box = QtWidgets.QGroupBox("Configuration")
-        config_box.setObjectName("serverConfigCard")
-        config_lay = QtWidgets.QGridLayout(config_box)
-        config_lay.setContentsMargins(16, 12, 16, 14)
-        config_lay.setVerticalSpacing(10)
-        config_lay.setHorizontalSpacing(14)
-
         self._server_name = QtWidgets.QLineEdit("py-intercom")
-        self._server_name.setPlaceholderText("Server name")
-        self._server_name.setMinimumWidth(180)
-        self._server_name.setMaximumWidth(340)
-        self._discovery_cb = QtWidgets.QCheckBox("Découverte réseau")
+        self._server_name.setPlaceholderText("Nom annoncé aux postes")
+        self._discovery_cb = QtWidgets.QCheckBox("Annoncer le serveur sur le réseau local")
         self._discovery_cb.setChecked(True)
         self._discovery_cb.setToolTip("Broadcast LAN beacon so clients can auto-detect this server")
-        self._autostart_cb = QtWidgets.QCheckBox("Démarrage automatique")
+        self._autostart_cb = QtWidgets.QCheckBox("Démarrer le serveur au lancement")
         self._autostart_cb.setChecked(bool(self._settings.value("autostart", False, type=bool)))
         self._start_minimized_cb = QtWidgets.QCheckBox("Démarrer réduit")
         self._start_minimized_cb.setChecked(bool(self._settings.value("start_minimized", False, type=bool)))
 
-        self._return_enabled = QtWidgets.QCheckBox("Return")
+        self._return_enabled = chip("ACTIF", "Diffuser l'entrée Return (programme) aux postes qui l'écoutent")
         self._return_enabled.setChecked(False)
         self._return_input_device = QtWidgets.QComboBox()
         patch_combo(self._return_input_device)
-        self._return_vu = VuMeter()
-        self._regie_vu = VuMeter()
-        self._show_all_devices = QtWidgets.QCheckBox("Tous les périphériques")
+        self._return_input_device.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._return_input_device.setMinimumContentsLength(20)
+        self._return_vu = LevelMeter()
+        self._regie_vu = LevelMeter()
+        self._show_all_devices = QtWidgets.QCheckBox("Afficher tous les périphériques (pas seulement WASAPI)")
         self._show_all_devices.setChecked(
             bool(self._settings.value("show_all_devices", False, type=bool))
         )
-        self._refresh_devices_btn = QtWidgets.QToolButton()
-        self._refresh_devices_btn.setText("\u21bb")
-        self._refresh_devices_btn.setProperty("class", "ghost")
-        self._refresh_devices_btn.setFixedSize(34, 34)
+        self._refresh_devices_btn = QtWidgets.QPushButton("Actualiser")
+        self._refresh_devices_btn.setProperty("class", "secondary")
         self._refresh_devices_btn.setAccessibleName("Actualiser les périphériques audio")
         self._refresh_devices_btn.setToolTip(
             "Actualiser les périphériques audio. Disponible uniquement serveur arrêté."
         )
         self._device_status = QtWidgets.QLabel("")
+        self._device_status.setProperty("role", "hint")
 
         self._start_btn = QtWidgets.QPushButton("▶  Démarrer")
-        self._start_btn.setProperty("class", "success")
-        self._start_btn.setFixedWidth(120)
+        self._start_btn.setProperty("class", "primary")
+        self._start_btn.setMinimumWidth(120)
         self._stop_btn = QtWidgets.QPushButton("■  Arrêter")
         self._stop_btn.setProperty("class", "danger")
-        self._stop_btn.setFixedWidth(120)
+        self._stop_btn.setMinimumWidth(120)
         self._stop_btn.setEnabled(False)
+        self._stop_btn.setVisible(False)
 
-        config_lay.addWidget(
-            make_field("NOM DU SERVEUR", self._server_name, minimum_width=230),
-            0,
-            0,
-            1,
-            2,
-        )
-        config_lay.addWidget(self._discovery_cb, 1, 0)
-        config_lay.addWidget(self._autostart_cb, 1, 1)
-        config_lay.addWidget(self._start_minimized_cb, 2, 0, 1, 2)
-        config_lay.setColumnStretch(0, 1)
-        config_lay.setColumnStretch(1, 1)
+        self._info_btn = QtWidgets.QToolButton()
+        self._info_btn.setText("ⓘ")
+        self._info_btn.setProperty("class", "ghost")
+        self._info_btn.setFixedSize(34, 34)
+        self._info_btn.setToolTip("Informations techniques et remise à zéro")
+        self._info_btn.clicked.connect(self._show_geek_info)
 
-        # -- Return bus + Régie group (combined) --
-        return_box = QtWidgets.QGroupBox("Retour audio")
-        return_box.setObjectName("returnCard")
-        return_lay = QtWidgets.QVBoxLayout(return_box)
-        return_lay.setContentsMargins(16, 12, 16, 14)
-        return_lay.setSpacing(10)
-
-        # Row 0 — Enable + Input device
-        ret_input_lay = QtWidgets.QHBoxLayout()
-        ret_input_lay.setSpacing(8)
-        ret_input_lay.addWidget(self._return_enabled)
-        ret_input_lay.addWidget(
-            make_field("ENTRÉE RETURN", self._return_input_device),
-            1,
-        )
-        return_lay.addLayout(ret_input_lay)
-
-        # Row 1 — VU meters side by side
-        vu_lay = QtWidgets.QHBoxLayout()
-        vu_lay.setSpacing(12)
-        lbl_ret = QtWidgets.QLabel("Return")
-        lbl_ret.setFixedWidth(50)
-        vu_lay.addWidget(lbl_ret)
-        vu_lay.addWidget(self._return_vu, 1)
-        lbl_regie = QtWidgets.QLabel(BUS_BY_ID[REGIE_BUS_ID].name)
-        lbl_regie.setFixedWidth(50)
-        vu_lay.addWidget(lbl_regie)
-        vu_lay.addWidget(self._regie_vu, 1)
-        return_lay.addLayout(vu_lay)
-
-        # -- Clients group --
-        clients_box = QtWidgets.QGroupBox("Équipe connectée")
-        clients_box.setObjectName("clientsCard")
-        clients_lay = QtWidgets.QVBoxLayout(clients_box)
-        clients_lay.setContentsMargins(12, 10, 12, 12)
-        clients_lay.setSpacing(8)
-
-        # Base columns: 0=ClientID(hidden), 1=Name, 2=Addr(hidden), 3=Status, 4=Talk gain, 5=VU
-        self._clients = EmptyStateTableWidget(
-            0,
-            6,
-            "Aucun client connecté. Les postes apparaîtront ici dès leur connexion.",
-        )
-        self._clients.setHorizontalHeaderLabels(
-            ["Client ID", "Nom", "Adresse", "État", "Gain micro", "VU"]
-        )
-        self._clients.setColumnHidden(0, True)
-        self._clients.setColumnHidden(2, True)   # Addr hidden, shown in Info dialog
-        self._clients.setMinimumHeight(180)
-        hdr = self._clients.horizontalHeader()
-        hdr.setDefaultSectionSize(60)
-        hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)   # Name
-        hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Status
-        self._clients.setColumnWidth(3, 54)
-        hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)   # Talk gain
-        self._clients.setColumnWidth(4, 150)
-        hdr.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Stretch)   # VU
-        self._clients.verticalHeader().setDefaultSectionSize(32)
-        self._clients.verticalHeader().setVisible(False)
-        self._clients.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._clients.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self._clients.setAlternatingRowColors(True)
-
+        # -- Team: one strip per known client ---------------------------------
         self._client_row_ids: list[int] = []
         self._client_uuid_by_id: dict[int, str] = {}
-        self._input_gain_widgets: dict[int, QtWidgets.QSlider] = {}
+        self._selected_client_id: int | None = None
+        self._client_strips: dict[int, ChannelStrip] = {}
+        self._input_gain_widgets: dict[int, Fader] = {}
         self._input_gain_labels: dict[int, QtWidgets.QLabel] = {}
-        self._vu_widgets: dict[int, VuMeter] = {}
+        self._vu_widgets: dict[int, LevelMeter] = {}
         self._status_widgets: dict[int, StatusIndicator] = {}
+        self._talk_lamps: dict[int, dict[int, Lamp]] = {}
 
-        self._forget_client_btn = QtWidgets.QPushButton("Oublier le client")
-        self._forget_client_btn.setProperty("class", "danger")
+        self._client_rack = StripRack(
+            "Aucun poste pour l'instant.\nLes postes apparaissent ici dès leur première connexion."
+        )
+        self._forget_client_btn = QtWidgets.QPushButton("Oublier le poste")
+        self._forget_client_btn.setProperty("class", "secondary")
+        self._forget_client_btn.setToolTip("Retirer le poste sélectionné de la liste et du preset")
         self._forget_client_btn.setEnabled(False)
         self._forget_client_btn.clicked.connect(self._forget_selected_client)
 
-        clients_bottom = QtWidgets.QHBoxLayout()
-        clients_bottom.addWidget(self._forget_client_btn)
-        clients_bottom.addStretch(1)
+        self._team_section = Section("Équipe")
+        self._team_section.actions.addWidget(self._forget_client_btn)
+        self._team_section.body.addWidget(self._client_rack, 1)
 
-        clients_lay.addWidget(self._clients)
-        clients_lay.addLayout(clients_bottom)
-
-        # -- Outputs group --
-        self._output_row_ids: list[int] = []
-        self._output_device_widgets: dict[int, QtWidgets.QComboBox] = {}
-        self._output_bus_widgets: dict[int, QtWidgets.QComboBox] = {}
-        self._output_gain_widgets: dict[int, QtWidgets.QSlider] = {}
-        self._output_gain_labels: dict[int, QtWidgets.QLabel] = {}
-        self._output_vu_widgets: dict[int, VuMeter] = {}
-        self._output_status_widgets: dict[int, StatusIndicator] = {}
-        self._output_devices_cache: list[tuple[str, int]] = []
-        self._bus_selector = QtWidgets.QComboBox()
-        patch_combo(self._bus_selector)
-        self._bus_selector_ids: list[int] = []
-        self._bus_row_ids: list[int] = []
-        self._bus_gain_widgets: dict[int, QtWidgets.QSlider] = {}
+        # -- Buses: fixed, built once ------------------------------------------
+        self._bus_strips: dict[int, ChannelStrip] = {}
+        self._bus_gain_widgets: dict[int, Fader] = {}
         self._bus_gain_labels: dict[int, QtWidgets.QLabel] = {}
         self._bus_feed_widgets: dict[int, QtWidgets.QCheckBox] = {}
+        self._bus_vu_widgets: dict[int, LevelMeter] = {}
+        buses_section = Section("Bus")
+        bus_row = QtWidgets.QHBoxLayout()
+        bus_row.setSpacing(8)
+        for definition in FIXED_BUSES:
+            bid = int(definition.bus_id)
+            fader = Fader(-60, int(MAX_GAIN_DB))
+            fader.valueChanged.connect(lambda value, bus_id=bid: self._on_bus_gain_changed(bus_id, value))
+            meter = self._regie_vu if bid == REGIE_BUS_ID else LevelMeter()
+            value = readout()
+            strip = ChannelStrip(definition.name, color=definition.color, fader=fader, meter=meter, readout=value, width=100)
+            strip.reserve_top(1)
+            if bid == REGIE_BUS_ID:
+                strip.set_caption("bus principal")
+            else:
+                feed = chip(
+                    f"→ {BUS_BY_ID[REGIE_BUS_ID].name.upper()}",
+                    f"Renvoyer aussi ce bus dans {BUS_BY_ID[REGIE_BUS_ID].name}",
+                )
+                feed.stateChanged.connect(lambda state, bus_id=bid: self._on_bus_feed_to_regie_changed(bus_id, state))
+                strip.top.addWidget(feed)
+                self._bus_feed_widgets[bid] = feed
+            self._bus_strips[bid] = strip
+            self._bus_gain_widgets[bid] = fader
+            self._bus_gain_labels[bid] = value
+            self._bus_vu_widgets[bid] = meter
+            bus_row.addWidget(strip)
+        buses_section.body.addLayout(bus_row, 1)
 
-        self._buses = EmptyStateTableWidget(
-            0,
-            4,
-            "Les bus disponibles apparaîtront au démarrage du serveur.",
-        )
-        self._buses.setHorizontalHeaderLabels(
-            ["ID", "Nom", "Gain", f"Retour {BUS_BY_ID[REGIE_BUS_ID].name}"]
-        )
-        self._buses.verticalHeader().setVisible(False)
-        self._buses.setMinimumHeight(180)
-        self._buses.verticalHeader().setDefaultSectionSize(32)
-        self._buses.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._buses.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self._buses.setAlternatingRowColors(True)
-        self._buses.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self._buses.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self._buses.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        self._buses.setColumnWidth(2, 160)
-        self._buses.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        # -- Return input --------------------------------------------------------
+        return_section = Section("Return")
+        self._return_strip = ChannelStrip("Programme", meter=self._return_vu, width=100, color=TOKENS["muted"])
+        self._return_strip.reserve_top(1)
+        self._return_strip.top.addWidget(self._return_enabled)
+        return_section.body.addWidget(self._return_strip, 1)
 
-        self._add_output_device = QtWidgets.QComboBox()
+        # -- Outputs -----------------------------------------------------------
+        self._output_row_ids: list[int] = []
+        self._output_strips: dict[int, ChannelStrip] = {}
+        self._output_device_widgets: dict[int, QtWidgets.QComboBox] = {}
+        self._output_bus_widgets: dict[int, QtWidgets.QComboBox] = {}
+        self._output_gain_widgets: dict[int, Fader] = {}
+        self._output_gain_labels: dict[int, QtWidgets.QLabel] = {}
+        self._output_vu_widgets: dict[int, LevelMeter] = {}
+        self._output_status_widgets: dict[int, StatusIndicator] = {}
+        self._output_devices_cache: list[tuple[str, int]] = []
+        self._bus_selector = compact_combo(QtWidgets.QComboBox())
+        patch_combo(self._bus_selector)
+        self._bus_selector_ids: list[int] = []
+        self._add_output_device = compact_combo(QtWidgets.QComboBox())
         patch_combo(self._add_output_device)
-        self._add_output_device.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self._add_output_device.setMinimumContentsLength(40)
-        self._add_output_btn = QtWidgets.QPushButton("Ajouter")
-        self._add_output_btn.setProperty("class", "success")
-        self._remove_output_btn = QtWidgets.QPushButton("Supprimer")
-        self._remove_output_btn.setProperty("class", "danger")
-        self._remove_output_btn.setEnabled(False)
+        self._add_output_btn = QtWidgets.QPushButton("+  Ajouter")
+        self._add_output_btn.setProperty("class", "primary")
 
-        self._outputs = EmptyStateTableWidget(
-            0,
-            6,
-            "Aucune sortie configurée. Sélectionnez un périphérique et un bus, puis ajoutez-les.",
-        )
-        self._outputs.setHorizontalHeaderLabels(
-            ["ID", "Périphérique", "Bus", "Gain", "VU", "État"]
-        )
-        out_hdr = self._outputs.horizontalHeader()
-        out_hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        self._outputs.setColumnWidth(0, 30)
-        out_hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        out_hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        self._outputs.setColumnWidth(2, 75)
-        out_hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        self._outputs.setColumnWidth(3, 160)
-        out_hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        out_hdr.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        self._outputs.setColumnWidth(5, 54)
-        self._outputs.verticalHeader().setDefaultSectionSize(32)
-        self._outputs.verticalHeader().setVisible(False)
-        self._outputs.setMinimumHeight(210)
-        self._outputs.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._outputs.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self._outputs.setAlternatingRowColors(True)
-        self._outputs.itemSelectionChanged.connect(self._on_output_selection_changed)
+        add_card = QtWidgets.QFrame()
+        add_card.setProperty("role", "strip")
+        add_card.setFixedWidth(170)
+        add_lay = QtWidgets.QVBoxLayout(add_card)
+        add_lay.setContentsMargins(10, 10, 10, 10)
+        add_lay.setSpacing(8)
+        add_title = QtWidgets.QLabel("Nouvelle sortie")
+        add_title.setProperty("role", "stripName")
+        add_hint = QtWidgets.QLabel("Envoie un bus vers une carte son : retour plateau, vMix, enregistreur…")
+        add_hint.setProperty("role", "stripCaption")
+        add_hint.setWordWrap(True)
+        add_lay.addWidget(add_title)
+        add_lay.addWidget(add_hint)
+        add_lay.addWidget(make_field("PÉRIPHÉRIQUE", self._add_output_device))
+        add_lay.addWidget(make_field("BUS", self._bus_selector))
+        add_lay.addStretch(1)
+        add_lay.addWidget(self._add_output_btn)
 
-        outputs_box = QtWidgets.QGroupBox("Routage audio")
-        outputs_box.setObjectName("routingCard")
-        outputs_layout = QtWidgets.QVBoxLayout(outputs_box)
-        outputs_layout.setContentsMargins(12, 10, 12, 12)
-        outputs_layout.setSpacing(8)
+        self._output_rack = StripRack("")
+        self._output_rack.add_trailing(add_card)
+        outputs_section = Section("Sorties")
+        outputs_section.body.addWidget(self._output_rack, 1)
 
-        buses_title = QtWidgets.QLabel("BUS DISPONIBLES")
-        buses_title.setProperty("role", "fieldLabel")
-        outputs_layout.addWidget(buses_title)
-        outputs_layout.addWidget(self._buses)
+        # -- Console page --------------------------------------------------------
+        routing_row = QtWidgets.QWidget()
+        routing_row.setObjectName("routingRow")
+        routing_lay = QtWidgets.QHBoxLayout(routing_row)
+        routing_lay.setContentsMargins(0, 0, 0, 0)
+        routing_lay.setSpacing(12)
+        routing_lay.addWidget(buses_section, 0)
+        routing_lay.addWidget(return_section, 0)
+        routing_lay.addWidget(outputs_section, 1)
+        self._team_section.setObjectName("teamRow")
 
-        outputs_top = QtWidgets.QGridLayout()
-        outputs_top.setHorizontalSpacing(10)
-        outputs_top.addWidget(
-            make_field("NOUVELLE SORTIE", self._add_output_device),
-            0,
-            0,
-            1,
-            3,
-        )
-        outputs_top.addWidget(make_field("BUS", self._bus_selector), 0, 3)
-        outputs_top.addWidget(self._add_output_btn, 0, 4)
-        outputs_top.addWidget(self._remove_output_btn, 0, 5)
-        outputs_top.setColumnStretch(0, 1)
-        outputs_layout.addLayout(outputs_top)
-        outputs_title = QtWidgets.QLabel("DESTINATIONS ACTIVES")
-        outputs_title.setProperty("role", "fieldLabel")
-        outputs_layout.addWidget(outputs_title)
-        outputs_layout.addWidget(self._outputs)
-
-        # -- Info button --
-        self._info_btn = QtWidgets.QToolButton()
-        self._info_btn.setText("ℹ")
-        self._info_btn.setProperty("class", "ghost")
-        self._info_btn.setFixedSize(34, 34)
-        self._info_btn.setToolTip("Info / Debug")
-        self._info_btn.clicked.connect(self._show_geek_info)
-
-        device_footer = QtWidgets.QHBoxLayout()
-        device_footer.setSpacing(9)
-        device_footer.addWidget(self._show_all_devices)
-        device_footer.addWidget(self._refresh_devices_btn)
-        self._device_status.setProperty("role", "muted")
-        device_footer.addWidget(self._device_status, 1)
-        outputs_layout.addLayout(device_footer)
-
-        # -- Operational header --
-        hero = QtWidgets.QFrame()
-        hero.setProperty("role", "hero")
-        hero_lay = QtWidgets.QHBoxLayout(hero)
-        hero_lay.setContentsMargins(18, 14, 14, 14)
-        hero_lay.setSpacing(12)
-        hero_copy = QtWidgets.QVBoxLayout()
-        hero_copy.setSpacing(1)
-        eyebrow = QtWidgets.QLabel("PY-INTERCOM")
-        eyebrow.setProperty("role", "heroEyebrow")
-        title = QtWidgets.QLabel("Régie intercom")
-        title.setProperty("role", "heroTitle")
-        subtitle = QtWidgets.QLabel(
-            "Démarrez le moteur, surveillez l’équipe et routez les retours audio."
-        )
-        subtitle.setProperty("role", "heroSubtitle")
-        hero_copy.addWidget(eyebrow)
-        hero_copy.addWidget(title)
-        hero_copy.addWidget(subtitle)
-        hero_lay.addLayout(hero_copy, 1)
-        self._server_state_banner.setMinimumWidth(130)
-        hero_lay.addWidget(self._server_state_banner)
-        hero_lay.addWidget(self._stop_btn)
-        hero_lay.addWidget(self._start_btn)
-        hero_lay.addWidget(self._info_btn)
-
-        # -- Two-column workspace --
-        left_panel = QtWidgets.QWidget()
-        left_panel.setObjectName("supervisionColumn")
-        left_layout = QtWidgets.QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(10)
-        left_layout.addWidget(config_box)
-        left_layout.addWidget(return_box)
-        left_layout.addWidget(clients_box, 1)
-
-        right_panel = QtWidgets.QWidget()
-        right_panel.setObjectName("routingColumn")
-        right_layout = QtWidgets.QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(outputs_box, 1)
-
-        self._workspace_splitter = QtWidgets.QSplitter(
-            QtCore.Qt.Orientation.Horizontal
-        )
+        self._workspace_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         self._workspace_splitter.setObjectName("serverWorkspace")
-        self._workspace_splitter.setAccessibleName(
-            "Répartition supervision et routage audio"
-        )
+        self._workspace_splitter.setAccessibleName("Répartition équipe et routage audio")
         self._workspace_splitter.setChildrenCollapsible(False)
-        self._workspace_splitter.setHandleWidth(8)
-        self._workspace_splitter.addWidget(left_panel)
-        self._workspace_splitter.addWidget(right_panel)
-        self._workspace_splitter.setStretchFactor(0, 4)
-        self._workspace_splitter.setStretchFactor(1, 6)
-        self._workspace_splitter.setSizes([470, 730])
+        self._workspace_splitter.setHandleWidth(12)
+        self._workspace_splitter.addWidget(self._team_section)
+        self._workspace_splitter.addWidget(routing_row)
+        self._workspace_splitter.setStretchFactor(0, 1)
+        self._workspace_splitter.setStretchFactor(1, 1)
+        self._team_section.setMinimumHeight(260)
+        routing_row.setMinimumHeight(300)
+        self._workspace_splitter.setSizes([340, 360])
 
-        # -- Main layout --
+        console_page = QtWidgets.QWidget()
+        console_lay = QtWidgets.QVBoxLayout(console_page)
+        console_lay.setContentsMargins(16, 14, 16, 14)
+        console_lay.addWidget(self._workspace_splitter, 1)
+
+        # -- Settings page ---------------------------------------------------------
+        server_card = Card("Serveur", "Nom affiché sur les postes, et comportement au lancement.")
+        server_card.body.addWidget(make_field("NOM DU SERVEUR", self._server_name))
+        server_card.body.addWidget(self._discovery_cb)
+        server_card.body.addWidget(self._autostart_cb)
+        server_card.body.addWidget(self._start_minimized_cb)
+
+        return_card = Card(
+            "Entrée Return",
+            "Le programme (sortie vMix, console…) que les postes peuvent écouter dans leur casque.",
+        )
+        return_card.body.addWidget(make_field("ENTRÉE", self._return_input_device))
+
+        devices_card = Card("Périphériques audio", "La liste se met à jour serveur arrêté.")
+        devices_card.body.addWidget(self._show_all_devices)
+        devices_row = QtWidgets.QHBoxLayout()
+        devices_row.addWidget(self._refresh_devices_btn)
+        devices_row.addWidget(self._device_status, 1)
+        devices_card.body.addLayout(devices_row)
+
+        settings_inner = QtWidgets.QWidget()
+        settings_grid = QtWidgets.QGridLayout(settings_inner)
+        settings_grid.setContentsMargins(16, 14, 16, 14)
+        settings_grid.setSpacing(12)
+        settings_grid.addWidget(server_card, 0, 0, 2, 1)
+        settings_grid.addWidget(return_card, 0, 1)
+        settings_grid.addWidget(devices_card, 1, 1)
+        settings_grid.setColumnStretch(0, 1)
+        settings_grid.setColumnStretch(1, 1)
+        settings_grid.setRowStretch(2, 1)
+        settings_page = QtWidgets.QScrollArea()
+        settings_page.setWidgetResizable(True)
+        settings_page.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        settings_page.setWidget(settings_inner)
+
+        self._pages = QtWidgets.QStackedWidget()
+        self._pages.addWidget(console_page)
+        self._pages.addWidget(settings_page)
+
+        # -- Header ------------------------------------------------------------------
+        self._top_bar = TopBar("Régie intercom", "", self.windowIcon())
+        self._nav = SegmentedNav(["Console", "Réglages"])
+        self._nav.changed.connect(self._pages.setCurrentIndex)
+        self._top_bar.center.addWidget(self._nav)
+        self._server_state_banner.setMinimumWidth(130)
+        self._top_bar.right.addWidget(self._server_state_banner)
+        self._top_bar.right.addWidget(self._start_btn)
+        self._top_bar.right.addWidget(self._stop_btn)
+        self._top_bar.right.addWidget(self._info_btn)
+        self._server_name.textChanged.connect(self._refresh_identity_header)
+        self._discovery_cb.stateChanged.connect(self._refresh_identity_header)
+        self._refresh_identity_header()
+
         layout = QtWidgets.QVBoxLayout(central)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
-        layout.addWidget(hero)
-        layout.addWidget(self._workspace_splitter, 1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._top_bar)
+        layout.addWidget(self._pages, 1)
 
         self._refresh_devices_btn.clicked.connect(self._start_device_refresh)
         self._show_all_devices.stateChanged.connect(self._on_show_all_devices_changed)
         self._start_btn.clicked.connect(self._start_server)
         self._stop_btn.clicked.connect(self._stop_server)
         self._add_output_btn.clicked.connect(self._on_add_output)
-        self._remove_output_btn.clicked.connect(self._on_remove_output)
         self._return_enabled.stateChanged.connect(self._on_return_enabled_changed)
         self._return_input_device.currentIndexChanged.connect(self._on_return_input_device_changed)
         self._autostart_cb.stateChanged.connect(self._on_autostart_changed)
@@ -557,7 +489,8 @@ class ServerWindow(QtWidgets.QMainWindow):
             slider.setEnabled(bool(running))
         for slider in self._output_gain_widgets.values():
             slider.setEnabled(bool(running))
-        self._on_output_selection_changed()
+        self._start_btn.setVisible(not running)
+        self._stop_btn.setVisible(running)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._device_thread is not None and self._device_thread.isRunning():
@@ -851,9 +784,9 @@ class ServerWindow(QtWidgets.QMainWindow):
             }
 
         self._refresh_bus_selectors(buses)
-        self._refresh_buses_table(buses)
-        self._refresh_outputs_table(outs, buses)
-        self._set_clients_table(snap, buses)
+        self._refresh_bus_strips(buses)
+        self._refresh_output_strips(outs, buses)
+        self._refresh_client_strips(snap, buses)
         self._return_enabled.setChecked(bool(return_enabled))
         if return_input_device is not None:
             idx = self._return_input_device.findData(int(return_input_device))
@@ -888,13 +821,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._preset_load_problem = None
         self._preset_problem_notified = None
 
-        self._outputs.setRowCount(0)
-        self._buses.setRowCount(0)
-        self._output_row_ids = []
-        self._bus_row_ids = []
-        self._output_device_widgets.clear()
-        self._output_bus_widgets.clear()
-        self._bus_feed_widgets.clear()
+        self._clear_output_strips()
         self._load_preset_preview()
 
     def _reopen_outputs_after_start(self) -> None:
@@ -937,93 +864,29 @@ class ServerWindow(QtWidgets.QMainWindow):
         finally:
             self._bus_selector.blockSignals(False)
 
-    def _refresh_buses_table(self, buses: dict[int, dict]) -> None:
-        bus_ids = [
-            definition.bus_id
-            for definition in FIXED_BUSES
-            if definition.bus_id in buses
-        ]
-        rebuild = bus_ids != self._bus_row_ids
-        if rebuild:
-            self._buses.setRowCount(len(bus_ids))
-            self._bus_row_ids = list(bus_ids)
-            self._bus_gain_widgets.clear()
-            self._bus_gain_labels.clear()
-            self._bus_feed_widgets.clear()
-
-        for row, bid in enumerate(bus_ids):
-            b = buses.get(int(bid), {})
-
-            def _set_item(col: int, text: str, row: int = row) -> None:
-                it = self._buses.item(row, col)
-                if it is None:
-                    it = QtWidgets.QTableWidgetItem(text)
-                    self._buses.setItem(row, col, it)
-                else:
-                    it.setText(text)
-
-            _set_item(0, str(int(bid)))
-            _set_item(1, str(b.get("name") or BUS_BY_ID[int(bid)].name))
-            if rebuild:
-                gain_wrap = QtWidgets.QWidget()
-                gain_lay = QtWidgets.QHBoxLayout(gain_wrap)
-                gain_lay.setContentsMargins(6, 0, 6, 0)
-                gain_lay.setSpacing(6)
-                gain_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-                gain_slider.setMinimum(-60)
-                gain_slider.setMaximum(int(MAX_GAIN_DB))
-                gain_slider.setSingleStep(1)
-                gain_slider.valueChanged.connect(lambda value, bus_id=int(bid): self._on_bus_gain_changed(bus_id, value))
-                gain_lbl = QtWidgets.QLabel("0 dB")
-                gain_lbl.setFixedWidth(42)
-                gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-                gain_lay.addWidget(gain_slider, 1)
-                gain_lay.addWidget(gain_lbl)
-                self._buses.setCellWidget(row, 2, gain_wrap)
-                self._bus_gain_widgets[int(bid)] = gain_slider
-                self._bus_gain_labels[int(bid)] = gain_lbl
-            gain_slider = self._bus_gain_widgets.get(int(bid))
-            gain_lbl = self._bus_gain_labels.get(int(bid))
+    def _refresh_bus_strips(self, buses: dict[int, dict]) -> None:
+        running = self._server is not None
+        for definition in FIXED_BUSES:
+            bid = int(definition.bus_id)
+            b = buses.get(bid, {})
+            self._bus_strips[bid].set_title(str(b.get("name") or definition.name))
+            gain_value = _db_value(b.get("gain_db", 0.0))
+            slider = self._bus_gain_widgets[bid]
+            slider.blockSignals(True)
             try:
-                gain_value = int(round(float(b.get("gain_db", 0.0))))
-            except Exception:
-                gain_value = 0
-            if gain_slider is not None:
-                gain_slider.blockSignals(True)
+                slider.setEnabled(running)
+                slider.setValue(gain_value)
+            finally:
+                slider.blockSignals(False)
+            self._bus_gain_labels[bid].setText(format_db(gain_value))
+            feed = self._bus_feed_widgets.get(bid)
+            if feed is not None:
+                feed.blockSignals(True)
                 try:
-                    gain_slider.setEnabled(self._server is not None)
-                    gain_slider.setValue(int(gain_value))
+                    feed.setEnabled(running)
+                    feed.setChecked(bool(b.get("feed_to_regie", definition.default_feed_to_regie)))
                 finally:
-                    gain_slider.blockSignals(False)
-            if gain_lbl is not None:
-                gain_lbl.setText(f"{int(gain_value)} dB")
-            if rebuild:
-                cb = QtWidgets.QCheckBox()
-                cb.stateChanged.connect(lambda state, bus_id=int(bid): self._on_bus_feed_to_regie_changed(bus_id, state))
-                self._buses.setCellWidget(row, 3, centered_checkbox(cb))
-                self._bus_feed_widgets[int(bid)] = cb
-
-            cb = self._bus_feed_widgets.get(int(bid))
-            if cb is not None:
-                cb.blockSignals(True)
-                try:
-                    definition = BUS_BY_ID[int(bid)]
-                    cb.setEnabled(
-                        self._server is not None and int(bid) != REGIE_BUS_ID
-                    )
-                    if int(bid) == REGIE_BUS_ID:
-                        cb.setChecked(True)
-                    else:
-                        cb.setChecked(
-                            bool(
-                                b.get(
-                                    "feed_to_regie",
-                                    definition.default_feed_to_regie,
-                                )
-                            )
-                        )
-                finally:
-                    cb.blockSignals(False)
+                    feed.blockSignals(False)
 
     def _on_bus_feed_to_regie_changed(self, bus_id: int, state: int) -> None:
         if (
@@ -1039,24 +902,72 @@ class ServerWindow(QtWidgets.QMainWindow):
             return
         label = self._bus_gain_labels.get(int(bus_id))
         if label is not None:
-            label.setText(f"{int(value)} dB")
+            label.setText(format_db(value))
         if self._server is None:
             return
         self._server.set_bus_gain(int(bus_id), float(value))
 
-    def _refresh_outputs_table(self, outs: dict[int, dict], buses: dict[int, dict]) -> None:
-        output_ids = [oid for oid in sorted(outs.keys())]
-        rebuild = output_ids != self._output_row_ids
-        if rebuild:
-            self._outputs.setRowCount(len(output_ids))
-            self._output_row_ids = list(output_ids)
-            self._output_device_widgets.clear()
-            self._output_bus_widgets.clear()
-            self._output_gain_widgets.clear()
-            self._output_gain_labels.clear()
-            self._output_vu_widgets.clear()
-            self._output_status_widgets.clear()
+    def _build_output_strip(self, oid: int, bus_names: dict[int, str]) -> ChannelStrip:
+        dev_cb = compact_combo(QtWidgets.QComboBox())
+        patch_combo(dev_cb)
+        dev_cb.blockSignals(True)
+        for label, idx in self._output_devices_cache:
+            dev_cb.addItem(label, idx)
+        dev_cb.blockSignals(False)
+        dev_cb.currentIndexChanged.connect(lambda _i, out_id=int(oid): self._on_output_device_changed(out_id))
 
+        bus_cb = compact_combo(QtWidgets.QComboBox())
+        patch_combo(bus_cb)
+        bus_cb.blockSignals(True)
+        for bid, name in bus_names.items():
+            bus_cb.addItem(name, int(bid))
+        bus_cb.blockSignals(False)
+        bus_cb.currentIndexChanged.connect(lambda _i, out_id=int(oid): self._on_output_bus_changed(out_id))
+
+        fader = Fader(-60, int(MAX_GAIN_DB))
+        fader.valueChanged.connect(lambda value, out_id=int(oid): self._on_output_gain_changed(out_id, value))
+        meter = LevelMeter()
+        value = readout()
+        strip = ChannelStrip(f"Sortie {int(oid) + 1}", fader=fader, meter=meter, readout=value, width=132)
+        indicator = StatusIndicator(size=14)
+        remove = QtWidgets.QToolButton()
+        remove.setText("✕")
+        remove.setProperty("class", "ghost")
+        remove.setFixedSize(22, 22)
+        remove.setToolTip("Supprimer cette sortie")
+        remove.setAccessibleName(f"Supprimer la sortie {int(oid) + 1}")
+        remove.clicked.connect(lambda _checked=False, out_id=int(oid): self._on_remove_output(out_id))
+        strip.header.addWidget(indicator)
+        strip.header.addWidget(remove)
+        strip.reserve_top(2)
+        strip.top.addWidget(dev_cb)
+        strip.top.addWidget(bus_cb)
+
+        self._output_strips[int(oid)] = strip
+        self._output_device_widgets[int(oid)] = dev_cb
+        self._output_bus_widgets[int(oid)] = bus_cb
+        self._output_gain_widgets[int(oid)] = fader
+        self._output_gain_labels[int(oid)] = value
+        self._output_vu_widgets[int(oid)] = meter
+        self._output_status_widgets[int(oid)] = indicator
+        return strip
+
+    def _clear_output_strips(self) -> None:
+        self._output_rack.clear()
+        self._output_row_ids = []
+        for cache in (
+            self._output_strips,
+            self._output_device_widgets,
+            self._output_bus_widgets,
+            self._output_gain_widgets,
+            self._output_gain_labels,
+            self._output_vu_widgets,
+            self._output_status_widgets,
+        ):
+            cache.clear()
+
+    def _refresh_output_strips(self, outs: dict[int, dict], buses: dict[int, dict]) -> None:
+        output_ids = sorted(outs.keys())
         bus_names = {
             definition.bus_id: str(
                 buses.get(definition.bus_id, {}).get("name") or definition.name
@@ -1064,150 +975,71 @@ class ServerWindow(QtWidgets.QMainWindow):
             for definition in FIXED_BUSES
             if definition.bus_id in buses
         }
-        sorted_bus_ids = [
-            definition.bus_id
-            for definition in FIXED_BUSES
-            if definition.bus_id in bus_names
-        ]
+        if output_ids != self._output_row_ids:
+            self._clear_output_strips()
+            for oid in output_ids:
+                self._output_rack.add_strip(self._build_output_strip(int(oid), bus_names))
+            self._output_row_ids = list(output_ids)
 
-        for row, oid in enumerate(output_ids):
+        running = self._server is not None
+        for oid in output_ids:
             st = outs.get(int(oid), {})
 
-            def _set_item(col: int, text: str, row: int = row) -> None:
-                it = self._outputs.item(row, col)
-                if it is None:
-                    it = QtWidgets.QTableWidgetItem(text)
-                    self._outputs.setItem(row, col, it)
-                else:
-                    it.setText(text)
-
-            _set_item(0, str(oid))
-
-            if rebuild:
-                dev_cb = QtWidgets.QComboBox()
-                patch_combo(dev_cb)
-                dev_cb.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-                dev_cb.setMinimumContentsLength(40)
-                dev_cb.blockSignals(True)
-                for label, idx in self._output_devices_cache:
-                    dev_cb.addItem(label, idx)
-                dev_cb.blockSignals(False)
-                dev_cb.currentIndexChanged.connect(lambda _i, out_id=int(oid): self._on_output_device_changed(out_id))
-                self._outputs.setCellWidget(row, 1, dev_cb)
-                self._output_device_widgets[int(oid)] = dev_cb
-
-                bus_cb = QtWidgets.QComboBox()
-                patch_combo(bus_cb)
-                bus_cb.blockSignals(True)
-                for bid in sorted_bus_ids:
-                    bus_cb.addItem(str(bus_names[bid]), int(bid))
-                bus_cb.blockSignals(False)
-                bus_cb.currentIndexChanged.connect(lambda _i, out_id=int(oid): self._on_output_bus_changed(out_id))
-                self._outputs.setCellWidget(row, 2, bus_cb)
-                self._output_bus_widgets[int(oid)] = bus_cb
-
-                gain_wrap = QtWidgets.QWidget()
-                gain_lay = QtWidgets.QHBoxLayout(gain_wrap)
-                gain_lay.setContentsMargins(6, 0, 6, 0)
-                gain_lay.setSpacing(6)
-                gain_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-                gain_slider.setMinimum(-60)
-                gain_slider.setMaximum(int(MAX_GAIN_DB))
-                gain_slider.setSingleStep(1)
-                gain_slider.valueChanged.connect(lambda value, out_id=int(oid): self._on_output_gain_changed(out_id, value))
-                gain_lbl = QtWidgets.QLabel("0 dB")
-                gain_lbl.setFixedWidth(42)
-                gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-                gain_lay.addWidget(gain_slider, 1)
-                gain_lay.addWidget(gain_lbl)
-                self._outputs.setCellWidget(row, 3, gain_wrap)
-                self._output_gain_widgets[int(oid)] = gain_slider
-                self._output_gain_labels[int(oid)] = gain_lbl
-
-            dev_cb = self._output_device_widgets.get(int(oid))
-            if dev_cb is not None:
-                dev_cb.blockSignals(True)
-                try:
-                    cur_dev = st.get("device")
-                    if cur_dev is not None:
-                        i = dev_cb.findData(int(cur_dev))
-                        if i >= 0:
-                            dev_cb.setCurrentIndex(i)
-                    dev_cb.setEnabled(self._server is not None)
-                finally:
-                    dev_cb.blockSignals(False)
-
-            bus_cb = self._output_bus_widgets.get(int(oid))
-            if bus_cb is not None:
-                bus_cb.blockSignals(True)
-                try:
-                    cur_bus = st.get("bus_id")
-                    if cur_bus is not None:
-                        i = bus_cb.findData(int(cur_bus))
-                        if i >= 0:
-                            bus_cb.setCurrentIndex(i)
-                    bus_cb.setEnabled(self._server is not None)
-                finally:
-                    bus_cb.blockSignals(False)
-
-            gain_slider = self._output_gain_widgets.get(int(oid))
-            gain_lbl = self._output_gain_labels.get(int(oid))
+            dev_cb = self._output_device_widgets[int(oid)]
+            dev_cb.blockSignals(True)
             try:
-                gain_value = int(round(float(st.get("gain_db", 0.0))))
-            except Exception:
-                gain_value = 0
-            if gain_slider is not None:
-                gain_slider.blockSignals(True)
-                try:
-                    gain_slider.setEnabled(self._server is not None)
-                    gain_slider.setValue(int(gain_value))
-                finally:
-                    gain_slider.blockSignals(False)
-            if gain_lbl is not None:
-                gain_lbl.setText(f"{int(gain_value)} dB")
+                cur_dev = st.get("device")
+                if cur_dev is not None:
+                    i = dev_cb.findData(int(cur_dev))
+                    if i >= 0:
+                        dev_cb.setCurrentIndex(i)
+                dev_cb.setEnabled(running)
+                dev_cb.setToolTip(dev_cb.currentText())
+            finally:
+                dev_cb.blockSignals(False)
 
-            if rebuild:
-                vu = VuMeter()
-                self._outputs.setCellWidget(row, 4, cell_vu(vu))
-                self._output_vu_widgets[int(oid)] = vu
-                indicator = StatusIndicator()
-                self._outputs.setCellWidget(row, 5, centered_checkbox(indicator))
-                self._output_status_widgets[int(oid)] = indicator
-            vu = self._output_vu_widgets.get(int(oid))
-            if vu is not None:
-                with best_effort("vu.set_level()"):
-                    vu.set_level(float(st.get("vu_dbfs", -60.0)))
-            indicator = self._output_status_widgets.get(int(oid))
-            if indicator is not None:
-                error = str(st.get("stream_error") or st.get("last_error") or "")
-                if error:
-                    indicator.set_state(
-                        "error",
-                        description=f"Sortie {oid} en erreur : {error}",
-                    )
-                elif st.get("stream_active") is True:
-                    indicator.set_state(
-                        "online",
-                        description=f"Sortie {oid} active",
-                    )
-                elif "stream_active" in st:
-                    indicator.set_state(
-                        "error",
-                        description=f"Sortie {oid} inactive",
-                    )
-                else:
-                    indicator.set_state(
-                        "unknown",
-                        description=f"Activité de la sortie {oid} non confirmée",
-                    )
+            bus_cb = self._output_bus_widgets[int(oid)]
+            bus_cb.blockSignals(True)
+            try:
+                cur_bus = st.get("bus_id")
+                if cur_bus is not None:
+                    i = bus_cb.findData(int(cur_bus))
+                    if i >= 0:
+                        bus_cb.setCurrentIndex(i)
+                bus_cb.setEnabled(running)
+            finally:
+                bus_cb.blockSignals(False)
+            definition = BUS_BY_ID.get(int(bus_cb.currentData())) if bus_cb.currentData() is not None else None
+            self._output_strips[int(oid)].set_color(definition.color if definition else None)
 
-    def _on_output_selection_changed(self) -> None:
-        self._remove_output_btn.setEnabled(self._server is not None and len(self._outputs.selectedItems()) > 0)
+            gain_value = _db_value(st.get("gain_db", 0.0))
+            slider = self._output_gain_widgets[int(oid)]
+            slider.blockSignals(True)
+            try:
+                slider.setEnabled(running)
+                slider.setValue(gain_value)
+            finally:
+                slider.blockSignals(False)
+            self._output_gain_labels[int(oid)].setText(format_db(gain_value))
+
+            with best_effort("output vu"):
+                self._output_vu_widgets[int(oid)].set_level(float(st.get("vu_dbfs") or -60.0))
+            indicator = self._output_status_widgets[int(oid)]
+            label = f"Sortie {int(oid) + 1}"
+            error = str(st.get("stream_error") or st.get("last_error") or "")
+            if error:
+                indicator.set_state("error", description=f"{label} en erreur : {error}")
+            elif st.get("stream_active") is True:
+                indicator.set_state("online", description=f"{label} active")
+            elif "stream_active" in st:
+                indicator.set_state("error", description=f"{label} inactive")
+            else:
+                indicator.set_state("unknown", description=f"Activité de la {label.lower()} non confirmée")
 
     def _on_client_input_gain_changed(self, client_id: int, value: int) -> None:
         label = self._input_gain_labels.get(int(client_id))
         if label is not None:
-            label.setText(f"{int(value)} dB")
+            label.setText(format_db(value))
         if self._server is None:
             return
         self._server.set_client_input_gain(int(client_id), float(value))
@@ -1215,7 +1047,7 @@ class ServerWindow(QtWidgets.QMainWindow):
     def _on_output_gain_changed(self, output_id: int, value: int) -> None:
         label = self._output_gain_labels.get(int(output_id))
         if label is not None:
-            label.setText(f"{int(value)} dB")
+            label.setText(format_db(value))
         if self._server is None:
             return
         self._server.set_output_gain(int(output_id), float(value))
@@ -1237,20 +1069,10 @@ class ServerWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Output", str(e))
 
-    def _on_remove_output(self) -> None:
+    def _on_remove_output(self, output_id: int) -> None:
         if self._server is None:
             return
-        row = self._outputs.currentRow()
-        if row < 0:
-            return
-        item = self._outputs.item(row, 0)
-        if item is None:
-            return
-        try:
-            oid = int(item.text())
-        except Exception:
-            return
-        self._server.remove_output(int(oid))
+        self._server.remove_output(int(output_id))
 
     def _on_output_device_changed(self, output_id: int) -> None:
         if self._server is None:
@@ -1370,10 +1192,15 @@ class ServerWindow(QtWidgets.QMainWindow):
                     self._return_input_device.setCurrentIndex(i)
         finally:
             self._return_input_device.blockSignals(False)
+        self._refresh_return_caption()
 
         if self._server is None:
             self._output_row_ids = []
             self._load_preset_preview()
+
+    def _refresh_return_caption(self) -> None:
+        dev = self._return_input_device.currentData()
+        self._return_strip.set_caption(self._return_input_device.currentText() if dev is not None else "aucune entrée")
 
     def _on_return_enabled_changed(self, state: int) -> None:
         if self._server is None:
@@ -1386,6 +1213,7 @@ class ServerWindow(QtWidgets.QMainWindow):
 
     def _on_return_input_device_changed(self, _idx: int) -> None:
         dev = self._return_input_device.currentData()
+        self._refresh_return_caption()
         if self._server is not None:
             self._server.set_return_input_device(int(dev) if dev is not None else None)
             return
@@ -1420,16 +1248,9 @@ class ServerWindow(QtWidgets.QMainWindow):
             atomic_write_json(server_preset, data)
 
     def _forget_selected_client(self) -> None:
-        try:
-            items = self._clients.selectedItems()
-            if not items:
-                return
-            row = int(items[0].row())
-            if row < 0 or row >= len(self._client_row_ids):
-                return
-            client_id = int(self._client_row_ids[row])
-        except Exception:
+        if self._selected_client_id is None:
             return
+        client_id = int(self._selected_client_id)
 
         if self._server is not None:
             self._server.forget_client(int(client_id))
@@ -1469,24 +1290,9 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._device_status.setText("Wait for device enumeration before starting the server.")
             return
 
-        # reset cached widgets (they may refer to deleted Qt objects after a previous stop/start)
-        self._client_row_ids = []
-        self._input_gain_widgets.clear()
-        self._input_gain_labels.clear()
-        self._vu_widgets.clear()
-        self._status_widgets.clear()
-
-        self._output_row_ids = []
-        self._bus_row_ids = []
-        self._output_device_widgets.clear()
-        self._output_bus_widgets.clear()
-        self._output_gain_widgets.clear()
-        self._output_gain_labels.clear()
-        self._output_vu_widgets.clear()
-        self._output_status_widgets.clear()
-        self._bus_gain_widgets.clear()
-        self._bus_gain_labels.clear()
-        self._bus_feed_widgets.clear()
+        # The preview strips belong to the stopped state; rebuild from the engine.
+        self._clear_client_strips()
+        self._clear_output_strips()
 
         try:
             self._server = IntercomServer(
@@ -1525,6 +1331,7 @@ class ServerWindow(QtWidgets.QMainWindow):
                     self._return_input_device.blockSignals(True)
                     self._return_input_device.setCurrentIndex(idx)
                     self._return_input_device.blockSignals(False)
+            self._refresh_return_caption()
             self._server.save_preset()
         except PresetLoadError as e:
             try:
@@ -1561,15 +1368,16 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._update_controls_for_server_state()
+        self._refresh_identity_header()
 
         with best_effort("_server.get_clients_snapshot()"):
             snap = self._server.get_clients_snapshot()
             buses = self._server.get_buses_snapshot()
             outs = self._server.get_outputs_snapshot()
             self._refresh_bus_selectors(buses)
-            self._refresh_buses_table(buses)
-            self._set_clients_table(snap, buses)
-            self._refresh_outputs_table(outs, buses)
+            self._refresh_bus_strips(buses)
+            self._refresh_client_strips(snap, buses)
+            self._refresh_output_strips(outs, buses)
             self._update_server_health(
                 self._server.get_stats_snapshot(),
                 snap,
@@ -1592,10 +1400,10 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._server = None
             self._start_btn.setEnabled(True)
             self._stop_btn.setEnabled(False)
-            self._clients.setRowCount(0)
-            self._outputs.setRowCount(0)
-            self._remove_output_btn.setEnabled(False)
-            self._forget_client_btn.setEnabled(False)
+            self._clear_client_strips()
+            self._clear_output_strips()
+            self._select_client(None)
+            self._refresh_identity_header()
             set_status_label(
                 self._status_label,
                 "Arrêté",
@@ -1609,27 +1417,8 @@ class ServerWindow(QtWidgets.QMainWindow):
                 detail="Serveur intercom arrêté.",
             )
             self._set_health_facets_unavailable()
-            self._return_vu.set_level(-60.0)
-            self._regie_vu.set_level(-60.0)
-
-            self._client_row_ids = []
-            self._input_gain_widgets.clear()
-            self._input_gain_labels.clear()
-            self._vu_widgets.clear()
-            self._status_widgets.clear()
-
-            self._output_row_ids = []
-            self._output_device_widgets.clear()
-            self._output_bus_widgets.clear()
-            self._output_gain_widgets.clear()
-            self._output_gain_labels.clear()
-            self._output_vu_widgets.clear()
-            self._output_status_widgets.clear()
-            self._buses.setRowCount(0)
-            self._bus_row_ids = []
-            self._bus_gain_widgets.clear()
-            self._bus_gain_labels.clear()
-            self._bus_feed_widgets.clear()
+            for meter in (self._return_vu, *self._bus_vu_widgets.values()):
+                meter.set_level(-60.0)
 
             self._update_controls_for_server_state()
             self._load_preset_preview()
@@ -1641,16 +1430,10 @@ class ServerWindow(QtWidgets.QMainWindow):
         buses = self._server.get_buses_snapshot()
         outs = self._server.get_outputs_snapshot()
         self._refresh_bus_selectors(buses)
-        self._refresh_buses_table(buses)
-        self._set_clients_table(snap, buses)
-        self._refresh_outputs_table(outs, buses)
+        self._refresh_bus_strips(buses)
+        self._refresh_client_strips(snap, buses)
+        self._refresh_output_strips(outs, buses)
 
-        try:
-            items = self._clients.selectedItems()
-            have_sel = bool(items)
-        except Exception:
-            have_sel = False
-        self._forget_client_btn.setEnabled(bool(have_sel))
         self._update_controls_for_server_state()
 
     def _refresh_vu_and_health(self) -> None:
@@ -1675,12 +1458,22 @@ class ServerWindow(QtWidgets.QMainWindow):
                 vu.set_level(float(client.get("vu_dbfs", -60.0)))
             except Exception:
                 vu.set_level(-60.0)
+        bus_levels: dict[int, float] = {}
         for output_id, vu in self._output_vu_widgets.items():
             output = outputs.get(int(output_id), {})
             try:
-                vu.set_level(float(output.get("vu_dbfs", -60.0)))
+                level = float(output.get("vu_dbfs", -60.0))
             except Exception:
-                vu.set_level(-60.0)
+                level = -60.0
+            vu.set_level(level)
+            with best_effort("aggregate bus level"):
+                bid = int(output.get("bus_id"))
+                bus_levels[bid] = max(level, bus_levels.get(bid, -60.0))
+        # Régie has its own mix meter; other buses show their loudest output.
+        for bid, meter in self._bus_vu_widgets.items():
+            if bid != REGIE_BUS_ID:
+                meter.set_level(bus_levels.get(int(bid), -60.0))
+        self._update_talk_lamps(clients)
 
         self._update_server_health(stats, clients, outputs)
 
@@ -1691,15 +1484,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         snap = self._server.get_clients_snapshot() if self._server is not None else {}
         stats = self._server.get_stats_snapshot() if self._server is not None else {}
 
-        selected = None
-        try:
-            items = self._clients.selectedItems()
-            if items:
-                row = int(items[0].row())
-                if 0 <= row < len(self._client_row_ids):
-                    selected = int(self._client_row_ids[row])
-        except Exception:
-            selected = None
+        selected = self._selected_client_id
 
         lines = [
             f"Audio UDP port: {port}",
@@ -1774,132 +1559,129 @@ class ServerWindow(QtWidgets.QMainWindow):
         if box.clickedButton() is reset_btn:
             self._reset_total_config()
 
-    def _set_clients_table(self, snap: dict[int, dict], buses: dict[int, dict]) -> None:
-        client_ids = [client_id for client_id, _st in sorted(snap.items(), key=lambda kv: kv[0])]
-        rebuild = client_ids != self._client_row_ids
-        if rebuild:
-            self._clients.setRowCount(len(client_ids))
-            self._client_row_ids = list(client_ids)
-            self._input_gain_widgets.clear()
-            self._input_gain_labels.clear()
-            self._vu_widgets.clear()
-            self._status_widgets.clear()
+    def _build_client_strip(self, client_id: int) -> ChannelStrip:
+        fader = Fader(-60, int(MAX_GAIN_DB))
+        fader.valueChanged.connect(lambda value, cid=int(client_id): self._on_client_input_gain_changed(cid, value))
+        meter = LevelMeter()
+        value = readout()
+        strip = ChannelStrip(str(client_id), fader=fader, meter=meter, readout=value, color=TOKENS["accent"], width=100)
+        indicator = StatusIndicator(size=14)
+        strip.header.addWidget(indicator)
+        lamps_row = QtWidgets.QWidget()
+        lamps_lay = QtWidgets.QHBoxLayout(lamps_row)
+        lamps_lay.setContentsMargins(0, 0, 0, 0)
+        lamps_lay.setSpacing(3)
+        lamps: dict[int, Lamp] = {}
+        for definition in FIXED_BUSES:
+            lamp = Lamp(definition.name[:1].upper(), definition.color)
+            lamp.setToolTip(f"Parle vers {definition.name}")
+            lamps_lay.addWidget(lamp)
+            lamps[int(definition.bus_id)] = lamp
+        lamps_lay.addStretch(1)
+        strip.reserve_top(1)
+        strip.top.addWidget(lamps_row)
+        strip.setToolTip("Cliquer pour sélectionner ce poste")
+        strip.clicked.connect(lambda cid=int(client_id): self._select_client(cid))
 
-        for row, client_id in enumerate(client_ids):
+        self._client_strips[int(client_id)] = strip
+        self._input_gain_widgets[int(client_id)] = fader
+        self._input_gain_labels[int(client_id)] = value
+        self._vu_widgets[int(client_id)] = meter
+        self._status_widgets[int(client_id)] = indicator
+        self._talk_lamps[int(client_id)] = lamps
+        return strip
+
+    def _clear_client_strips(self) -> None:
+        self._client_rack.clear()
+        self._client_row_ids = []
+        for cache in (
+            self._client_strips,
+            self._input_gain_widgets,
+            self._input_gain_labels,
+            self._vu_widgets,
+            self._status_widgets,
+            self._talk_lamps,
+        ):
+            cache.clear()
+
+    def _select_client(self, client_id: int | None) -> None:
+        self._selected_client_id = client_id
+        for cid, strip in self._client_strips.items():
+            strip.set_flag("selected", cid == client_id)
+        self._forget_client_btn.setEnabled(client_id is not None)
+
+    def _refresh_client_strips(self, snap: dict[int, dict], buses: dict[int, dict]) -> None:
+        client_ids = sorted(snap.keys())
+        if client_ids != self._client_row_ids:
+            self._clear_client_strips()
+            for client_id in client_ids:
+                self._client_rack.add_strip(self._build_client_strip(int(client_id)))
+            self._client_row_ids = list(client_ids)
+            if self._selected_client_id not in client_ids:
+                self._selected_client_id = None
+            self._select_client(self._selected_client_id)
+
+        online = 0
+        for client_id in client_ids:
             st = snap.get(int(client_id), {})
             with best_effort("record client UUID"):
                 self._client_uuid_by_id[int(client_id)] = str(st.get("client_uuid") or "")
-
-            def _set_item(col: int, text: str, row: int = row) -> None:
-                it = self._clients.item(row, col)
-                if it is None:
-                    it = QtWidgets.QTableWidgetItem(text)
-                    self._clients.setItem(row, col, it)
-                else:
-                    it.setText(text)
-
-            _set_item(0, str(client_id))
-            _set_item(1, str(st.get("name", "")))
+            strip = self._client_strips[int(client_id)]
+            client_name = str(st.get("name") or f"Poste {client_id}")
+            strip.set_title(client_name)
             addr = st.get("addr")
-            _set_item(2, f"{addr[0]}:{addr[1]}" if addr else "")
+            strip.set_caption(str(addr[0]) if addr else "hors ligne")
 
-            # col 3 — independent control/UDP status
             transport_state = derive_client_transport_state(st)
-            if rebuild:
-                si = StatusIndicator()
-                self._clients.setCellWidget(row, 3, centered_checkbox(si))  # reuse centering helper
-                self._status_widgets[int(client_id)] = si
-            si = self._status_widgets.get(int(client_id))
-            if si is not None:
-                client_name = str(st.get("name") or client_id)
-                if transport_state is ClientTransportState.OFFLINE:
-                    si.set_state(
-                        "offline",
-                        description=f"{client_name} : hors ligne",
-                    )
-                elif transport_state is ClientTransportState.WAITING_UDP:
-                    si.set_state(
-                        "connecting",
-                        description=f"{client_name} : association audio UDP en attente",
-                    )
-                elif transport_state is ClientTransportState.IDLE:
-                    si.set_state(
-                        "idle",
-                        description=f"{client_name} : en ligne, au repos",
-                    )
-                elif transport_state is ClientTransportState.DEGRADED:
-                    si.set_state(
-                        "degraded",
-                        description=(
-                            f"{client_name} : en parole, audio UDP absent ou ancien"
-                        ),
-                    )
-                else:
-                    si.set_state(
-                        "online",
-                        description=f"{client_name} : en parole, audio UDP actif",
-                    )
-
-            # col 4 — Talk gain
-            if rebuild:
-                gain_wrap = QtWidgets.QWidget()
-                gain_lay = QtWidgets.QHBoxLayout(gain_wrap)
-                gain_lay.setContentsMargins(6, 0, 6, 0)
-                gain_lay.setSpacing(6)
-                gain_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-                gain_slider.setMinimum(-60)
-                gain_slider.setMaximum(int(MAX_GAIN_DB))
-                gain_slider.setSingleStep(1)
-                gain_slider.valueChanged.connect(lambda value, cid=int(client_id): self._on_client_input_gain_changed(cid, value))
-                gain_lbl = QtWidgets.QLabel("0 dB")
-                gain_lbl.setFixedWidth(42)
-                gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-                gain_lay.addWidget(gain_slider, 1)
-                gain_lay.addWidget(gain_lbl)
-                self._clients.setCellWidget(row, 4, gain_wrap)
-                self._input_gain_widgets[int(client_id)] = gain_slider
-                self._input_gain_labels[int(client_id)] = gain_lbl
-            gain_slider = self._input_gain_widgets.get(int(client_id))
-            gain_lbl = self._input_gain_labels.get(int(client_id))
-            try:
-                gain_value = int(round(float(st.get("input_gain_db", 0.0))))
-            except Exception:
-                gain_value = 0
-            if gain_slider is not None:
-                gain_slider.blockSignals(True)
-                try:
-                    gain_slider.setEnabled(self._server is not None)
-                    gain_slider.setValue(int(gain_value))
-                finally:
-                    gain_slider.blockSignals(False)
-            if gain_lbl is not None:
-                gain_lbl.setText(f"{int(gain_value)} dB")
-
-            # col 5 — VU meter
-            if rebuild:
-                vu = VuMeter()
-                self._clients.setCellWidget(row, 5, cell_vu(vu))
-                self._vu_widgets[int(client_id)] = vu
-            vu = self._vu_widgets.get(int(client_id))
-            if vu is not None:
-                with best_effort("vu.set_level()"):
-                    vu.set_level(float(st.get("vu_dbfs", -60.0)))
-
-            # Row styling: dimmed for offline, normal for online
+            indicator = self._status_widgets[int(client_id)]
+            if transport_state is ClientTransportState.OFFLINE:
+                indicator.set_state("offline", description=f"{client_name} : hors ligne")
+            elif transport_state is ClientTransportState.WAITING_UDP:
+                indicator.set_state("connecting", description=f"{client_name} : association audio UDP en attente")
+            elif transport_state is ClientTransportState.IDLE:
+                indicator.set_state("idle", description=f"{client_name} : en ligne, au repos")
+            elif transport_state is ClientTransportState.DEGRADED:
+                indicator.set_state("degraded", description=f"{client_name} : en parole, audio UDP absent ou ancien")
+            else:
+                indicator.set_state("online", description=f"{client_name} : en parole, audio UDP actif")
             disconnected = transport_state is ClientTransportState.OFFLINE
-            fg = QtGui.QColor(100, 100, 100) if disconnected else QtGui.QColor(220, 220, 220)
-            for col in range(self._clients.columnCount()):
-                it = self._clients.item(row, col)
-                if it is None:
-                    it = QtWidgets.QTableWidgetItem("")
-                    self._clients.setItem(row, col, it)
-                it.setForeground(QtGui.QBrush(fg))
+            online += 0 if disconnected else 1
+            strip.set_flag("offline", disconnected)
+
+            gain_value = _db_value(st.get("input_gain_db", 0.0))
+            slider = self._input_gain_widgets[int(client_id)]
+            slider.blockSignals(True)
+            try:
+                slider.setEnabled(self._server is not None)
+                slider.setValue(gain_value)
+            finally:
+                slider.blockSignals(False)
+            self._input_gain_labels[int(client_id)].setText(format_db(gain_value))
+        self._update_talk_lamps(snap)
+
+        total = len(client_ids)
+        self._team_section.set_count(f"{online} en ligne sur {total}" if total else "")
+
+    def _update_talk_lamps(self, snap: Mapping[int, Mapping[str, object]]) -> None:
+        for client_id, lamps in self._talk_lamps.items():
+            st = snap.get(int(client_id), {})
+            ptt = st.get("ptt_buses") if isinstance(st.get("ptt_buses"), dict) else {}
+            online = bool(st.get("control_connected"))
+            for bus_id, lamp in lamps.items():
+                lamp.set_on(online and bool(ptt.get(bus_id) or ptt.get(str(bus_id))))
 
     def _on_autostart_changed(self, state: int) -> None:
         self._settings.setValue("autostart", bool(is_checked(state)))
 
     def _on_start_minimized_changed(self, state: int) -> None:
         self._settings.setValue("start_minimized", bool(is_checked(state)))
+
+    def _refresh_identity_header(self, *_args) -> None:
+        name = self._server_name.text().strip() or "py-intercom"
+        self._top_bar.title_label.setText(name)
+        parts = [f"Audio UDP {int(AUDIO_UDP_PORT)}", f"contrôle TCP {int(AUDIO_UDP_PORT) + 1}"]
+        parts.append("annoncé sur le LAN" if self._discovery_cb.isChecked() else "non annoncé")
+        self._top_bar.subtitle_label.setText(" · ".join(parts))
 
     def _maybe_autostart(self) -> None:
         if self._server is None and bool(self._autostart_cb.isChecked()):

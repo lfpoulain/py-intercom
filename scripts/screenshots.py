@@ -216,6 +216,8 @@ def main() -> None:
     client_window._remote_enabled.setChecked(True)
     for bus_id, key in ((REGIE_BUS_ID, "F1"), (PLATEAU_BUS_ID, "F2"), (VMIX_BUS_ID, "F3")):
         client_window._ptt_bus_keys[bus_id].setKeySequence(QtGui.QKeySequence(key))
+    toggle = client_window._ptt_bus_mode_widgets[PLATEAU_BUS_ID]
+    toggle.setCurrentIndex(toggle.findData("toggle"))
     client_window.show()
     combos = (client_window._input_device, client_window._output_device)
 
@@ -228,11 +230,18 @@ def main() -> None:
     client_window._connect()
     wait_for(lambda: client_window._client is not None and client_window._client.get_stats_snapshot()["control_ready"])
 
+    wait_for(lambda: client_window._operational_status.state.value == "online", timeout=15)
+    client_window._nav.set_current(0)
+    client_window._on_pad_pressed(REGIE_BUS_ID)  # talking to the control room
     pump(3.0)
     save(server_window, "server.png")
     logo = QtGui.QImage(str(ROOT / "src" / "py_intercom" / "img" / "logo.png"))
     logo.scaledToWidth(240, QtCore.Qt.TransformationMode.SmoothTransformation).save(str(OUT / "logo.png"))
     save(client_window, "client.png")
+    client_window._on_pad_released(REGIE_BUS_ID)
+    client_window._nav.set_current(1)
+    pump(0.3)
+    save(client_window, "client-settings.png")
 
     save_preflight(app)
 

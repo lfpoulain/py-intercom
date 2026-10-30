@@ -22,9 +22,10 @@ from PySide6 import QtCore, QtWidgets
 
 from ..common.audio_errors import friendly_audio_open_error, shared_stream_extra_settings
 from ..common.buses import BUS_BY_ID
+from ..common.console import LevelMeter
 from ..common.constants import FRAME_SAMPLES, SAMPLE_RATE
 from ..common.logging import best_effort
-from ..common.theme import StatusIndicator, VuMeter
+from ..common.theme import StatusIndicator
 
 MIC_LISTEN_S = 4.0
 MIC_MIN_PEAK_DBFS = -45.0
@@ -290,7 +291,7 @@ class PreflightDialog(QtWidgets.QDialog):
         for row in self.rows:
             lay.addWidget(row)
 
-        self._mic_meter = VuMeter()
+        self._mic_meter = LevelMeter(QtCore.Qt.Orientation.Horizontal)
         self._mic_meter.setMinimumWidth(220)
         self._mic_meter.setVisible(False)
         self.microphone_row.extra.insertWidget(0, self._mic_meter)

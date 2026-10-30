@@ -11,6 +11,19 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from .. import __version__
 from ..common.buses import BUS_BY_ID, FIXED_BUSES, REGIE_BUS_ID
+from ..common.console import (
+    Card,
+    ChannelStrip,
+    Fader,
+    LevelMeter,
+    Section,
+    SegmentedNav,
+    TalkPad,
+    TopBar,
+    chip,
+    format_db,
+    readout,
+)
 from ..common.constants import AUDIO_UDP_PORT, CONTROL_PORT_OFFSET, MAX_GAIN_DB
 from ..common.devices import format_device_label, resolve_device
 from ..common.discovery import DiscoveryListener
@@ -26,7 +39,7 @@ from ..common.preset_schema import (
     stamp_preset,
 )
 from ..common.theme import (
-    VuMeter,
+    TOKENS,
     apply_theme,
     make_field,
     patch_combo,
@@ -46,6 +59,8 @@ from .status import (
 
 CLIENT_STATE_REFRESH_INTERVAL_MS = 250
 CLIENT_VU_REFRESH_INTERVAL_MS = 67
+
+_MODE_BADGES = {"ptt": "PTT", "toggle": "BASCULE", "always_on": "PERMANENT"}
 
 
 def new_client_preset(client_uuid: str) -> dict:
@@ -93,8 +108,8 @@ class ClientWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"Py-Intercom Client {__version__}")
-        self.setMinimumSize(860, 680)
-        self.resize(1060, 800)
+        self.setMinimumSize(940, 560)
+        self.resize(1140, 640)
         self._set_app_icon()
 
         self._client: IntercomClient | None = None
@@ -147,7 +162,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._discovered_servers = QtWidgets.QComboBox()
         patch_combo(self._discovered_servers)
         self._discovered_servers.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self._discovered_servers.setMinimumContentsLength(30)
+        self._discovered_servers.setMinimumContentsLength(20)
         self._discovered_servers.addItem("(manual)", None)
         self._discovered_servers.currentIndexChanged.connect(self._on_discovered_server_selected)
 
@@ -159,30 +174,31 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._start_discovery_listener()
 
         self._server_ip = QtWidgets.QLineEdit(str(self._preset_get("server_ip", "")))
+        self._server_ip.setPlaceholderText("ex. 192.168.1.20")
 
         client_uuid = str(self._preset_get("client_uuid", ""))
         if not client_uuid:
             client_uuid = str(uuid.uuid4())
             self._preset_set("client_uuid", client_uuid)
         stable_id = int(client_id_from_uuid(client_uuid))
-        self._client_id_label = QtWidgets.QLabel("Client ID")
         self._client_id = QtWidgets.QLineEdit(str(stable_id))
         self._client_id.setReadOnly(True)
-        self._client_id_label.setVisible(False)
         self._client_id.setVisible(False)
 
         self._name = QtWidgets.QLineEdit(str(self._preset_get("name", "")))
+        self._name.setPlaceholderText("ex. Cadreur 1")
         self._ptt_bus_keys: dict[int, QtWidgets.QKeySequenceEdit] = {}
         self._ptt_bus_clear: dict[int, QtWidgets.QToolButton] = {}
         self._ptt_bus_mode_widgets: dict[int, QtWidgets.QComboBox] = {}
         self._ptt_bus_modes: dict[int, str] = {}
         self._ptt_bus_toggle_state: dict[int, bool] = {}
-        # Buses held down by the HTTP remote (PTT mode only).
+        # Buses held down by the HTTP remote, and by the mouse on a pad (PTT mode only).
         self._ptt_remote_active: dict[int, bool] = {}
+        self._ptt_pad_held: dict[int, bool] = {}
         self._remote_server: RemoteControlServer | None = None
         self._remote_dispatcher = QtDispatcher(self._handle_remote_command, self)
-        self._ptt_bus_state_labels: dict[int, QtWidgets.QLabel] = {}
-        self._ptt_bus_vu: dict[int, VuMeter] = {}
+        self._ptt_pads: dict[int, TalkPad] = {}
+        self._ptt_bus_vu: dict[int, TalkPad] = {}
         self._shortcut_widgets: list[QtWidgets.QWidget] = []
         self._known_buses: dict[int, dict] = {
             definition.bus_id: {
@@ -195,9 +211,11 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._bus_rows_widget = QtWidgets.QWidget()
         self._bus_rows_layout = QtWidgets.QGridLayout(self._bus_rows_widget)
         self._bus_rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._bus_rows_layout.setHorizontalSpacing(8)
+        self._bus_rows_layout.setHorizontalSpacing(10)
         self._bus_rows_layout.setVerticalSpacing(8)
         self._bus_rows_signature: tuple[int, ...] = tuple()
+        self._pads_layout = QtWidgets.QHBoxLayout()
+        self._pads_layout.setSpacing(14)
 
         self._sync_bus_widgets(self._known_buses, apply_saved=True)
 
@@ -205,6 +223,9 @@ class ClientWindow(QtWidgets.QMainWindow):
         patch_combo(self._input_device)
         self._output_device = QtWidgets.QComboBox()
         patch_combo(self._output_device)
+        for combo in (self._input_device, self._output_device):
+            combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(20)
         self._input_device.currentIndexChanged.connect(self._on_input_device_changed)
         self._output_device.currentIndexChanged.connect(self._on_output_device_changed)
         self._show_all_devices = QtWidgets.QCheckBox("Afficher tous les périphériques")
@@ -220,23 +241,25 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._refresh_devices_btn.setToolTip(
             "Réinterroger les périphériques audio. Disponible uniquement hors connexion."
         )
-        self._preflight_btn = QtWidgets.QPushButton("Tester…")
+        self._preflight_btn = QtWidgets.QPushButton("Tester micro et casque…")
         self._preflight_btn.setProperty("class", "secondary")
         self._preflight_btn.setToolTip(
             "Vérifier réseau, raccourcis, micro et casque avant de se connecter."
         )
         self._preflight_btn.setEnabled(False)
         self._device_status = QtWidgets.QLabel("")
+        self._device_status.setProperty("role", "hint")
 
         self._connect_btn = QtWidgets.QPushButton("▶  Connecter")
-        self._connect_btn.setProperty("class", "success")
-        self._connect_btn.setFixedWidth(130)
+        self._connect_btn.setProperty("class", "primary")
+        self._connect_btn.setMinimumWidth(130)
         self._connect_btn.setEnabled(False)
         self._connect_btn.setToolTip("Démarrer les flux audio puis établir la session intercom")
         self._disconnect_btn = QtWidgets.QPushButton("■  Déconnecter")
         self._disconnect_btn.setProperty("class", "danger")
-        self._disconnect_btn.setFixedWidth(130)
+        self._disconnect_btn.setMinimumWidth(130)
         self._disconnect_btn.setEnabled(False)
+        self._disconnect_btn.setVisible(False)
         self._disconnect_btn.setToolTip("Désarmer le PTT et quitter la session intercom")
 
         self._start_minimized = QtWidgets.QCheckBox("Démarrer réduit")
@@ -244,58 +267,42 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._start_minimized.setChecked(bool(self._preset_get("start_minimized", False)))
         self._start_minimized.stateChanged.connect(self._on_start_minimized_changed)
 
-        self._autoconnect_cb = QtWidgets.QCheckBox("Connexion automatique")
+        self._autoconnect_cb = QtWidgets.QCheckBox("Connexion automatique au lancement")
         self._autoconnect_cb.setToolTip("Se connecter automatiquement au démarrage")
         with best_effort("_autoconnect_cb.setChecked()"):
             self._autoconnect_cb.setChecked(bool(self._preset_get("autoconnect", False)))
         self._autoconnect_cb.stateChanged.connect(self._on_autoconnect_changed)
 
-        self._listen_regie = QtWidgets.QCheckBox(
-            f"Écouter {BUS_BY_ID[REGIE_BUS_ID].name}"
+        self._listen_regie = chip(
+            BUS_BY_ID[REGIE_BUS_ID].name.upper(),
+            f"Écouter le bus {BUS_BY_ID[REGIE_BUS_ID].name} dans le casque",
         )
         self._listen_regie.setEnabled(False)
         with best_effort("_listen_regie.setChecked()"):
             self._listen_regie.setChecked(bool(self._preset_get("listen_regie", True)))
 
-        self._listen_return_bus = QtWidgets.QCheckBox("Écouter le bus Return")
+        self._listen_return_bus = chip("ÉCOUTE", "Écouter le bus Return (programme) dans le casque")
         self._listen_return_bus.setEnabled(False)
         with best_effort("_listen_return_bus.setChecked()"):
             self._listen_return_bus.setChecked(bool(self._preset_get("listen_return_bus", False)))
 
-        self._duck_return = QtWidgets.QCheckBox("Baisser le Return quand on me parle")
-        self._duck_return.setToolTip(
-            "Le programme baisse automatiquement de 15 dB dans votre casque "
-            "pendant que quelqu'un vous parle, puis remonte."
+        self._duck_return = chip(
+            "DUCKING",
+            "Baisser le Return quand on me parle : le programme baisse de 15 dB "
+            "dans votre casque pendant que quelqu'un vous parle, puis remonte.",
         )
         with best_effort("restore duck_return"):
             self._duck_return.setChecked(bool(self._preset_get("duck_return", False)))
 
-        self._mic_gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self._mic_gain.setMinimum(-60)
-        self._mic_gain.setMaximum(int(MAX_GAIN_DB))
-        self._mic_gain.setValue(0)
-        self._mic_gain.setEnabled(False)
-        self._mic_gain_lbl = QtWidgets.QLabel("0 dB")
-        self._mic_gain_lbl.setFixedWidth(50)
-        self._mic_gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-
-        self._hp_gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self._hp_gain.setMinimum(-60)
-        self._hp_gain.setMaximum(int(MAX_GAIN_DB))
-        self._hp_gain.setValue(0)
-        self._hp_gain.setEnabled(False)
-        self._hp_gain_lbl = QtWidgets.QLabel("0 dB")
-        self._hp_gain_lbl.setFixedWidth(50)
-        self._hp_gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-
-        self._return_gain = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self._return_gain.setMinimum(-60)
-        self._return_gain.setMaximum(int(MAX_GAIN_DB))
-        self._return_gain.setValue(0)
-        self._return_gain.setEnabled(False)
-        self._return_gain_lbl = QtWidgets.QLabel("0 dB")
-        self._return_gain_lbl.setFixedWidth(50)
-        self._return_gain_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self._mic_gain = Fader(-60, int(MAX_GAIN_DB))
+        self._hp_gain = Fader(-60, int(MAX_GAIN_DB))
+        self._return_gain = Fader(-60, int(MAX_GAIN_DB))
+        self._mic_gain_lbl = readout()
+        self._hp_gain_lbl = readout()
+        self._return_gain_lbl = readout()
+        for fader in (self._mic_gain, self._hp_gain, self._return_gain):
+            fader.setValue(0)
+            fader.setEnabled(False)
 
         try:
             mic_gain = int(self._preset_get("input_gain_db", 0))
@@ -310,142 +317,24 @@ class ClientWindow(QtWidgets.QMainWindow):
         except Exception:
             return_gain = 0
         self._mic_gain.setValue(int(mic_gain))
-        self._mic_gain_lbl.setText(f"{int(mic_gain)} dB")
+        self._mic_gain_lbl.setText(format_db(mic_gain))
         self._hp_gain.setValue(int(hp_gain))
-        self._hp_gain_lbl.setText(f"{int(hp_gain)} dB")
+        self._hp_gain_lbl.setText(format_db(hp_gain))
         self._return_gain.setValue(int(return_gain))
-        self._return_gain_lbl.setText(f"{int(return_gain)} dB")
+        self._return_gain_lbl.setText(format_db(return_gain))
 
-        self._in_vu = VuMeter()
-        self._out_vu = VuMeter()
-        self._return_vu = VuMeter()
+        self._in_vu = LevelMeter()
+        self._out_vu = LevelMeter()
+        self._return_vu = LevelMeter()
 
         self._info_btn = QtWidgets.QToolButton()
-        self._info_btn.setText("ℹ")
+        self._info_btn.setText("ⓘ")
         self._info_btn.setProperty("class", "ghost")
         self._info_btn.setFixedSize(34, 34)
-        self._info_btn.setToolTip("Info / Debug")
+        self._info_btn.setToolTip("Informations techniques et remise à zéro")
         self._info_btn.clicked.connect(self._show_geek_info)
 
-        # -- Operational header --
-        hero = QtWidgets.QFrame()
-        hero.setProperty("role", "hero")
-        hero_lay = QtWidgets.QHBoxLayout(hero)
-        hero_lay.setContentsMargins(18, 14, 14, 14)
-        hero_lay.setSpacing(16)
-        hero_copy = QtWidgets.QVBoxLayout()
-        hero_copy.setSpacing(1)
-        eyebrow = QtWidgets.QLabel("PY-INTERCOM")
-        eyebrow.setProperty("role", "heroEyebrow")
-        title = QtWidgets.QLabel("Poste client")
-        title.setProperty("role", "heroTitle")
-        subtitle = QtWidgets.QLabel(
-            "Préparez votre audio, connectez-vous, puis utilisez les touches PTT."
-        )
-        subtitle.setProperty("role", "heroSubtitle")
-        hero_copy.addWidget(eyebrow)
-        hero_copy.addWidget(title)
-        hero_copy.addWidget(subtitle)
-        hero_lay.addLayout(hero_copy, 1)
-        self._connection_state_banner.setMinimumWidth(150)
-        hero_lay.addWidget(self._connection_state_banner)
-        hero_lay.addWidget(self._info_btn)
-
-        # -- Connection preparation --
-        conn_box = QtWidgets.QGroupBox("Connexion")
-        conn_box.setObjectName("connectionCard")
-        conn_box_lay = QtWidgets.QVBoxLayout(conn_box)
-        conn_box_lay.setContentsMargins(16, 12, 16, 14)
-        conn_box_lay.setSpacing(11)
-        conn_fields = QtWidgets.QHBoxLayout()
-        conn_fields.setSpacing(12)
-        conn_fields.addWidget(
-            make_field("SERVEUR DÉTECTÉ", self._discovered_servers, minimum_width=220),
-            2,
-        )
-        conn_fields.addWidget(
-            make_field("ADRESSE SERVEUR", self._server_ip, minimum_width=180),
-            1,
-        )
-        conn_fields.addWidget(
-            make_field("VOTRE NOM", self._name, minimum_width=160),
-            1,
-        )
-        conn_fields.addWidget(self._client_id_label)
-        conn_fields.addWidget(self._client_id)
-        conn_box_lay.addLayout(conn_fields)
-
-        conn_footer = QtWidgets.QHBoxLayout()
-        conn_footer.setSpacing(12)
-        conn_footer.addWidget(self._autoconnect_cb)
-        conn_footer.addWidget(self._start_minimized)
-        conn_footer.addStretch(1)
-        conn_footer.addWidget(self._disconnect_btn)
-        conn_footer.addWidget(self._connect_btn)
-        conn_box_lay.addLayout(conn_footer)
-
-        # -- Audio devices --
-        dev_box = QtWidgets.QGroupBox("Périphériques audio")
-        dev_box.setObjectName("devicesCard")
-        dev_lay = QtWidgets.QVBoxLayout(dev_box)
-        dev_lay.setContentsMargins(16, 12, 16, 14)
-        dev_lay.setSpacing(10)
-        dev_fields = QtWidgets.QHBoxLayout()
-        dev_fields.setSpacing(12)
-        dev_fields.addWidget(make_field("MICROPHONE", self._input_device), 1)
-        dev_fields.addWidget(make_field("CASQUE / SORTIE", self._output_device), 1)
-        dev_lay.addLayout(dev_fields)
-        dev_footer = QtWidgets.QHBoxLayout()
-        dev_footer.setSpacing(10)
-        dev_footer.addWidget(self._show_all_devices)
-        dev_footer.addWidget(self._refresh_devices_btn)
-        dev_footer.addWidget(self._preflight_btn)
-        self._device_status.setProperty("role", "muted")
-        dev_footer.addWidget(self._device_status, 1)
-        dev_lay.addLayout(dev_footer)
-
-        # -- Monitoring and audio controls --
-        ctrl_box = QtWidgets.QGroupBox("Écoute && niveaux")
-        ctrl_box.setObjectName("monitoringCard")
-        ctrl_lay = QtWidgets.QGridLayout(ctrl_box)
-        ctrl_lay.setContentsMargins(16, 12, 16, 14)
-        ctrl_lay.setVerticalSpacing(11)
-        ctrl_lay.setHorizontalSpacing(10)
-        ctrl_lay.addWidget(self._listen_regie, 0, 0, 1, 2)
-        ctrl_lay.addWidget(self._listen_return_bus, 0, 2, 1, 2)
-        gain_labels = ("Micro", "Casque", "Return")
-        gains = (self._mic_gain, self._hp_gain, self._return_gain)
-        gain_values = (self._mic_gain_lbl, self._hp_gain_lbl, self._return_gain_lbl)
-        meters = (self._in_vu, self._out_vu, self._return_vu)
-        for row, (label_text, gain, value, meter) in enumerate(
-            zip(gain_labels, gains, gain_values, meters, strict=False),
-            start=1,
-        ):
-            label = QtWidgets.QLabel(label_text)
-            label.setProperty("role", "fieldLabel")
-            ctrl_lay.addWidget(label, row, 0)
-            ctrl_lay.addWidget(gain, row, 1, 1, 2)
-            ctrl_lay.addWidget(value, row, 3)
-            ctrl_lay.addWidget(meter, row, 4)
-        ctrl_lay.addWidget(self._duck_return, 4, 0, 1, 5)
-        ctrl_lay.setColumnStretch(1, 2)
-        ctrl_lay.setColumnStretch(4, 1)
-        ctrl_lay.setRowStretch(5, 1)
-
-        # -- PTT / routing --
-        ptt_box = QtWidgets.QGroupBox("Parler — PTT")
-        ptt_box.setObjectName("pttCard")
-        ptt_lay = QtWidgets.QVBoxLayout(ptt_box)
-        ptt_lay.setContentsMargins(16, 12, 16, 14)
-        ptt_lay.setSpacing(8)
-        ptt_hint = QtWidgets.QLabel(
-            "Choisissez le mode et le raccourci de chaque destination."
-        )
-        ptt_hint.setProperty("role", "muted")
-        ptt_lay.addWidget(ptt_hint)
-        ptt_lay.addWidget(self._bus_rows_widget, 1)
-
-        self._remote_enabled = QtWidgets.QCheckBox("Contrôle HTTP")
+        self._remote_enabled = QtWidgets.QCheckBox("Activer le contrôle HTTP")
         self._remote_enabled.setToolTip(
             "Piloter les PTT à distance (Stream Deck, Companion, scripts) : "
             "POST /ptt/<bus>/on|off|toggle, GET /status."
@@ -453,7 +342,8 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._remote_port = QtWidgets.QSpinBox()
         self._remote_port.setRange(1024, 65535)
         self._remote_port.setPrefix("port ")
-        self._remote_lan = QtWidgets.QCheckBox("Depuis le réseau")
+        self._remote_port.setFixedWidth(110)
+        self._remote_lan = QtWidgets.QCheckBox("Accepter les commandes du réseau local")
         self._remote_lan.setToolTip(
             "Accepter les commandes des autres machines du réseau local. "
             "Sinon, seules les applications de ce poste peuvent piloter le PTT."
@@ -465,26 +355,125 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._remote_port.setValue(int(self._preset_get("remote_port", REMOTE_DEFAULT_PORT)))
             self._remote_lan.setChecked(bool(self._preset_get("remote_lan", False)))
             self._remote_enabled.setChecked(bool(self._preset_get("remote_enabled", False)))
+
+        # -- Header ------------------------------------------------------------
+        self._top_bar = TopBar("Poste client", "", self.windowIcon())
+        self._nav = SegmentedNav(["Console", "Réglages"])
+        self._top_bar.center.addWidget(self._nav)
+        self._connection_state_banner.setMinimumWidth(130)
+        self._top_bar.right.addWidget(self._connection_state_banner)
+        self._top_bar.right.addWidget(self._connect_btn)
+        self._top_bar.right.addWidget(self._disconnect_btn)
+        self._top_bar.right.addWidget(self._info_btn)
+
+        # -- Console page: talk pads + monitoring strips ------------------------
+        talk = Section("Parler")
+        self._release_all_btn = QtWidgets.QPushButton("Tout relâcher")
+        self._release_all_btn.setProperty("class", "secondary")
+        self._release_all_btn.setToolTip("Couper toutes les destinations en bascule ou tenues à distance")
+        self._release_all_btn.clicked.connect(self._release_all_talk)
+        talk.actions.addWidget(self._release_all_btn)
+        talk.body.addLayout(self._pads_layout, 1)
+        self._talk_hint = QtWidgets.QLabel("")
+        self._talk_hint.setProperty("role", "hint")
+        self._talk_hint.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        talk.body.addWidget(self._talk_hint)
+        talk.body.addStretch(0)
+
+        monitor = Section("Écoute")
+        self._mic_strip = ChannelStrip("Micro", fader=self._mic_gain, meter=self._in_vu, readout=self._mic_gain_lbl, color=TOKENS["accent"])
+        self._hp_strip = ChannelStrip("Casque", fader=self._hp_gain, meter=self._out_vu, readout=self._hp_gain_lbl, color=TOKENS["accent"])
+        self._hp_strip.top.addWidget(self._listen_regie)
+        self._return_strip = ChannelStrip("Return", fader=self._return_gain, meter=self._return_vu, readout=self._return_gain_lbl, color=TOKENS["muted"])
+        self._return_strip.top.addWidget(self._listen_return_bus)
+        self._return_strip.top.addWidget(self._duck_return)
+        strips = QtWidgets.QHBoxLayout()
+        strips.setSpacing(8)
+        for strip in (self._mic_strip, self._hp_strip, self._return_strip):
+            strip.reserve_top(2)
+            strips.addWidget(strip)
+        monitor.body.addLayout(strips, 1)
+
+        console_page = QtWidgets.QWidget()
+        console_lay = QtWidgets.QHBoxLayout(console_page)
+        console_lay.setContentsMargins(16, 14, 16, 14)
+        console_lay.setSpacing(12)
+        console_lay.addWidget(talk, 1)
+        console_lay.addWidget(monitor, 0)
+
+        # -- Settings page -----------------------------------------------------
+        conn_card = Card("Connexion", "Le serveur est détecté automatiquement sur le réseau local ; sinon, saisissez son adresse.")
+        conn_card.body.addWidget(make_field("SERVEUR DÉTECTÉ", self._discovered_servers))
+        conn_row = QtWidgets.QHBoxLayout()
+        conn_row.setSpacing(10)
+        conn_row.addWidget(make_field("ADRESSE DU SERVEUR", self._server_ip), 1)
+        conn_row.addWidget(make_field("NOM DE CE POSTE", self._name), 1)
+        conn_card.body.addLayout(conn_row)
+        conn_card.body.addWidget(self._autoconnect_cb)
+        conn_card.body.addWidget(self._start_minimized)
+
+        audio_card = Card("Audio", "Micro et casque de ce poste. Modifiables hors connexion.")
+        audio_card.body.addWidget(make_field("MICROPHONE", self._input_device))
+        audio_card.body.addWidget(make_field("CASQUE / SORTIE", self._output_device))
+        audio_card.body.addWidget(self._show_all_devices)
+        audio_buttons = QtWidgets.QHBoxLayout()
+        audio_buttons.setSpacing(8)
+        audio_buttons.addWidget(self._refresh_devices_btn)
+        audio_buttons.addWidget(self._preflight_btn)
+        audio_buttons.addStretch(1)
+        audio_card.body.addLayout(audio_buttons)
+        audio_card.body.addWidget(self._device_status)
+
+        keys_card = Card(
+            "Touches de parole",
+            "Mode et raccourci clavier de chaque destination. Les raccourcis fonctionnent même fenêtre réduite.",
+        )
+        keys_card.body.addWidget(self._bus_rows_widget)
+
+        remote_card = Card(
+            "Contrôle à distance",
+            "Pour Stream Deck, Bitfocus Companion ou un script : POST /ptt/regie/on, /off, /toggle et GET /status.",
+        )
+        remote_card.body.addWidget(self._remote_enabled)
         remote_row = QtWidgets.QHBoxLayout()
         remote_row.setSpacing(10)
-        remote_row.addWidget(self._remote_enabled)
         remote_row.addWidget(self._remote_port)
-        remote_row.addWidget(self._remote_lan)
         remote_row.addWidget(self._remote_status, 1)
-        ptt_lay.addLayout(remote_row)
+        remote_card.body.addLayout(remote_row)
+        remote_card.body.addWidget(self._remote_lan)
 
-        live_row = QtWidgets.QHBoxLayout()
-        live_row.setSpacing(12)
-        live_row.addWidget(ctrl_box, 4)
-        live_row.addWidget(ptt_box, 6)
+        settings_inner = QtWidgets.QWidget()
+        settings_grid = QtWidgets.QGridLayout(settings_inner)
+        settings_grid.setContentsMargins(16, 14, 16, 14)
+        settings_grid.setSpacing(12)
+        settings_grid.addWidget(conn_card, 0, 0)
+        settings_grid.addWidget(audio_card, 0, 1)
+        settings_grid.addWidget(keys_card, 1, 0)
+        settings_grid.addWidget(remote_card, 1, 1)
+        settings_grid.setColumnStretch(0, 1)
+        settings_grid.setColumnStretch(1, 1)
+        settings_grid.setRowStretch(2, 1)
+        settings_page = QtWidgets.QScrollArea()
+        settings_page.setWidgetResizable(True)
+        settings_page.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        settings_page.setWidget(settings_inner)
+
+        self._pages = QtWidgets.QStackedWidget()
+        self._pages.addWidget(console_page)
+        self._pages.addWidget(settings_page)
+        self._nav.changed.connect(self._pages.setCurrentIndex)
 
         layout = QtWidgets.QVBoxLayout(central)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
-        layout.addWidget(hero)
-        layout.addWidget(conn_box)
-        layout.addWidget(dev_box)
-        layout.addLayout(live_row, 1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._top_bar)
+        layout.addWidget(self._pages, 1)
+
+        self._name.textChanged.connect(self._refresh_identity_header)
+        self._server_ip.textChanged.connect(self._refresh_identity_header)
+        self._refresh_identity_header()
+        if not self._server_ip.text().strip():
+            self._nav.set_current(1)
 
         self._refresh_devices_btn.clicked.connect(self._start_device_refresh)
         self._show_all_devices.stateChanged.connect(self._on_show_all_devices_changed)
@@ -501,6 +490,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._mic_gain.valueChanged.connect(self._on_mic_gain_changed)
         self._hp_gain.valueChanged.connect(self._on_hp_gain_changed)
         self._return_gain.valueChanged.connect(self._on_return_gain_changed)
+        self._refresh_state_labels()
 
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(CLIENT_STATE_REFRESH_INTERVAL_MS)
@@ -570,6 +560,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             int(bus_id): False for bus_id in self._ptt_bus_toggle_state
         }
         self._ptt_remote_active = {}
+        self._ptt_pad_held = {}
         client = self._client
         if client is not None:
             for bus_id in list(self._ptt_bus_keys):
@@ -670,7 +661,11 @@ class ClientWindow(QtWidgets.QMainWindow):
         if mode == "toggle":
             return bool(self._ptt_bus_toggle_state.get(int(bus_id), False))
         held = self._global_ptt.active_buses() if self._global_ptt is not None else {}
-        return bool(held.get(int(bus_id), False) or self._ptt_remote_active.get(int(bus_id), False))
+        return bool(
+            held.get(int(bus_id), False)
+            or self._ptt_remote_active.get(int(bus_id), False)
+            or self._ptt_pad_held.get(int(bus_id), False)
+        )
 
     def _apply_ptt_bus(self, bus_id: int) -> None:
         cli = self._client
@@ -683,35 +678,62 @@ class ClientWindow(QtWidgets.QMainWindow):
         for bid in list(self._ptt_bus_keys.keys()):
             self._apply_ptt_bus(int(bid))
 
-    def _update_toggle_state_label(self, lbl: QtWidgets.QLabel, bus_id: int, mode: str) -> None:
-        online = self._operational_status.state is ClientOperationalState.ONLINE
-        if not online:
-            lbl.setText("DÉSARMÉ")
-            lbl.setStyleSheet("color: #aab4c3; font-weight: 600;")
-            lbl.setToolTip("PTT désarmé tant que la chaîne audio n'est pas en ligne")
-        elif mode == "always_on":
-            lbl.setText("ACTIF")
-            lbl.setStyleSheet("color: #4caf50; font-weight: bold;")
-            lbl.setToolTip("Transmission permanente active")
+    def _refresh_pad(self, bus_id: int) -> None:
+        pad = self._ptt_pads.get(int(bus_id))
+        if pad is None:
+            return
+        mode = str(self._ptt_bus_modes.get(int(bus_id), "ptt"))
+        pad.set_mode_text(_MODE_BADGES.get(mode, "PTT"))
+        edit = self._ptt_bus_keys.get(int(bus_id))
+        pad.set_key_text(edit.keySequence().toString() if edit is not None else "")
+        pad.setEnabled(self._operational_status.state is ClientOperationalState.ONLINE)
+        if self._operational_status.state is not ClientOperationalState.ONLINE:
+            pad.set_state("disarmed", "DÉSARMÉ", "PTT désarmé tant que la chaîne audio n'est pas en ligne")
+        elif self._ptt_bus_active(int(bus_id)):
+            detail = "Transmission permanente" if mode == "always_on" else "Transmission en cours"
+            pad.set_state("live", "EN PAROLE", detail)
         elif mode == "toggle":
-            on = bool(self._ptt_bus_toggle_state.get(int(bus_id), False))
-            lbl.setText("ACTIF" if on else "INACTIF")
-            lbl.setStyleSheet("color: #4caf50; font-weight: bold;" if on else "color: #f44336; font-weight: bold;")
-            lbl.setToolTip("Transmission activée" if on else "Transmission désactivée")
-        elif mode == "ptt":
-            on = self._ptt_bus_active(int(bus_id))
-            lbl.setText("ACTIF" if on else "PRÊT")
-            lbl.setStyleSheet("color: #4caf50; font-weight: bold;" if on else "color: #aab4c3; font-weight: 600;")
-            lbl.setToolTip("Transmission en cours" if on else "Maintenez le raccourci pour parler")
+            pad.set_state("off", "COUPÉ", "Cliquez ou appuyez sur le raccourci pour parler")
         else:
-            lbl.setText("DÉSARMÉ")
-            lbl.setStyleSheet("color: #aab4c3; font-weight: 600;")
-        lbl.setAccessibleDescription(lbl.toolTip() or lbl.text())
+            pad.set_state("ready", "PRÊT", "Maintenez le raccourci ou le pad pour parler")
 
     def _refresh_state_labels(self) -> None:
-        for bid, lbl in self._ptt_bus_state_labels.items():
-            mode = str(self._ptt_bus_modes.get(int(bid), "ptt"))
-            self._update_toggle_state_label(lbl, int(bid), mode)
+        for bid in self._ptt_pads:
+            self._refresh_pad(int(bid))
+        hint = getattr(self, "_talk_hint", None)
+        if hint is None:
+            return
+        if self._operational_status.state is ClientOperationalState.ONLINE:
+            hint.setText("Maintenez un pad ou son raccourci pour parler ; en mode Bascule, un clic active ou coupe.")
+        else:
+            hint.setText("Les touches de parole s'arment dès que le poste est en ligne.")
+        self._release_all_btn.setEnabled(self._operational_status.state is ClientOperationalState.ONLINE)
+
+    def _on_pad_pressed(self, bus_id: int) -> None:
+        if self._operational_status.state is not ClientOperationalState.ONLINE or self._client is None:
+            return
+        mode = str(self._ptt_bus_modes.get(int(bus_id), "ptt"))
+        if mode == "toggle":
+            self._handle_remote_command(RemoteCommand("toggle", int(bus_id)))
+            return
+        if mode == "ptt":
+            self._ptt_pad_held[int(bus_id)] = True
+            self._apply_ptt_bus(int(bus_id))
+            self._refresh_state_labels()
+
+    def _on_pad_released(self, bus_id: int) -> None:
+        if self._ptt_pad_held.pop(int(bus_id), False):
+            self._apply_ptt_bus(int(bus_id))
+            self._refresh_state_labels()
+
+    def _release_pad_holds(self) -> None:
+        for bus_id in list(self._ptt_pad_held):
+            self._on_pad_released(int(bus_id))
+
+    def _release_all_talk(self) -> None:
+        self._release_pad_holds()
+        if self._operational_status.state is ClientOperationalState.ONLINE:
+            self._handle_remote_command(RemoteCommand("off", None))
 
     def _hotkey_bindings_snapshot(self) -> dict[int, tuple[str, str]]:
         bindings: dict[int, tuple[str, str]] = {}
@@ -763,11 +785,10 @@ class ClientWindow(QtWidgets.QMainWindow):
         mode = str(cb.currentData() or "ptt")
         self._ptt_bus_modes[int(bus_id)] = mode
         self._ptt_remote_active.pop(int(bus_id), None)
+        self._ptt_pad_held.pop(int(bus_id), None)
         if mode != "toggle":
             self._ptt_bus_toggle_state.pop(int(bus_id), None)
-        lbl = self._ptt_bus_state_labels.get(int(bus_id))
-        if lbl is not None:
-            self._update_toggle_state_label(lbl, int(bus_id), mode)
+        self._refresh_pad(int(bus_id))
         saved = {str(k): v for k, v in self._ptt_bus_modes.items()}
         self._preset_set("ptt_bus_modes", saved)
         if self._operational_status.state is ClientOperationalState.ONLINE:
@@ -832,32 +853,34 @@ class ClientWindow(QtWidgets.QMainWindow):
                             old_modes[int(k)] = str(v or "ptt")
 
         self._clear_layout(self._bus_rows_layout)
+        self._clear_layout(self._pads_layout)
         self._shortcut_widgets = []
         self._ptt_bus_keys = {}
         self._ptt_bus_clear = {}
         self._ptt_bus_mode_widgets = {}
         self._ptt_bus_modes = {}
-        self._ptt_bus_state_labels = {}
+        self._ptt_pads = {}
         self._ptt_bus_vu = {}
 
-        headers = ["Bus", "Mode", "État PTT", "VU", "Raccourci PTT"]
-        for col, title in enumerate(headers):
-            lbl = QtWidgets.QLabel(str(title))
+        for col, title in enumerate(("DESTINATION", "MODE", "RACCOURCI")):
+            lbl = QtWidgets.QLabel(title)
             lbl.setProperty("role", "fieldLabel")
             self._bus_rows_layout.addWidget(lbl, 0, int(col))
 
         row = 1
         for bus_id in sorted(parsed.keys()):
             b = parsed[int(bus_id)]
-            bus_name = str(b.get("name") or BUS_BY_ID[int(bus_id)].name)
+            definition = BUS_BY_ID[int(bus_id)]
+            bus_name = str(b.get("name") or definition.name)
 
-            lbl = QtWidgets.QLabel(str(bus_name))
+            lbl = QtWidgets.QLabel(f"<span style='color:{definition.color}'>●</span>&nbsp; {bus_name}")
+            lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
 
             mode_cb = QtWidgets.QComboBox()
             patch_combo(mode_cb)
-            mode_cb.addItem("PTT", "ptt")
+            mode_cb.addItem("PTT — maintenir pour parler", "ptt")
             mode_cb.addItem("Toujours actif", "always_on")
-            mode_cb.addItem("Bascule", "toggle")
+            mode_cb.addItem("Bascule — un appui active, un autre coupe", "toggle")
             mode_cb.setAccessibleName(f"Mode PTT {bus_name}")
             mode_cb.setToolTip(f"Choisir le mode de transmission vers {bus_name}")
             saved_mode = str(old_modes.get(int(bus_id), "ptt"))
@@ -867,13 +890,6 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._ptt_bus_modes[int(bus_id)] = str(mode_cb.currentData() or "ptt")
             mode_cb.currentIndexChanged.connect(lambda _i, bid=int(bus_id): self._on_ptt_bus_mode_changed(bid))
             mode_cb.setEnabled(not bool(self._connected))
-
-            state_lbl = QtWidgets.QLabel("")
-            state_lbl.setProperty("role", "statusChip")
-            state_lbl.setFixedWidth(76)
-            state_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            state_lbl.setAccessibleName(f"État PTT {bus_name}")
-            self._update_toggle_state_label(state_lbl, int(bus_id), str(mode_cb.currentData() or "ptt"))
 
             edit = _ShortcutKeySequenceEdit()
             edit.setAccessibleName(f"Raccourci PTT {bus_name}")
@@ -896,22 +912,24 @@ class ClientWindow(QtWidgets.QMainWindow):
                 edit.setKeySequence(QtGui.QKeySequence(seq))
             edit.keySequenceChanged.connect(lambda _seq, bid=int(bus_id): self._on_ptt_bus_key_changed(bid))
 
-            vu_meter = VuMeter()
-            vu_meter.setMinimumWidth(60)
-            vu_meter.set_level(-60.0)
+            pad = TalkPad(bus_name, definition.color)
+            pad.pressed.connect(lambda bid=int(bus_id): self._on_pad_pressed(bid))
+            pad.released.connect(lambda bid=int(bus_id): self._on_pad_released(bid))
+            self._pads_layout.addWidget(pad, 1)
 
             self._bus_rows_layout.addWidget(lbl, row, 0)
             self._bus_rows_layout.addWidget(mode_cb, row, 1)
-            self._bus_rows_layout.addWidget(state_lbl, row, 2)
-            self._bus_rows_layout.addWidget(vu_meter, row, 3)
-            self._bus_rows_layout.addWidget(self._make_shortcut_widget(edit, clear_btn), row, 4)
+            self._bus_rows_layout.addWidget(self._make_shortcut_widget(edit, clear_btn), row, 2)
 
             self._ptt_bus_keys[int(bus_id)] = edit
             self._ptt_bus_clear[int(bus_id)] = clear_btn
             self._ptt_bus_mode_widgets[int(bus_id)] = mode_cb
-            self._ptt_bus_state_labels[int(bus_id)] = state_lbl
-            self._ptt_bus_vu[int(bus_id)] = vu_meter
+            self._ptt_pads[int(bus_id)] = pad
+            self._ptt_bus_vu[int(bus_id)] = pad
+            self._refresh_pad(int(bus_id))
             row += 1
+        self._bus_rows_layout.setColumnStretch(1, 2)
+        self._bus_rows_layout.setColumnStretch(2, 1)
 
         self._known_buses = dict(parsed)
         self._bus_rows_signature = tuple((int(bid), str(parsed[bid].get("name"))) for bid in sorted(parsed.keys()))
@@ -1019,10 +1037,10 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._name.setText("")
         self._mic_gain.setValue(0)
         self._hp_gain.setValue(0)
-        self._mic_gain_lbl.setText("0 dB")
-        self._hp_gain_lbl.setText("0 dB")
+        self._mic_gain_lbl.setText(format_db(0))
+        self._hp_gain_lbl.setText(format_db(0))
         self._return_gain.setValue(0)
-        self._return_gain_lbl.setText("0 dB")
+        self._return_gain_lbl.setText(format_db(0))
 
         with best_effort("clear PTT shortcut editors"):
             for edit in self._ptt_bus_keys.values():
@@ -1154,6 +1172,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         with best_effort("_ptt_bus_keys[int(bus_id)].clearFocus()"):
             self._ptt_bus_keys[int(bus_id)].clearFocus()
             self.centralWidget().setFocus()
+        self._refresh_pad(int(bus_id))
 
         if self._connected and self._global_ptt is None:
             self._apply_ptt_modes_to_client()
@@ -1228,6 +1247,19 @@ class ClientWindow(QtWidgets.QMainWindow):
         if not refresh_active and not self._last_device_error:
             self._device_status.setText(detail)
             self._selection_hint_shown = True
+
+    def _sync_session_buttons(self) -> None:
+        """One session button in the header: Connect, or Disconnect once connected."""
+        self._connect_btn.setVisible(not self._connected)
+        self._disconnect_btn.setVisible(bool(self._connected))
+
+    def _refresh_identity_header(self, *_args) -> None:
+        name = self._name.text().strip()
+        server = self._server_ip.text().strip()
+        self._top_bar.title_label.setText(name or "Poste client")
+        self._top_bar.subtitle_label.setText(
+            f"Serveur {server}" if server else "Aucun serveur choisi — voir Réglages"
+        )
 
     def _reset_identity(self) -> None:
         if self._connected:
@@ -1666,6 +1698,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._connect_btn.setEnabled(False)
         self._preflight_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
+        self._sync_session_buttons()
         self._listen_regie.setEnabled(True)
         self._listen_return_bus.setEnabled(True)
         self._mic_gain.setEnabled(True)
@@ -1717,6 +1750,7 @@ class ClientWindow(QtWidgets.QMainWindow):
 
             self._update_device_selection_state()
             self._disconnect_btn.setEnabled(False)
+            self._sync_session_buttons()
             self._listen_regie.setEnabled(False)
             self._listen_return_bus.setEnabled(False)
             self._mic_gain.setEnabled(False)
@@ -1879,7 +1913,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._client.set_duck_return(bool(enabled))
 
     def _on_mic_gain_changed(self, value: int) -> None:
-        self._mic_gain_lbl.setText(f"{value} dB")
+        self._mic_gain_lbl.setText(format_db(value))
         with best_effort("save input_gain_db"):
             self._preset_set("input_gain_db", float(value))
         if self._client is None:
@@ -1887,7 +1921,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._client.set_input_gain_db(float(value))
 
     def _on_hp_gain_changed(self, value: int) -> None:
-        self._hp_gain_lbl.setText(f"{value} dB")
+        self._hp_gain_lbl.setText(format_db(value))
         with best_effort("save output_gain_db"):
             self._preset_set("output_gain_db", float(value))
         if self._client is None:
@@ -1899,7 +1933,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             val = int(self._return_gain.value())
         except Exception:
             val = 0
-        self._return_gain_lbl.setText(f"{int(val)} dB")
+        self._return_gain_lbl.setText(format_db(val))
         with best_effort("save return_gain_db"):
             self._preset_set("return_gain_db", int(val))
         if self._client is not None:
@@ -1953,7 +1987,7 @@ class ClientWindow(QtWidgets.QMainWindow):
                 self._mic_gain.setValue(int(shared_input_gain))
             finally:
                 self._mic_gain.blockSignals(False)
-            self._mic_gain_lbl.setText(f"{int(shared_input_gain)} dB")
+            self._mic_gain_lbl.setText(format_db(shared_input_gain))
             with best_effort("save server input gain"):
                 self._preset_set("input_gain_db", float(shared_input_gain))
 
@@ -2027,6 +2061,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             if event.type() == QtCore.QEvent.Type.WindowDeactivate:
                 if self._global_ptt is not None:
                     self._global_ptt.release_all()
+                self._release_pad_holds()
 
     def _set_app_icon(self) -> None:
         with best_effort("set window icon"):

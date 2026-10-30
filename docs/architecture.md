@@ -46,7 +46,8 @@ src/py_intercom/
 │   ├── persistence.py       writer JSON unique avec debounce
 │   ├── preset_schema.py     schéma 2 et migrations
 │   ├── routing.py           routeur pur et mix-minus
-│   ├── theme.py             thème Qt et widgets partagés
+│   ├── theme.py             thème Qt : couleurs, style, interrupteurs
+│   ├── console.py           widgets console : vu-mètres LED, faders, pads, tranches
 │   └── gui_utils.py         helpers Qt
 ├── server/
 │   ├── server.py            IntercomServer : état partagé, cycle de vie, snapshots
@@ -57,7 +58,7 @@ src/py_intercom/
 │   ├── presets.py           persistance, collisions d'identité
 │   ├── models.py            ClientProfile, ClientState, OutputState…
 │   ├── health.py            santé opérateur dérivée des snapshots
-│   ├── gui.py               fenêtre Régie
+│   ├── gui.py               fenêtre Régie (console de mixage + réglages)
 │   └── main.py              point d'entrée GUI
 └── client/
     ├── client.py            IntercomClient : état, cycle de vie, sessions
@@ -68,7 +69,7 @@ src/py_intercom/
     ├── hotkeys.py           raccourcis PTT globaux (pynput → Qt)
     ├── remote.py            contrôle HTTP du PTT (Stream Deck, Companion)
     ├── preflight.py         test micro, casque, réseau et raccourcis
-    ├── gui.py               fenêtre client
+    ├── gui.py               fenêtre client (pads de parole + réglages)
     └── main.py              point d'entrée GUI
 ```
 

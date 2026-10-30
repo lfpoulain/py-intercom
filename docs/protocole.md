@@ -85,7 +85,7 @@ Le client n'accepte l'audio qu'après `welcome` et la première configuration. I
 
 ## Contrôle à distance (HTTP) du client
 
-Désactivé par défaut. Activé dans le client, il écoute sur `127.0.0.1:5080` (port réglable), ou sur toutes les interfaces si « Depuis le réseau » est coché. Toutes les réponses sont du JSON UTF-8.
+Désactivé par défaut. Activé dans le client, il écoute sur `127.0.0.1:5080` (port réglable), ou sur toutes les interfaces si « Accepter les commandes du réseau local » est activé. Toutes les réponses sont du JSON UTF-8.
 
 | Méthode | Chemin | Effet |
 |---|---|---|

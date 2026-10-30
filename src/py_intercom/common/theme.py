@@ -1,3 +1,10 @@
+"""Visual identity shared by the server and client windows.
+
+A dark broadcast-console look: near-black surfaces, one teal accent, one
+colour per bus (see ``buses.py``) and monospaced read-outs. Colours live in
+``TOKENS`` so painted widgets (``console.py``) and the style sheet agree.
+"""
+
 from __future__ import annotations
 
 import os
@@ -6,15 +13,38 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-_SEMANTIC_STATUS_COLORS = {
-    "online": "#2eb67d",
-    "healthy": "#2eb67d",
-    "connecting": "#21b0a6",
-    "degraded": "#f2b632",
-    "error": "#e25d5d",
-    "offline": "#6f7b8e",
-    "unknown": "#6f7b8e",
+TOKENS = {
+    "bg": "#090c11",
+    "panel": "#10141b",
+    "panel_alt": "#151a23",
+    "raised": "#1b212c",
+    "border": "#232a36",
+    "border_strong": "#323b4b",
+    "text": "#e8edf4",
+    "muted": "#8a96a8",
+    "faint": "#556074",
+    "accent": "#2dd4bf",
+    "accent_hover": "#5eead4",
+    "accent_text": "#04130f",
+    "success": "#22c55e",
+    "warning": "#f59e0b",
+    "danger": "#ef4444",
+    "danger_hover": "#dc2626",
 }
+
+_SEMANTIC_STATUS_COLORS = {
+    "online": TOKENS["success"],
+    "healthy": TOKENS["success"],
+    "idle": TOKENS["accent"],
+    "connecting": TOKENS["accent"],
+    "degraded": TOKENS["warning"],
+    "error": TOKENS["danger"],
+    "offline": TOKENS["faint"],
+    "unknown": TOKENS["faint"],
+}
+
+UI_FONT = "Segoe UI"
+MONO_FONT = "Cascadia Mono"
 
 _UI_FONTS_REGISTERED = False
 
@@ -22,27 +52,24 @@ _UI_FONTS_REGISTERED = False
 def _ensure_ui_fonts(app: QtWidgets.QApplication) -> str:
     """Return a usable UI family, including under Qt's offscreen backend.
 
-    On Windows the offscreen platform plugin may expose an empty system font
-    database. Registering the same Segoe UI files used by the desktop makes
-    screenshot-based QA representative instead of rendering every glyph as a
-    tofu square. Normal desktop runs simply reuse the already-known family.
+    On Windows the offscreen platform plugin may expose an empty font
+    database; registering the Segoe UI files keeps screenshots and tests
+    representative instead of rendering tofu squares.
     """
 
-    global _UI_FONTS_REGISTERED
+    global _UI_FONTS_REGISTERED, MONO_FONT
     families = set(QtGui.QFontDatabase.families())
-    if (
-        not families
-        and sys.platform == "win32"
-        and not _UI_FONTS_REGISTERED
-    ):
-        windows_dir = Path(os.environ.get("WINDIR") or "C:/Windows")
-        fonts_dir = windows_dir / "Fonts"
+    if not families and sys.platform == "win32" and not _UI_FONTS_REGISTERED:
+        fonts_dir = Path(os.environ.get("WINDIR") or "C:/Windows") / "Fonts"
         for filename in (
             "segoeui.ttf",
             "seguisb.ttf",
             "segoeuib.ttf",
             "seguisym.ttf",
             "seguiemj.ttf",
+            "CascadiaMono.ttf",
+            "consola.ttf",
+            "consolab.ttf",
         ):
             font_path = fonts_dir / filename
             if font_path.is_file():
@@ -50,6 +77,8 @@ def _ensure_ui_fonts(app: QtWidgets.QApplication) -> str:
         families = set(QtGui.QFontDatabase.families())
         _UI_FONTS_REGISTERED = True
 
+    if "Cascadia Mono" not in families and "Consolas" in families:
+        MONO_FONT = "Consolas"
     if "Segoe UI" in families:
         family = "Segoe UI"
     elif "Noto Sans" in families:
@@ -58,6 +87,14 @@ def _ensure_ui_fonts(app: QtWidgets.QApplication) -> str:
         family = str(app.font().family() or "Sans Serif")
     app.setFont(QtGui.QFont(family, 10))
     return family
+
+
+def mono_font(pixel_size: int = 12, *, bold: bool = False) -> QtGui.QFont:
+    font = QtGui.QFont(MONO_FONT)
+    font.setStyleHint(QtGui.QFont.StyleHint.Monospace)
+    font.setPixelSize(int(pixel_size))
+    font.setBold(bold)
+    return font
 
 
 def set_status_label(
@@ -69,9 +106,8 @@ def set_status_label(
 ) -> None:
     """Apply a semantic, accessible status to a label.
 
-    The visible text remains the primary signal: colour is deliberately only a
-    secondary cue so an operator can understand the state at a glance even
-    with impaired colour perception.
+    The visible text stays the primary signal; colour is only a secondary
+    cue so the state reads at a glance even with impaired colour perception.
     """
 
     semantic_state = str(state or "unknown").lower()
@@ -88,409 +124,506 @@ def set_status_label(
 
     # Dynamic Qt properties do not automatically trigger a style refresh.
     if changed:
-        style = label.style()
-        if style is not None:
-            style.unpolish(label)
-            style.polish(label)
-        label.update()
+        repolish(label)
+
+
+def repolish(widget: QtWidgets.QWidget) -> None:
+    style = widget.style()
+    if style is not None:
+        style.unpolish(widget)
+        style.polish(widget)
+    widget.update()
+
+
+class ConsoleStyle(QtWidgets.QProxyStyle):
+    """Fusion with switch-style check boxes (no image assets needed)."""
+
+    _SWITCH_W = 30
+    _SWITCH_H = 16
+
+    def pixelMetric(self, metric, option=None, widget=None):  # noqa: N802
+        if metric == QtWidgets.QStyle.PixelMetric.PM_IndicatorWidth:
+            return self._SWITCH_W
+        if metric == QtWidgets.QStyle.PixelMetric.PM_IndicatorHeight:
+            return self._SWITCH_H
+        return super().pixelMetric(metric, option, widget)
+
+    def drawPrimitive(self, element, option, painter, widget=None):  # noqa: N802
+        if element != QtWidgets.QStyle.PrimitiveElement.PE_IndicatorCheckBox:
+            super().drawPrimitive(element, option, painter, widget)
+            return
+        if option.rect.width() < 8:
+            return
+        state = option.state
+        on = bool(state & QtWidgets.QStyle.StateFlag.State_On)
+        enabled = bool(state & QtWidgets.QStyle.StateFlag.State_Enabled)
+        hover = bool(state & QtWidgets.QStyle.StateFlag.State_MouseOver)
+        rect = QtCore.QRectF(option.rect).adjusted(0.5, 0.5, -0.5, -0.5)
+        h = min(rect.height(), float(self._SWITCH_H))
+        track = QtCore.QRectF(rect.x(), rect.center().y() - h / 2, min(rect.width(), float(self._SWITCH_W)), h)
+
+        if on:
+            fill = QtGui.QColor(TOKENS["accent"] if enabled else TOKENS["border_strong"])
+            border = fill
+            knob = QtGui.QColor(TOKENS["accent_text"] if enabled else TOKENS["muted"])
+        else:
+            fill = QtGui.QColor(TOKENS["bg"])
+            border = QtGui.QColor(TOKENS["muted"] if hover and enabled else TOKENS["border_strong"])
+            knob = QtGui.QColor(TOKENS["muted"] if enabled else TOKENS["faint"])
+
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.setPen(QtGui.QPen(border, 1.0))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(track, h / 2, h / 2)
+        radius = h / 2 - 3
+        cx = track.right() - h / 2 if on else track.left() + h / 2
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(knob)
+        painter.drawEllipse(QtCore.QPointF(cx, track.center().y()), radius, radius)
+        painter.restore()
+
 
 def apply_theme(app: QtWidgets.QApplication) -> None:
-    """Apply project-native Qt theme (no external theme engine)."""
+    """Apply the project-native Qt theme (no external theme engine)."""
     ui_font_family = _ensure_ui_fonts(app)
-    bg = "#0b111a"
-    surface = "#111a27"
-    surface_alt = "#182437"
-    elevated = "#1e2c40"
-    border = "#29394f"
-    border_strong = "#3a506c"
-    text = "#f2f5f9"
-    muted = "#95a4b8"
-    accent = "#28c2b4"
-    accent_hover = "#45d4c7"
-    accent_text = "#071311"
-    warning = "#f0b84b"
-    danger = "#ed6a6a"
-    success = "#35bf7f"
-    disabled_fg = "#66758a"
+    t = TOKENS
 
-    app.setStyle("Fusion")
+    app.setStyle(ConsoleStyle("Fusion"))
 
     pal = QtGui.QPalette()
-    pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(bg))
-    pal.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor(text))
-    pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(surface))
-    pal.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor(surface_alt))
-    pal.setColor(QtGui.QPalette.ColorRole.ToolTipBase, QtGui.QColor(surface_alt))
-    pal.setColor(QtGui.QPalette.ColorRole.ToolTipText, QtGui.QColor(text))
-    pal.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor(text))
-    pal.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor(surface_alt))
-    pal.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor(text))
-    pal.setColor(QtGui.QPalette.ColorRole.BrightText, QtGui.QColor("#ffffff"))
-    pal.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(accent))
-    pal.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor(accent_text))
-    pal.setColor(QtGui.QPalette.ColorRole.PlaceholderText, QtGui.QColor(muted))
-    pal.setColor(
-        QtGui.QPalette.ColorGroup.Disabled,
-        QtGui.QPalette.ColorRole.Text,
-        QtGui.QColor(disabled_fg),
-    )
-    pal.setColor(
-        QtGui.QPalette.ColorGroup.Disabled,
-        QtGui.QPalette.ColorRole.ButtonText,
-        QtGui.QColor(disabled_fg),
-    )
-    pal.setColor(
-        QtGui.QPalette.ColorGroup.Disabled,
-        QtGui.QPalette.ColorRole.WindowText,
-        QtGui.QColor(disabled_fg),
-    )
+    roles = QtGui.QPalette.ColorRole
+    for role, color in (
+        (roles.Window, t["bg"]),
+        (roles.WindowText, t["text"]),
+        (roles.Base, t["bg"]),
+        (roles.AlternateBase, t["panel_alt"]),
+        (roles.ToolTipBase, t["raised"]),
+        (roles.ToolTipText, t["text"]),
+        (roles.Text, t["text"]),
+        (roles.Button, t["raised"]),
+        (roles.ButtonText, t["text"]),
+        (roles.BrightText, "#ffffff"),
+        (roles.Highlight, t["accent"]),
+        (roles.HighlightedText, t["accent_text"]),
+        (roles.PlaceholderText, t["faint"]),
+    ):
+        pal.setColor(role, QtGui.QColor(color))
+    for role in (roles.Text, roles.ButtonText, roles.WindowText):
+        pal.setColor(QtGui.QPalette.ColorGroup.Disabled, role, QtGui.QColor(t["faint"]))
     app.setPalette(pal)
+    app.setStyleSheet(_style_sheet(ui_font_family))
 
-    patch = f"""
+
+def _style_sheet(ui_font_family: str) -> str:
+    t = TOKENS
+    return f"""
         QWidget {{
             font-family: "{ui_font_family}", "Segoe UI Symbol";
             font-size: 13px;
-            color: {text};
+            color: {t["text"]};
         }}
         QMainWindow, QDialog {{
-            background: {bg};
+            background: {t["bg"]};
         }}
         QToolTip {{
-            border: 1px solid {border};
+            border: 1px solid {t["border_strong"]};
             padding: 6px 9px;
-            color: {text};
-            background: {elevated};
+            color: {t["text"]};
+            background: {t["raised"]};
+            border-radius: 6px;
+        }}
+
+        /* --- Structure --- */
+        QFrame[role="topbar"] {{
+            background: {t["panel"]};
+            border: none;
+            border-bottom: 1px solid {t["border"]};
+        }}
+        QFrame[role="panel"] {{
+            background: {t["panel"]};
+            border: 1px solid {t["border"]};
+            border-radius: 12px;
+        }}
+        QFrame[role="card"] {{
+            background: {t["panel"]};
+            border: 1px solid {t["border"]};
+            border-radius: 12px;
+        }}
+        QFrame[role="strip"] {{
+            background: {t["panel_alt"]};
+            border: 1px solid {t["border"]};
+            border-radius: 10px;
+        }}
+        QFrame[role="strip"][selected="true"] {{
+            border: 1px solid {t["accent"]};
+            background: {t["raised"]};
+        }}
+        QFrame[role="strip"][offline="true"] QLabel {{
+            color: {t["faint"]};
+        }}
+        QScrollArea, QScrollArea > QWidget > QWidget {{
+            background: transparent;
+            border: none;
+        }}
+        QStackedWidget {{
+            background: transparent;
+        }}
+
+        /* --- Typography --- */
+        QLabel[role="brand"] {{
+            color: {t["accent"]};
+            font-size: 11px;
+            font-weight: 700;
+        }}
+        QLabel[role="title"] {{
+            color: {t["text"]};
+            font-size: 18px;
+            font-weight: 700;
+        }}
+        QLabel[role="subtitle"] {{
+            color: {t["muted"]};
+            font-size: 12px;
+        }}
+        QLabel[role="sectionTitle"] {{
+            color: {t["muted"]};
+            font-size: 11px;
+            font-weight: 700;
+        }}
+        QLabel[role="cardTitle"] {{
+            color: {t["text"]};
+            font-size: 14px;
+            font-weight: 700;
+        }}
+        QLabel[role="fieldLabel"] {{
+            color: {t["muted"]};
+            font-size: 11px;
+            font-weight: 600;
+        }}
+        QLabel[role="muted"] {{
+            color: {t["muted"]};
+        }}
+        QLabel[role="hint"] {{
+            color: {t["faint"]};
+            font-size: 12px;
+        }}
+        QLabel[role="stripName"] {{
+            color: {t["text"]};
+            font-size: 12px;
+            font-weight: 700;
+        }}
+        QLabel[role="stripCaption"] {{
+            color: {t["faint"]};
+            font-size: 10px;
+        }}
+        QLabel[role="readout"] {{
+            font-family: "{MONO_FONT}", "Consolas";
+            font-size: 11px;
+            color: {t["muted"]};
+            background: {t["bg"]};
+            border: 1px solid {t["border"]};
             border-radius: 5px;
+            padding: 2px 4px;
         }}
-        QLineEdit {{
-            border: 1px solid {border};
-            background: {bg};
+        QLabel[role="emptyState"] {{
+            color: {t["faint"]};
+            font-size: 13px;
+        }}
+
+        /* --- Inputs --- */
+        QLineEdit, QSpinBox, QComboBox {{
+            border: 1px solid {t["border"]};
+            background: {t["bg"]};
             padding: 4px 9px;
-            min-height: 30px;
+            min-height: 26px;
             border-radius: 7px;
+            selection-background-color: {t["accent"]};
+            selection-color: {t["accent_text"]};
         }}
-        QLineEdit:focus {{
-            border: 1px solid {accent};
+        QLineEdit:hover, QSpinBox:hover, QComboBox:hover {{
+            border: 1px solid {t["border_strong"]};
         }}
-        QLineEdit:disabled {{
-            color: {disabled_fg};
-            background: {surface_alt};
+        QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{
+            border: 1px solid {t["accent"]};
         }}
-        QComboBox {{
-            border: 1px solid {border};
-            background: {bg};
-            padding: 4px 9px;
-            min-height: 30px;
-            border-radius: 7px;
+        QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled,
+        QLineEdit:read-only {{
+            color: {t["muted"]};
+            background: {t["panel_alt"]};
         }}
         QComboBox::drop-down {{
             border: none;
             width: 20px;
         }}
-        QComboBox:hover {{
-            border: 1px solid {border_strong};
-        }}
-        QComboBox:focus {{
-            border: 1px solid {accent};
-        }}
         QComboBox QAbstractItemView {{
-            color: {text};
-            background: {elevated};
-            selection-background-color: {accent};
-            selection-color: {accent_text};
+            color: {t["text"]};
+            background: {t["raised"]};
+            selection-background-color: {t["accent"]};
+            selection-color: {t["accent_text"]};
             outline: none;
-            border: 1px solid {border};
+            border: 1px solid {t["border_strong"]};
             padding: 4px;
         }}
+        QComboBox[role="compact"] {{
+            min-height: 20px;
+            padding: 2px 6px;
+            font-size: 11px;
+            border-radius: 6px;
+        }}
+        QSpinBox::up-button, QSpinBox::down-button {{
+            width: 0;
+            border: none;
+        }}
+
+        /* --- Buttons --- */
         QPushButton {{
-            border: 1px solid {border_strong};
-            background: {elevated};
-            padding: 5px 17px;
-            min-height: 30px;
-            border-radius: 7px;
+            border: 1px solid {t["border_strong"]};
+            background: {t["raised"]};
+            padding: 5px 16px;
+            min-height: 26px;
+            border-radius: 8px;
             font-weight: 600;
         }}
+        QPushButton:hover {{
+            background: {t["border_strong"]};
+            border-color: {t["muted"]};
+        }}
+        QPushButton:pressed {{
+            background: {t["border"]};
+        }}
+        QPushButton[class="primary"], QPushButton[class="success"] {{
+            border: 1px solid {t["accent"]};
+            background: {t["accent"]};
+            color: {t["accent_text"]};
+        }}
+        QPushButton[class="primary"]:hover, QPushButton[class="success"]:hover {{
+            background: {t["accent_hover"]};
+            border-color: {t["accent_hover"]};
+        }}
+        QPushButton[class="danger"] {{
+            border: 1px solid {t["danger"]};
+            background: {t["danger"]};
+            color: #ffffff;
+        }}
+        QPushButton[class="danger"]:hover {{
+            background: {t["danger_hover"]};
+            border-color: {t["danger_hover"]};
+        }}
+        QPushButton[class="warning"] {{
+            border: 1px solid {t["warning"]};
+            background: {t["warning"]};
+            color: #111111;
+        }}
+        QPushButton[class="secondary"] {{
+            background: transparent;
+            border-color: {t["border_strong"]};
+        }}
+        QPushButton[class="secondary"]:hover {{
+            background: {t["raised"]};
+            border-color: {t["accent"]};
+        }}
+        QPushButton:disabled {{
+            border: 1px solid {t["border"]};
+            color: {t["faint"]};
+            background: {t["panel_alt"]};
+        }}
+        QPushButton[role="segment"] {{
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 7px;
+            padding: 4px 14px;
+            color: {t["muted"]};
+        }}
+        QPushButton[role="segment"]:hover {{
+            color: {t["text"]};
+        }}
+        QPushButton[role="segment"]:checked {{
+            background: {t["raised"]};
+            border-color: {t["border_strong"]};
+            color: {t["text"]};
+        }}
+        QFrame[role="segmentGroup"] {{
+            background: {t["bg"]};
+            border: 1px solid {t["border"]};
+            border-radius: 9px;
+        }}
         QToolButton {{
-            border: 1px solid {border};
-            background: {elevated};
+            border: 1px solid {t["border"]};
+            background: {t["raised"]};
             padding: 4px 8px;
             border-radius: 7px;
         }}
-        QPushButton:hover {{
-            background-color: {border_strong};
-            border: 1px solid {muted};
-        }}
         QToolButton:hover {{
-            background-color: {border_strong};
-            border: 1px solid {muted};
-        }}
-        QPushButton[class="warning"] {{
-            border: 1px solid {warning};
-            background-color: {warning};
-            color: #111111;
-            font-weight: 600;
-        }}
-        QPushButton[class="warning"]:hover {{
-            background-color: #e0a800;
-            border: 1px solid #e0a800;
-            color: #111111;
-        }}
-        QToolButton[class="warning"] {{
-            border: 1px solid {warning};
-            background-color: {warning};
-            color: #111111;
-        }}
-        QToolButton[class="warning"]:hover {{
-            background-color: #e0a800;
-            border: 1px solid #e0a800;
-            color: #111111;
-        }}
-        QPushButton[class="success"] {{
-            border: 1px solid {success};
-            background-color: {success};
-            color: #ffffff;
-            font-weight: 600;
-        }}
-        QPushButton[class="success"]:hover {{
-            background-color: #25a06e;
-            border: 1px solid #25a06e;
-            color: #ffffff;
-        }}
-        QToolButton[class="success"] {{
-            border: 1px solid {success};
-            background-color: {success};
-            color: #ffffff;
-        }}
-        QToolButton[class="success"]:hover {{
-            background-color: #25a06e;
-            border: 1px solid #25a06e;
-            color: #ffffff;
-        }}
-        QPushButton[class="danger"] {{
-            border: 1px solid {danger};
-            background-color: {danger};
-            color: #ffffff;
-            font-weight: 600;
-        }}
-        QPushButton[class="danger"]:hover {{
-            background-color: #c94040;
-            border: 1px solid #c94040;
-            color: #ffffff;
-        }}
-        QToolButton[class="danger"] {{
-            border: 1px solid {danger};
-            background-color: {danger};
-            color: #ffffff;
-        }}
-        QToolButton[class="danger"]:hover {{
-            background-color: #c94040;
-            border: 1px solid #c94040;
-            color: #ffffff;
-        }}
-        QPushButton:disabled, QToolButton:disabled {{
-            border: 1px solid {border};
-            color: {disabled_fg};
-            background-color: {surface};
-            font-weight: normal;
-        }}
-        QPushButton[class="secondary"] {{
-            background: {surface_alt};
-            border-color: {border};
-            color: {text};
-        }}
-        QPushButton[class="secondary"]:hover {{
-            background: {elevated};
-            border-color: {accent};
+            background: {t["border_strong"]};
         }}
         QToolButton[class="ghost"] {{
+            font-size: 16px;
             background: transparent;
             border-color: transparent;
-            color: {muted};
+            color: {t["muted"]};
         }}
         QToolButton[class="ghost"]:hover {{
-            background: {surface_alt};
-            border-color: {border};
-            color: {text};
+            background: {t["raised"]};
+            border-color: {t["border"]};
+            color: {t["text"]};
         }}
-        QCheckBox {{
-            spacing: 8px;
-            color: {muted};
-        }}
-        QCheckBox:hover {{
-            color: {text};
-        }}
-        QGroupBox {{
-            border: 1px solid {border};
-            border-radius: 10px;
-            background: {surface};
-            padding-top: 22px;
-            margin-top: 10px;
-            font-weight: 600;
-        }}
-        QGroupBox::title {{
-            subcontrol-origin: margin;
-            subcontrol-position: top left;
-            background-color: {surface};
-            padding: 0 10px;
-            left: 10px;
-            color: {text};
-        }}
-        QFrame[role="hero"] {{
-            background: {surface};
-            border: 1px solid {border};
-            border-radius: 12px;
-        }}
-        QLabel[role="heroEyebrow"] {{
-            color: {accent};
-            font-size: 11px;
-            font-weight: 700;
-        }}
-        QLabel[role="heroTitle"] {{
-            color: {text};
-            font-size: 21px;
-            font-weight: 700;
-        }}
-        QLabel[role="heroSubtitle"] {{
-            color: {muted};
-            font-size: 12px;
-        }}
-        QLabel[role="fieldLabel"] {{
-            color: {muted};
-            font-size: 11px;
-            font-weight: 600;
-        }}
-        QLabel[role="muted"] {{
-            color: {muted};
-        }}
-        QLabel[role="sectionTitle"] {{
-            color: {text};
-            font-size: 14px;
-            font-weight: 700;
+        QToolButton:disabled {{
+            color: {t["faint"]};
         }}
 
-        /* --- Slider --- */
+        /* --- Check boxes: switches, or chips on strips --- */
+        QCheckBox {{
+            spacing: 9px;
+            color: {t["muted"]};
+        }}
+        QCheckBox:hover {{
+            color: {t["text"]};
+        }}
+        QCheckBox:checked {{
+            color: {t["text"]};
+        }}
+        /* --- Sliders (horizontal, outside the console faders) --- */
         QSlider::groove:horizontal {{
             height: 6px;
-            background: {surface_alt};
+            background: {t["raised"]};
             border-radius: 3px;
         }}
         QSlider::handle:horizontal {{
-            background: {accent};
-            border: 1px solid {accent_hover};
+            background: {t["accent"]};
             width: 14px;
             height: 14px;
             margin: -5px 0;
             border-radius: 7px;
         }}
-        QSlider::handle:horizontal:hover {{
-            background: {accent_hover};
-        }}
         QSlider::sub-page:horizontal {{
-            background: {accent};
+            background: {t["accent"]};
             border-radius: 3px;
         }}
 
-        /* --- Table --- */
+        /* --- Tables --- */
         QTableWidget {{
-            border: 1px solid {border};
-            border-radius: 7px;
-            background: {bg};
+            border: 1px solid {t["border"]};
+            border-radius: 8px;
+            background: {t["bg"]};
             gridline-color: transparent;
-            alternate-background-color: {surface_alt};
-            selection-background-color: {elevated};
-            selection-color: {text};
+            alternate-background-color: {t["panel_alt"]};
+            selection-background-color: {t["raised"]};
+            selection-color: {t["text"]};
             outline: none;
         }}
         QHeaderView::section {{
-            background-color: {surface};
-            color: {muted};
+            background-color: {t["panel"]};
+            color: {t["muted"]};
             border: none;
-            border-bottom: 1px solid {border};
+            border-bottom: 1px solid {t["border"]};
             padding: 7px 8px;
             font-size: 11px;
             font-weight: 700;
         }}
+
+        /* --- Scroll bars --- */
         QScrollBar:vertical {{
             background: transparent;
             width: 10px;
             margin: 3px;
         }}
-        QScrollBar::handle:vertical {{
-            background: {border_strong};
-            border-radius: 3px;
-            min-height: 24px;
+        QScrollBar:horizontal {{
+            background: transparent;
+            height: 10px;
+            margin: 3px;
         }}
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+        QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
+            background: {t["border_strong"]};
+            border-radius: 2px;
+            min-height: 24px;
+            min-width: 24px;
+        }}
+        QScrollBar::handle:hover {{
+            background: {t["faint"]};
+        }}
+        QScrollBar::add-line, QScrollBar::sub-line {{
             height: 0;
+            width: 0;
+        }}
+        QScrollBar::add-page, QScrollBar::sub-page {{
+            background: transparent;
         }}
 
-        /* --- Status bar --- */
+        /* --- Status --- */
         QStatusBar {{
-            background: {surface};
-            color: {muted};
-            border-top: 1px solid {border};
+            background: {t["panel"]};
+            color: {t["muted"]};
+            border-top: 1px solid {t["border"]};
             font-size: 12px;
+        }}
+        QStatusBar::item {{
+            border: none;
         }}
         QStatusBar QLabel {{
             padding: 0 6px;
         }}
         QLabel[status="online"], QLabel[status="healthy"] {{
-            color: {success};
+            color: {t["success"]};
             font-weight: 600;
         }}
-        QLabel[status="connecting"] {{
-            color: {accent_hover};
+        QLabel[status="connecting"], QLabel[status="idle"] {{
+            color: {t["accent"]};
             font-weight: 600;
         }}
         QLabel[status="degraded"] {{
-            color: {warning};
+            color: {t["warning"]};
             font-weight: 600;
         }}
         QLabel[status="error"] {{
-            color: {danger};
+            color: {t["danger"]};
             font-weight: 600;
         }}
         QLabel[status="offline"], QLabel[status="unknown"] {{
-            color: {muted};
+            color: {t["muted"]};
             font-weight: 500;
         }}
         QLabel[role="statusBanner"] {{
-            background: {bg};
-            border: 1px solid {border};
-            border-radius: 8px;
-            padding: 7px 12px;
+            background: {t["bg"]};
+            border: 1px solid {t["border_strong"]};
+            border-radius: 15px;
+            min-height: 20px;
+            max-height: 20px;
+            padding: 4px 16px;
+            font-weight: 700;
         }}
-        QLabel[role="statusChip"] {{
-            background: {surface_alt};
-            border: 1px solid {border};
-            border-radius: 7px;
-            padding: 5px 7px;
-        }}
-        QLabel[role="statusBanner"][status="online"] {{
-            border-color: {success};
+        QLabel[role="statusBanner"][status="online"],
+        QLabel[role="statusBanner"][status="healthy"] {{
+            border-color: {t["success"]};
+            background: #0c2117;
         }}
         QLabel[role="statusBanner"][status="connecting"] {{
-            border-color: {accent};
+            border-color: {t["accent"]};
+            background: #08201e;
         }}
         QLabel[role="statusBanner"][status="degraded"] {{
-            border-color: {warning};
+            border-color: {t["warning"]};
+            background: #251a06;
         }}
         QLabel[role="statusBanner"][status="error"] {{
-            border-color: {danger};
+            border-color: {t["danger"]};
+            background: #2a0d0d;
+        }}
+        QLabel[role="statusChip"] {{
+            background: {t["bg"]};
+            border: 1px solid {t["border"]};
+            border-radius: 6px;
+            padding: 3px 8px;
+            font-size: 11px;
         }}
 
         /* --- Splitter --- */
         QSplitter::handle {{
-            background: {border};
+            background: transparent;
         }}
-        QSplitter::handle:horizontal {{
-            width: 2px;
-        }}
-        QSplitter::handle:vertical {{
-            height: 2px;
+        QSplitter::handle:hover {{
+            background: {t["border"]};
         }}
     """
-    app.setStyleSheet(patch)
 
 
 def make_field(
@@ -516,58 +649,10 @@ def make_field(
     return container
 
 
-class EmptyStateTableWidget(QtWidgets.QTableWidget):
-    """Table that explains an empty live state instead of showing a blank void."""
-
-    def __init__(
-        self,
-        rows: int,
-        columns: int,
-        empty_text: str,
-        parent: QtWidgets.QWidget | None = None,
-    ) -> None:
-        super().__init__(rows, columns, parent)
-        self._empty_text = str(empty_text)
-        self.setShowGrid(False)
-        self.setAccessibleDescription(self._empty_text)
-
-    def set_empty_text(self, text: str) -> None:
-        self._empty_text = str(text)
-        self.setAccessibleDescription(self._empty_text)
-        self.viewport().update()
-
-    def empty_text(self) -> str:
-        return self._empty_text
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        super().paintEvent(event)
-        if self.rowCount() != 0 or not self._empty_text:
-            return
-        painter = QtGui.QPainter(self.viewport())
-        painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)
-        color = self.palette().color(QtGui.QPalette.ColorRole.PlaceholderText)
-        painter.setPen(color)
-        font = painter.font()
-        font.setPointSizeF(max(9.0, font.pointSizeF()))
-        painter.setFont(font)
-        rect = self.viewport().rect().adjusted(12, 4, -12, -4)
-        painter.drawText(
-            rect,
-            QtCore.Qt.AlignmentFlag.AlignCenter
-            | QtCore.Qt.TextFlag.TextWordWrap,
-            self._empty_text,
-        )
-        painter.end()
-
-
-# ---------------------------------------------------------------------------
-# Compact combo-box item delegate
-# ---------------------------------------------------------------------------
-
 class _CompactItemDelegate(QtWidgets.QStyledItemDelegate):
     """Forces a fixed row height in combo-box popup lists."""
 
-    def __init__(self, height: int = 22, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, height: int = 24, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._height = height
 
@@ -577,59 +662,28 @@ class _CompactItemDelegate(QtWidgets.QStyledItemDelegate):
         return s
 
 
-def patch_combo(combo: QtWidgets.QComboBox, item_height: int = 22) -> None:
+def patch_combo(combo: QtWidgets.QComboBox, item_height: int = 24) -> None:
     """Apply compact item height to a QComboBox popup."""
     combo.setItemDelegate(_CompactItemDelegate(item_height, combo))
-
-
-def cell_vu(vu: VuMeter, h_margin: int = 4) -> QtWidgets.QWidget:
-    """Wrap a VuMeter in a full-width container for use in QTableWidget cells."""
-    w = QtWidgets.QWidget()
-    lay = QtWidgets.QHBoxLayout(w)
-    lay.setContentsMargins(h_margin, 0, h_margin, 0)
-    lay.addWidget(vu)
-    return w
-
-
-def centered_checkbox(cb: QtWidgets.QCheckBox) -> QtWidgets.QWidget:
-    """Wrap a QCheckBox in a container that centers it horizontally."""
-    w = QtWidgets.QWidget()
-    lay = QtWidgets.QHBoxLayout(w)
-    lay.setContentsMargins(0, 0, 0, 0)
-    lay.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-    lay.addWidget(cb)
-    return w
-
-
-# ---------------------------------------------------------------------------
-# Status indicator (colored dot: green=online, red=offline)
-# ---------------------------------------------------------------------------
-
-_STATUS_COLORS = {
-    "online": QtGui.QColor(46, 182, 125),
-    "healthy": QtGui.QColor(46, 182, 125),
-    "idle": QtGui.QColor(33, 176, 166),
-    "connecting": QtGui.QColor(33, 176, 166),
-    "degraded": QtGui.QColor(242, 182, 50),
-    "error": QtGui.QColor(226, 93, 93),
-    "offline": QtGui.QColor(111, 123, 142),
-    "unknown": QtGui.QColor(111, 123, 142),
-}
 
 
 class StatusIndicator(QtWidgets.QWidget):
     """Small semantic status dot with an accessible textual description."""
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, parent: QtWidgets.QWidget | None = None, *, size: int = 18) -> None:
         super().__init__(parent)
         self._state: str = "unknown"
-        self.setFixedSize(20, 20)
+        self.setFixedSize(size, size)
         self.setAccessibleName("État inconnu")
         self.setToolTip("État inconnu")
 
+    @property
+    def state(self) -> str:
+        return self._state
+
     def set_state(self, state: str, *, description: str = "") -> None:
         semantic_state = str(state or "unknown").lower()
-        if semantic_state not in _STATUS_COLORS:
+        if semantic_state not in _SEMANTIC_STATUS_COLORS:
             semantic_state = "unknown"
         if description:
             self.setAccessibleName(str(description))
@@ -642,104 +696,15 @@ class StatusIndicator(QtWidgets.QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        color = _STATUS_COLORS.get(self._state, _STATUS_COLORS["unknown"])
-
-        # Subtle glow
-        glow = QtGui.QColor(color)
-        glow.setAlpha(50)
+        color = QtGui.QColor(_SEMANTIC_STATUS_COLORS.get(self._state, TOKENS["faint"]))
         cx, cy = self.width() / 2, self.height() / 2
+        r = min(cx, cy)
         painter.setPen(QtCore.Qt.PenStyle.NoPen)
-        painter.setBrush(QtGui.QBrush(glow))
-        painter.drawEllipse(QtCore.QPointF(cx, cy), 8, 8)
-
-        # Solid dot
-        painter.setBrush(QtGui.QBrush(color))
-        painter.drawEllipse(QtCore.QPointF(cx, cy), 5, 5)
-
-        # Highlight
-        highlight = QtGui.QColor(255, 255, 255, 60)
-        painter.setBrush(QtGui.QBrush(highlight))
-        painter.drawEllipse(QtCore.QPointF(cx - 1.5, cy - 1.5), 2, 2)
-
+        if self._state not in ("offline", "unknown"):
+            glow = QtGui.QColor(color)
+            glow.setAlpha(55)
+            painter.setBrush(glow)
+            painter.drawEllipse(QtCore.QPointF(cx, cy), r - 1, r - 1)
+        painter.setBrush(color)
+        painter.drawEllipse(QtCore.QPointF(cx, cy), r * 0.45, r * 0.45)
         painter.end()
-
-
-# ---------------------------------------------------------------------------
-# VU-meter widget  (green -> yellow -> red)
-# ---------------------------------------------------------------------------
-
-_COLOR_GREEN = QtGui.QColor(56, 142, 60)
-_COLOR_GREEN_HOVER = QtGui.QColor(100, 190, 110)
-_COLOR_YELLOW = QtGui.QColor(255, 193, 7)
-_COLOR_RED = QtGui.QColor(244, 67, 54)
-_COLOR_BG = QtGui.QColor(30, 30, 30)
-
-
-def _vu_color(ratio: float, hovered: bool = False) -> QtGui.QColor:
-    green = _COLOR_GREEN_HOVER if hovered else _COLOR_GREEN
-    if ratio < 0.6:
-        return green
-    if ratio < 0.85:
-        t = (ratio - 0.6) / 0.25
-        r = int(green.red() + t * (_COLOR_YELLOW.red() - green.red()))
-        g = int(green.green() + t * (_COLOR_YELLOW.green() - green.green()))
-        b = int(green.blue() + t * (_COLOR_YELLOW.blue() - green.blue()))
-        return QtGui.QColor(r, g, b)
-    t = (ratio - 0.85) / 0.15
-    t = min(1.0, t)
-    r = int(_COLOR_YELLOW.red() + t * (_COLOR_RED.red() - _COLOR_YELLOW.red()))
-    g = int(_COLOR_YELLOW.green() + t * (_COLOR_RED.green() - _COLOR_YELLOW.green()))
-    b = int(_COLOR_YELLOW.blue() + t * (_COLOR_RED.blue() - _COLOR_YELLOW.blue()))
-    return QtGui.QColor(r, g, b)
-
-
-class VuMeter(QtWidgets.QWidget):
-    """Compact horizontal VU-meter with green/yellow/red gradient."""
-
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._ratio: float = 0.0
-        self._hovered: bool = False
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
-        self.setMinimumHeight(10)
-        self.setMaximumHeight(16)
-        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
-
-    def set_level(self, dbfs: float) -> None:
-        """Set level in dBFS (range -60 .. 0)."""
-        dbfs = max(-60.0, min(0.0, float(dbfs)))
-        ratio = (dbfs + 60.0) / 60.0
-        if abs(ratio - self._ratio) > 0.005:
-            self._ratio = ratio
-            self.update()
-
-    def enterEvent(self, event) -> None:  # noqa: N802
-        self._hovered = True
-        self.update()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:  # noqa: N802
-        self._hovered = False
-        self.update()
-        super().leaveEvent(event)
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-
-        rect = self.rect().adjusted(1, 1, -1, -1)
-        p.setPen(QtCore.Qt.PenStyle.NoPen)
-
-        # background
-        p.setBrush(QtGui.QBrush(_COLOR_BG))
-        p.drawRoundedRect(rect, 3, 3)
-
-        # filled portion
-        if self._ratio > 0.0:
-            fill_w = int(rect.width() * self._ratio)
-            fill_rect = QtCore.QRect(rect.x(), rect.y(), fill_w, rect.height())
-            color = _vu_color(self._ratio, self._hovered)
-            p.setBrush(QtGui.QBrush(color))
-            p.drawRoundedRect(fill_rect, 3, 3)
-
-        p.end()
