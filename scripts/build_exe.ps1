@@ -4,8 +4,7 @@
 
 .DESCRIPTION
   Produces, in dist\:
-    py-intercom-server.exe
-    py-intercom-client.exe
+    py-intercom.exe            (Régie or Poste, picked at launch)
     py-intercom-licenses.zip   (LICENSE, third-party notices, Opus licence and build manifest)
     SHA256SUMS.txt
 

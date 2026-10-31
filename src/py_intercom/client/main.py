@@ -8,6 +8,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="py-intercom-client")
     parser.add_argument("--minimized", action="store_true")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--server", default="", help="adresse du serveur à pré-remplir")
     args = parser.parse_args()
 
     setup_logging(bool(args.debug), component="client")
@@ -15,4 +16,4 @@ def main() -> int:
 
     from .gui import run_gui
 
-    return run_gui(minimized=bool(args.minimized))
+    return run_gui(minimized=bool(args.minimized), server_host=str(args.server).strip())

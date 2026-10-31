@@ -9,7 +9,7 @@ import pytest
 def _fake_gui_module(module_name: str, calls: list[bool], return_code: int) -> ModuleType:
     module = ModuleType(module_name)
 
-    def run_gui(*, minimized: bool = False) -> int:
+    def run_gui(*, minimized: bool = False, **_kwargs) -> int:
         calls.append(bool(minimized))
         return return_code
 
@@ -70,3 +70,17 @@ def test_legacy_headless_arguments_are_rejected(
         module.main()
 
     assert exc_info.value.code == 2
+
+
+def test_client_entrypoint_prefills_the_server_address(monkeypatch) -> None:
+    from py_intercom.client import main as client_main
+
+    seen: list[str] = []
+    module = ModuleType("py_intercom.client.gui")
+    module.run_gui = lambda **kwargs: seen.append(kwargs["server_host"]) or 0  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "py_intercom.client.gui", module)
+    monkeypatch.setattr(client_main, "setup_logging", lambda _debug, **_kwargs: None)
+    monkeypatch.setattr(sys, "argv", ["py-intercom-client", "--server", "127.0.0.1"])
+
+    assert client_main.main() == 0
+    assert seen == ["127.0.0.1"]

@@ -116,7 +116,7 @@ Réponse de `/status` et des commandes réussies :
 | Code | Cas |
 |---|---|
 | `200` | Commande appliquée ; l'état à jour est renvoyé |
-| `409` | `on` ou `toggle` alors que le client n'est pas « En ligne » (PTT désarmé), ou `off` sur un bus en mode Always On |
+| `409` | `on` ou `toggle` alors que le client n'est pas « En ligne » (PTT désarmé), ou `off` sur un bus en mode Permanent |
 | `400` | `hold_ms` hors de 100 à 10000, ou ailleurs que sur `POST /ptt/<bus>/on` |
 | `404` | Bus ou route inconnus |
 | `405` | Mauvaise méthode (commande PTT en `GET`) |
@@ -129,7 +129,7 @@ Sémantique :
 
 - **Mode PTT** : `on`/`off` maintiennent ou relâchent un appui distant, qui s'ajoute au raccourci clavier. Un `off` distant ne coupe pas une touche tenue par l'opérateur.
 - **Mode Toggle** : `on`/`off`/`toggle` fixent l'état de bascule, synchronisé avec le raccourci.
-- **Mode Always On** : le bus reste actif ; `off` renvoie `409`.
+- **Mode Permanent** : le bus reste actif ; `off` renvoie `409`.
 - **Bail (`hold_ms`)** : un `on?hold_ms=N` (entier de 100 à 10000) est relâché automatiquement après `N` ms, sauf si une nouvelle commande sur ce bus arrive avant : un autre `on?hold_ms` renouvelle le bail, un `on` sans `hold_ms` le transforme en appui sans limite, un `off` l'arrête. Pour un bouton « talkback », envoyer `on?hold_ms=1000` à l'appui puis toutes les 500 ms tant qu'il est tenu, et `off` au relâchement : si le contrôleur plante ou perd le réseau, le micro se referme seul en une seconde. Sans `hold_ms`, l'appui dure jusqu'au `off`. En mode Toggle, l'expiration coupe la bascule ; un appui sur son raccourci ou un clic sur son pad annule le bail.
 - Couper (`off`) est accepté dans tous les états ; activer (`on`, `toggle`) exige « En ligne ».
 - **Dégradé** (contrôle établi, audio UDP interrompu ou flux carte son arrêté) : la transmission est coupée aussitôt, mais les appuis distants, les bascules et les touches tenues sont conservés et reprennent quand la chaîne est revenue stable 0,5 s. Pendant ce temps, un appui sur le raccourci d'une bascule ne peut que la couper.

@@ -351,10 +351,7 @@ def test_mix_loop_delegates_fixed_bus_routing_to_pure_engine(server, monkeypatch
     assert routing_config.feed_to_regie[VMIX_BUS_ID]
     assert len(destination_calls) == 1
 
-    envelope = server._mix_queue.get_nowait()
-    assert isinstance(envelope, models_mod._RoutingEnvelope)
-    assert envelope.routing_epoch == server._routing_epoch
-    result = envelope.result
+    result = server._mix_queue.get_nowait()
     assert isinstance(result, RoutingResult)
     np.testing.assert_allclose(result.bus_frames[REGIE_BUS_ID], 0.10, atol=1e-6)
     np.testing.assert_allclose(result.bus_frames[PLATEAU_BUS_ID], 0.80, atol=1e-6)
@@ -386,7 +383,9 @@ def test_mix_queue_drops_oldest_frame_when_full(server):
     assert server._mix_queue_drops == 1
 
 
-def test_routing_epoch_invalidates_queued_and_device_audio(server):
+def test_routing_epoch_keeps_mixed_audio_for_the_other_talkers(server):
+    # A mixed frame sums every talker: dropping it when one session is revoked
+    # would cut all the others (Plateau, VMix and every headset) for 10-30 ms.
     output = models_mod.OutputState(
         output_id=3,
         device=0,
@@ -395,17 +394,16 @@ def test_routing_epoch_invalidates_queued_and_device_audio(server):
     output.ring.push(np.full((FRAME_SAMPLES,), 0.25, dtype=np.float32))
     routed = mixer_mod.route_sources([])
     old_epoch = server._routing_epoch
-    server._mix_queue.put_nowait(models_mod._RoutingEnvelope(routing_epoch=old_epoch, result=routed))
+    server._mix_queue.put_nowait(routed)
 
     with server._lock:
         server._outputs[output.output_id] = output
         new_epoch = server._advance_routing_epoch_locked()
 
     assert new_epoch != old_epoch
-    assert server._mix_queue.empty()
-    assert server._stale_mix_epochs_dropped == 1
+    assert server._mix_queue.get_nowait() is routed
     scratch = np.empty((FRAME_SAMPLES,), dtype=np.float32)
-    assert output.ring.pop_into(scratch) is None
+    assert output.ring.pop_into(scratch) is not None
 
 
 def test_routing_epoch_keeps_old_packet_out_of_replacement_decoder(server):
@@ -451,11 +449,9 @@ def test_routing_epoch_keeps_old_packet_out_of_replacement_decoder(server):
 
     assert old_decoder.payloads == [b"old-session-opus"]
     assert replacement_decoder.payloads == []
-    assert server._mix_queue.empty()
-    assert server._stale_mix_epochs_dropped == 1
 
 
-def test_forget_client_atomically_revokes_session_and_queued_audio(server):
+def test_forget_client_atomically_revokes_session(server):
     client_uuid = "forgotten-live-client"
     client_id = client_id_from_uuid(client_uuid)
     state = _client_state()
@@ -477,7 +473,7 @@ def test_forget_client_atomically_revokes_session_and_queued_audio(server):
         server._client_profiles[client_uuid] = models_mod.ClientProfile(client_uuid)
         server._outputs[output.output_id] = output
         old_epoch = server._routing_epoch
-        server._mix_queue.put_nowait(models_mod._RoutingEnvelope(old_epoch, routed))
+        server._mix_queue.put_nowait(routed)
     with server._ctrl_lock:
         server._ctrl_sessions[client_id] = connection
         server._ctrl_send_locks[client_id] = threading.Lock()
@@ -485,8 +481,6 @@ def test_forget_client_atomically_revokes_session_and_queued_audio(server):
     server.forget_client(client_id)
 
     assert server._routing_epoch != old_epoch
-    assert server._mix_queue.empty()
-    assert output.ring.depth == 0
     assert client_id not in server._clients
     assert client_uuid not in server._client_profiles
     assert client_id not in server._ctrl_sessions
@@ -1144,7 +1138,7 @@ def test_control_rejects_missing_or_unsupported_version(server, hello):
     server._ctrl_session_loop(connection, ("127.0.0.1", 50000))
 
     _assert_refused_with_error(connection, retry=False)
-    assert "version" in _sent_messages(connection)[0]["message"]
+    assert "Version" in _sent_messages(connection)[0]["message"]
     assert 21 not in server._clients
 
 
@@ -1359,7 +1353,7 @@ def test_hello_rejects_crc_collision_instead_of_replacing_profile(server):
     _assert_refused_with_error(second, retry=False)
     # The refused peer learns why, but never the UUID it collides with.
     refusal = _sent_messages(second)[0]["message"]
-    assert "collides" in refusal
+    assert "même identité" in refusal
     assert first_uuid not in refusal
     assert server.get_stats_snapshot()["control_identity_collisions"] == 1
 
@@ -1467,12 +1461,7 @@ def test_server_broadcast_uses_pure_mix_minus_return_and_v2_envelope(
             RoutedSource(8, np.full((FRAME_SAMPLES,), 0.50, dtype=np.float32), 1),
         ]
     )
-    server._mix_queue.put_nowait(
-        models_mod._RoutingEnvelope(
-            routing_epoch=server._routing_epoch,
-            result=routed,
-        )
-    )
+    server._mix_queue.put_nowait(routed)
     server._return_enabled = True
     server._return_frames.push(np.full((FRAME_SAMPLES,), 0.25, dtype=np.float32))
 
@@ -1527,7 +1516,7 @@ def test_broadcast_epoch_check_is_atomic_with_udp_send(server, monkeypatch):
     server._sock = recording_socket
     routed = mixer_mod.route_sources([RoutedSource(8, np.full((FRAME_SAMPLES,), 0.25, dtype=np.float32), 1)])
     old_epoch = server._routing_epoch
-    server._mix_queue.put_nowait(models_mod._RoutingEnvelope(old_epoch, routed))
+    server._mix_queue.put_nowait(routed)
     real_pack = mixer_mod.pack_audio_packet_v2
 
     def revoke_during_packet_build(**kwargs):
@@ -1680,7 +1669,7 @@ def test_a_hello_recorded_after_the_clock_read_is_not_expired(server):
     assert state.session_token == SESSION_TOKEN
 
 
-def test_expiring_an_already_expired_session_does_not_flush_audio(server):
+def test_expiring_an_already_expired_session_does_not_advance_the_epoch(server):
     state = _client_state()
     with server._lock:
         server._clients[7] = state
@@ -2153,8 +2142,8 @@ def test_snapshots_report_streams_whose_callbacks_stalled(server):
         server._return_stream = _ActiveStream()
         server._return_last_callback_monotonic = time.monotonic() - 2.0
 
-    assert "stalled" in server.get_outputs_snapshot()[4]["stream_error"]
-    assert "stalled" in server.get_stats_snapshot()["return_stream_error"]
+    assert "ne répond plus" in server.get_outputs_snapshot()[4]["stream_error"]
+    assert "ne répond plus" in server.get_stats_snapshot()["return_stream_error"]
 
 
 def test_oversized_datagram_never_pauses_udp_reception(server, monkeypatch):
@@ -2224,7 +2213,7 @@ def test_hello_of_a_new_client_does_not_flush_other_audio(server):
     with server._lock:
         server._outputs[9] = output
         epoch = server._routing_epoch
-        server._mix_queue.put_nowait(models_mod._RoutingEnvelope(epoch, mixer_mod.route_sources([])))
+        server._mix_queue.put_nowait(mixer_mod.route_sources([]))
     observed = []
 
     def record_at_welcome():
@@ -2261,9 +2250,9 @@ def test_hello_revokes_only_a_live_previous_session(server, live):
     connection = _ScriptedConnection(_hello(client_uuid), b"", on_send=record_at_welcome)
     server._ctrl_session_loop(connection, ("127.0.0.1", 50000))
 
-    # Audio of a revoked live session must not leak; an expired session was
-    # already revoked when it expired, so nothing is flushed a second time.
-    assert observed == ([(1, 0)] if live else [(0, 1)])
+    # A live session is revoked (epoch advanced) before the welcome; an
+    # expired one was revoked when it expired. Mixed audio is never flushed.
+    assert observed == ([(1, 1)] if live else [(0, 1)])
 
 
 def test_config_push_cannot_overtake_the_welcome(server, monkeypatch):
@@ -2562,3 +2551,52 @@ def test_stereo_return_is_summed_to_mono_without_losing_one_side(server):
     np.testing.assert_allclose(out, 0.25, atol=1e-6)
     assert server._return_frames.pop_into(out) is not None
     np.testing.assert_allclose(out, 0.5, atol=1e-6)
+
+
+def test_control_accept_survives_a_transient_error(server):
+    class _FlakyListener:
+        def __init__(self):
+            self.calls = 0
+
+        def accept(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise ConnectionResetError(10054, "peer reset before accept")
+            server._stop.set()
+            raise OSError(10038, "socket closed by stop()")
+
+    listener = _FlakyListener()
+    server._ctrl_sock = listener
+
+    server._ctrl_accept_loop()
+
+    # The first error was ridden out: the loop only returned once stopping.
+    assert listener.calls == 2
+
+
+def test_start_runs_even_when_every_output_fails_to_open(server, monkeypatch):
+    output = models_mod.OutputState(output_id=0, device=0, bus_id=PLATEAU_BUS_ID)
+    with server._lock:
+        server._outputs[0] = output
+
+    def failing_open(out):
+        out.stream_error = "carte occupée"
+        raise RuntimeError("carte occupée")
+
+    monkeypatch.setattr(server, "_open_output_stream", failing_open)
+
+    server.start()
+
+    assert server.get_stats_snapshot()["running"] is True
+    assert server.get_outputs_snapshot()[0]["stream_error"] == "carte occupée"
+
+
+def test_operator_gain_on_a_station_not_yet_connected_is_kept(server):
+    client_uuid = "known-but-offline"
+    client_id = client_id_from_uuid(client_uuid)
+    with server._lock:
+        server._client_profiles[client_uuid] = models_mod.ClientProfile(client_uuid)
+
+    server.set_client_input_gain(client_id, 6.0)
+
+    assert server.get_clients_snapshot()[client_id]["input_gain_db"] == pytest.approx(6.0)

@@ -23,7 +23,6 @@ from ..common.frame_ring import FrameRingBuffer
 from ..common.jitter_buffer import OpusPacketJitterBuffer, new_realtime_jitter_buffer
 from ..common.jsonio import JsonFileStatus
 from ..common.opus_codec import OpusDecoder, OpusEncoder
-from ..common.routing import RoutingResult
 
 
 @dataclass
@@ -187,12 +186,6 @@ class OutputState:
     # Serializes (re)opening this output's stream. Never taken by the audio
     # callback, so it may be held across PortAudio calls.
     open_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-
-
-@dataclass(frozen=True, slots=True)
-class _RoutingEnvelope:
-    routing_epoch: int
-    result: RoutingResult
 
 
 class LogThrottle:

@@ -12,7 +12,7 @@ from py_intercom.common.bootstrap import prepare_windows_runtime, run_applicatio
 
 prepare_windows_runtime(_root)
 
-from py_intercom.client.main import main
+from py_intercom import launcher
 
 if __name__ == "__main__":
-    run_application(main, component="client", frozen=_is_frozen)
+    run_application(launcher.main, component=lambda: launcher.active_role, frozen=_is_frozen)

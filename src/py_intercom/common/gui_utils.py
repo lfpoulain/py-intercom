@@ -192,9 +192,35 @@ def set_app_icon(window: QtWidgets.QWidget, app_user_model_id: str) -> None:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_user_model_id)
 
 
+def confirm(parent: QtWidgets.QWidget | None, title: str, text: str) -> bool:
+    """Ask before a destructive or live-cutting action; No is the default."""
+    answer = QtWidgets.QMessageBox.question(
+        parent,
+        title,
+        text,
+        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        QtWidgets.QMessageBox.StandardButton.No,
+    )
+    return answer == QtWidgets.QMessageBox.StandardButton.Yes
+
+
+def install_french_translations(app: QtWidgets.QApplication) -> None:
+    """Qt's own texts (Yes/No/Close on message boxes) in French, once per app."""
+    if app.property("pyIntercomTranslated"):
+        return
+    with best_effort("load Qt French translations"):
+        translator = QtCore.QTranslator(app)  # parented: lives as long as the app
+        directory = QtCore.QLibraryInfo.path(QtCore.QLibraryInfo.LibraryPath.TranslationsPath)
+        if translator.load(QtCore.QLocale(QtCore.QLocale.Language.French), "qtbase", "_", directory):
+            app.installTranslator(translator)
+    app.setProperty("pyIntercomTranslated", True)
+
+
 def run_window(make_window: Callable[[], _Window], start_minimized: Callable[[_Window], bool]) -> int:
     """Runs a py-intercom window until it closes and returns the exit code."""
-    app = QtWidgets.QApplication(sys.argv)
+    # The role picker may already have created the application.
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    install_french_translations(app)
     apply_theme(app)
     window = make_window()
     if start_minimized(window):

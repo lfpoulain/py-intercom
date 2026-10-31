@@ -92,12 +92,12 @@ def derive_server_operational_health(
         engine = HealthFacet(
             ServerHealthState.ERROR,
             "Moteur arrêté",
-            "Le moteur ne signale plus son état running.",
+            "Le moteur audio ne répond plus.",
         )
     elif worker_errors or dead_workers:
         details = []
         if dead_workers:
-            details.append("workers absents : " + ", ".join(dead_workers))
+            details.append("tâches internes arrêtées : " + ", ".join(dead_workers))
         if worker_errors:
             details.append("erreurs : " + "; ".join(f"{name}: {error}" for name, error in worker_errors.items()))
         engine = HealthFacet(
@@ -109,7 +109,7 @@ def derive_server_operational_health(
         engine = HealthFacet(
             ServerHealthState.HEALTHY,
             "Moteur OK",
-            "Tous les workers critiques sont actifs.",
+            "Toutes les tâches internes sont actives.",
         )
 
     try:
@@ -120,9 +120,9 @@ def derive_server_operational_health(
         ServerHealthState.HEALTHY,
         _count(connected_count, "poste connecté", "postes connectés"),
         (
-            f"{connected_count} client(s) avec contrôle TCP actif."
+            f"{connected_count} poste(s) avec liaison de contrôle active."
             if connected_count
-            else "Canal de contrôle prêt, aucun client connecté."
+            else "Liaison de contrôle prête, aucun poste connecté."
         ),
     )
 
@@ -149,7 +149,7 @@ def derive_server_operational_health(
         udp = HealthFacet(
             ServerHealthState.DEGRADED,
             f"Voix reçue : {associated_udp - stale_active_udp}/{associated_udp} postes",
-            f"{stale_active_udp} client(s) en parole n'envoient plus d'audio récent.",
+            f"{stale_active_udp} poste(s) en parole n'envoient plus de voix.",
         )
     else:
         udp = HealthFacet(
@@ -157,11 +157,11 @@ def derive_server_operational_health(
             "Voix reçue OK" if associated_udp else "Réception prête",
             (
                 (
-                    f"{associated_udp} client(s) associé(s), dont {active_udp} en parole ; "
-                    "les clients silencieux au repos sont nominaux."
+                    f"{associated_udp} poste(s) en ligne, dont {active_udp} en parole ; "
+                    "un poste qui ne parle pas n'envoie rien, c'est normal."
                 )
                 if associated_udp
-                else "Transport UDP prêt, aucun client connecté."
+                else "Réception prête, aucun poste connecté."
             ),
         )
 
@@ -171,7 +171,7 @@ def derive_server_operational_health(
     for output_id, output in outputs.items():
         error = str(output.get("stream_error") or output.get("last_error") or "")
         if error:
-            explicit_output_errors.append(f"sortie {output_id}: {error}")
+            explicit_output_errors.append(f"sortie {int(output_id) + 1} : {error}")
         if "stream_active" not in output:
             unknown_outputs.append(int(output_id))
         elif output.get("stream_active") is not True:
@@ -181,36 +181,39 @@ def derive_server_operational_health(
     return_active_known = "return_stream_active" in stats
     return_inactive = return_enabled and stats.get("return_stream_active") is not True
     return_error = str(stats.get("return_stream_error") or "") if return_enabled else ""
-    if not outputs:
-        audio = HealthFacet(
-            ServerHealthState.DEGRADED,
-            "Aucune sortie son",
-            "Aucune sortie audio n'est configurée.",
-        )
-    elif explicit_output_errors or inactive_outputs or return_inactive or return_error:
+    # The Return is checked first: it can fail with no output configured.
+    if explicit_output_errors or inactive_outputs or return_inactive or return_error:
         details = list(explicit_output_errors)
         if inactive_outputs:
-            details.append("streams inactifs : " + ", ".join(str(i) for i in inactive_outputs))
+            details.append("sorties arrêtées : " + ", ".join(str(i + 1) for i in inactive_outputs))
         if return_inactive:
             details.append("entrée Return inactive")
         if return_error:
             details.append(f"Return : {return_error}")
         audio = HealthFacet(
             ServerHealthState.ERROR,
-            "Sortie son en erreur",
+            "Sortie son en erreur" if explicit_output_errors or inactive_outputs else "Programme en erreur",
             "; ".join(details),
+        )
+    elif not outputs:
+        # Valid setup: the postes hear each other over the network; nothing
+        # to warn about, or the banner would stay orange for good.
+        audio = HealthFacet(
+            ServerHealthState.HEALTHY,
+            "Aucune sortie son",
+            "Les postes s'entendent entre eux ; ajoutez une sortie pour diffuser sur une carte son du serveur.",
         )
     elif unknown_outputs or (return_enabled and not return_active_known):
         audio = HealthFacet(
             ServerHealthState.UNKNOWN,
             _count(len(outputs), "sortie son", "sorties son"),
-            "L'activité de certains streams audio n'est pas encore confirmée.",
+            "Certaines cartes son n'ont pas encore confirmé qu'elles jouent.",
         )
     else:
         audio = HealthFacet(
             ServerHealthState.HEALTHY,
             _count(len(outputs), "sortie son OK", "sorties son OK"),
-            "Tous les streams audio configurés sont actifs.",
+            "Toutes les cartes son configurées jouent.",
         )
 
     facets = (engine, control, udp, audio)

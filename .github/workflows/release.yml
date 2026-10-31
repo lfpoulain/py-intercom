@@ -80,8 +80,9 @@ jobs:
           cat > notes.md <<NOTES
           ## Télécharger
 
-          - Serveur Régie : [py-intercom-server.exe](${latest}/py-intercom-server.exe)
-          - Client : [py-intercom-client.exe](${latest}/py-intercom-client.exe)
+          - [py-intercom.exe](${latest}/py-intercom.exe) : un seul programme pour la Régie et les postes.
+
+          Au premier lancement, choisir ce que fait ce PC (Régie ou Poste) ; maintenir Maj au lancement pour revoir ce choix. Pour un raccourci dédié : \`py-intercom.exe --role server\` ou \`--role client\`.
 
           Aucune installation : télécharger puis double-cliquer. Si Windows SmartScreen s'affiche, choisir « Informations complémentaires » puis « Exécuter quand même ».
           NOTES

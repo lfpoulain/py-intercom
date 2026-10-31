@@ -25,6 +25,9 @@ class ClientOperationalStatus:
     state: ClientOperationalState
     label: str
     detail: str
+    # Degraded for a reason that never clears by itself (dead sound card
+    # stream, failed shortcuts): only Déconnecter then Connecter fixes it.
+    needs_reconnect: bool = False
 
 
 def _workers_are_alive(value: object) -> bool:
@@ -94,7 +97,8 @@ def derive_client_operational_status(
         return ClientOperationalStatus(
             ClientOperationalState.DEGRADED,
             "Dégradé",
-            "; ".join(failures) + ". PTT désarmé.",
+            "; ".join(failures) + ". PTT suspendu.",
+            needs_reconnect=not (input_stream_ok and output_stream_ok),
         )
 
     return ClientOperationalStatus(

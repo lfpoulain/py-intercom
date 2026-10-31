@@ -14,7 +14,6 @@ from ..common.buses import FIXED_BUS_MASK
 from ..common.constants import (
     FRAME_SAMPLES,
     PLAYOUT_DECODE_AHEAD_MS,
-    PLAYOUT_LEAD_FRAMES,
     SAMPLE_RATE,
 )
 from ..common.jitter_buffer import JitterFrame, JitterFrameMetadata, decode_jitter_frame
@@ -207,7 +206,8 @@ class TransportMixin:
         Each output callback sets ``_playout_tick`` when the card takes a
         frame; this worker then pops the jitter buffer PLAYOUT_DECODE_AHEAD_MS
         before the card's next read and queues the next frame,
-        PLAYOUT_LEAD_FRAMES ahead. The jitter buffer is therefore read
+        ``_playout_lead`` frames ahead (PLAYOUT_LEAD_FRAMES unless the card
+        calls back in bursts, see AudioIOMixin._note_playout_burst). The jitter buffer is therefore read
         exactly as fast as the card plays: no second clock, no drift between
         them, and no PCM ring margin to trim. A slot the card had to play as
         silence (late worker) is not made up: its frame stays in the jitter
@@ -228,7 +228,7 @@ class TransportMixin:
             if delay > 0.0:
                 time.sleep(delay)  # high-resolution timer on Windows (Python 3.11+)
 
-            while self._playout_ring.depth < PLAYOUT_LEAD_FRAMES:
+            while self._playout_ring.depth < self._playout_lead:
                 if not self._network_is_current(stop_event, generation) or not udp_ready.is_set():
                     break
                 try:

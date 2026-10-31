@@ -119,7 +119,11 @@ def check_shortcuts(shortcuts: Mapping[int, str]) -> CheckResult:
 
 def microphone_verdict(peak_dbfs: float) -> CheckResult:
     if peak_dbfs >= -1.0:
-        return CheckResult(Verdict.WARNING, f"Le micro sature ({peak_dbfs:.0f} dBFS) : baissez le gain micro.")
+        return CheckResult(
+            Verdict.WARNING,
+            f"Le micro sature ({peak_dbfs:.0f} dBFS) : baissez le niveau d'entrée du micro dans Windows "
+            "(Paramètres > Son) ou sur l'interface audio.",
+        )
     if peak_dbfs >= MIC_MIN_PEAK_DBFS:
         return CheckResult(Verdict.OK, f"Voix captée (crête {peak_dbfs:.0f} dBFS).")
     return CheckResult(
@@ -296,7 +300,7 @@ class PreflightDialog(QtWidgets.QDialog):
         tone_factory: Callable[[int], TonePlayer] = TonePlayer,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Préflight — test avant le live")
+        self.setWindowTitle("Test micro et casque avant le direct")
         self.setMinimumWidth(560)
         self._server_host = server_host
         self._control_port = int(control_port)
@@ -312,7 +316,9 @@ class PreflightDialog(QtWidgets.QDialog):
 
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(20, 18, 20, 16)
-        intro = QtWidgets.QLabel("Vérifie la chaîne complète avant de vous connecter. Durée : environ 15 secondes.")
+        intro = QtWidgets.QLabel(
+            "Ce test vérifie la chaîne complète avant de vous connecter. Durée : environ 15 secondes."
+        )
         intro.setWordWrap(True)
         lay.addWidget(intro)
 

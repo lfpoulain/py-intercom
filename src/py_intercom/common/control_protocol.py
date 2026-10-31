@@ -12,6 +12,11 @@ CONTROL_HELLO_TIMEOUT_S = 3.0
 MAX_CONTROL_SESSIONS = 64
 SESSION_TOKEN_HEX_LENGTH = 16
 
+# Shown on the station when the Régie operator removes it ("Oublier").
+KICK_MESSAGE = "La Régie a retiré ce poste de la session."
+# Sent by servers before 3.0; the station shows KICK_MESSAGE instead.
+LEGACY_KICK_MESSAGE = "Tu as été kick"
+
 _SESSION_TOKEN_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
@@ -39,6 +44,10 @@ def require_control_protocol_version(value: object) -> int:
         )
         raise ControlProtocolError(
             f"unsupported control protocol version {value!r}; expected {CONTROL_PROTOCOL_VERSION}.{legacy_note}",
+            peer_message=(
+                f"Version de py-intercom incompatible avec la Régie (protocole {value!r}, attendu "
+                f"{CONTROL_PROTOCOL_VERSION}) : mettez ce poste à jour."
+            ),
             refused=True,
         )
     return int(value)

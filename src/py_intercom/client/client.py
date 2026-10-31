@@ -17,6 +17,7 @@ from ..common.constants import (
     CONTROL_PORT_OFFSET,
     FRAME_SAMPLES,
     JB_START_FRAMES,
+    PLAYOUT_LEAD_FRAMES,
     SAMPLE_RATE,
 )
 from ..common.frame_ring import FrameRingBuffer
@@ -116,6 +117,12 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         # _playout_tick_at (monotonic seconds).
         self._playout_tick = threading.Event()
         self._playout_tick_at = 0.0
+        # Frames queued ahead of the card: PLAYOUT_LEAD_FRAMES, raised by the
+        # output callback for a card that calls back in bursts (audio_io).
+        self._playout_lead = int(PLAYOUT_LEAD_FRAMES)
+        self._playout_burst_run = 0
+        self._playout_burst_max_run = 0
+        self._playout_bursts = 0
         self._capture_work = np.empty((int(FRAME_SAMPLES),), dtype=np.float32)
         self._output_work = np.empty((int(FRAME_SAMPLES),), dtype=np.float32)
         self._silence_frame = np.zeros((int(FRAME_SAMPLES),), dtype=np.float32)
@@ -229,6 +236,8 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
                 "playout_ring_dropped": int(playout_ring_stats.dropped),
                 "playout_ring_trimmed": int(playout_ring_stats.trimmed),
                 "playout_ring_underflows": int(playout_ring_stats.underflows),
+                "playout_lead_frames": int(self._playout_lead),
+                "playout_bursts": int(self._playout_bursts),
                 "tx_packets": int(self._tx_packets),
                 "tx_udp_sent": int(self._tx_udp_sent),
                 "rx_packets": int(self._rx_packets),

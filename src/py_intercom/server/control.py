@@ -39,7 +39,7 @@ from ..common.realtime import configure_control_socket
 from .models import ClientProfile, ClientState
 
 # Message told to a peer whose identity collides: never another client's UUID.
-_IDENTITY_COLLISION_PEER_MESSAGE = "client identity collides with an existing client"
+_IDENTITY_COLLISION_PEER_MESSAGE = "Un autre poste connu de la Régie a la même identité : utilisez Nouvelle identité."
 
 
 class ControlMixin:
@@ -186,8 +186,14 @@ class ControlMixin:
                 conn, addr = s.accept()
             except TimeoutError:
                 continue
-            except OSError:
-                return
+            except OSError as exc:
+                if self._stop.is_set():
+                    return
+                # A peer resetting before accept() (WSAECONNRESET) or a brief
+                # resource shortage must not stop the whole engine mid-show.
+                logger.warning("control accept failed, retrying: {}", exc)
+                self._stop.wait(0.05)
+                continue
             if self._stop.is_set():
                 with best_effort("conn.close()"):
                     conn.close()
@@ -218,7 +224,7 @@ class ControlMixin:
                     self._ctrl_session_threads.discard(t)
                 with best_effort("conn.close()"):
                     conn.close()
-                raise
+                logger.exception("control session thread failed to start for {}", addr)
 
     def _ctrl_session_entry(self, conn: socket.socket, addr) -> None:
         try:
@@ -401,14 +407,22 @@ class ControlMixin:
                         )
                     except ClientIdentityError as exc:
                         self._ctrl_invalid_identities += 1
-                        raise ControlProtocolError(f"invalid client identity: {exc}", refused=True) from exc
+                        raise ControlProtocolError(
+                            f"invalid client identity: {exc}", peer_message="Identité du poste invalide.", refused=True
+                        ) from exc
 
                     raw_name = msg.get("name", "")
                     if not isinstance(raw_name, str):
-                        raise ControlProtocolError("hello name must be a string", refused=True)
+                        raise ControlProtocolError(
+                            "hello name must be a string", peer_message="Nom du poste invalide.", refused=True
+                        )
                     name = raw_name.strip()
                     if len(name) > 128:
-                        raise ControlProtocolError("hello name exceeds 128 characters", refused=True)
+                        raise ControlProtocolError(
+                            "hello name exceeds 128 characters",
+                            peer_message="Nom du poste trop long (128 caractères au maximum).",
+                            refused=True,
+                        )
                     raw_applies_input_gain_locally = msg.get(
                         "applies_input_gain_locally",
                         False,

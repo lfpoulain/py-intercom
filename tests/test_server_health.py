@@ -43,4 +43,26 @@ def test_udp_label_counts_the_clients_whose_audio_is_fine() -> None:
 
     assert health.udp.state is ServerHealthState.DEGRADED
     assert health.udp.label == "Voix reçue : 1/2 postes"
-    assert "1 client(s) en parole" in health.udp.detail
+    assert "1 poste(s) en parole" in health.udp.detail
+
+
+def test_no_output_is_a_valid_setup() -> None:
+    health = derive_server_operational_health(_stats(0), {}, {})
+
+    assert health.audio.state is ServerHealthState.HEALTHY
+    assert health.overall.state is ServerHealthState.HEALTHY
+
+
+def test_failed_return_is_reported_even_without_outputs() -> None:
+    stats = {**_stats(0), "return_enabled": True, "return_stream_active": False}
+
+    health = derive_server_operational_health(stats, {}, {})
+
+    assert health.audio.state is ServerHealthState.ERROR
+    assert health.audio.label == "Programme en erreur"
+
+
+def test_output_numbers_match_the_strips() -> None:
+    health = derive_server_operational_health(_stats(0), {}, {0: {"stream_active": False}})
+
+    assert health.audio.detail == "sorties arrêtées : 1"

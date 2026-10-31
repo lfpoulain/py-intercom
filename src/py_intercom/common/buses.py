@@ -23,7 +23,7 @@ FIXED_BUSES: Final[tuple[BusDefinition, ...]] = (
     BusDefinition(
         bus_id=REGIE_BUS_ID,
         key="regie",
-        name="Regie",
+        name="Régie",
         color="#38bdf8",
         default_feed_to_regie=False,
     ),

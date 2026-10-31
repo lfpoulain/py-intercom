@@ -30,6 +30,7 @@ from ..common.constants import (
     SERVER_MIX_QUEUE_MAX,
     SERVER_RETURN_FRAMES_MAX,
 )
+from ..common.control_protocol import KICK_MESSAGE
 from ..common.discovery import DiscoveryBeacon
 from ..common.frame_ring import FrameRingBuffer
 from ..common.identity import (
@@ -122,15 +123,15 @@ class IntercomServer(PresetsMixin, OutputsMixin, ReturnInputMixin, ControlMixin,
             for definition in FIXED_BUSES
         }
 
-        # Routing envelopes carry a server-wide epoch. Any session replacement
-        # invalidates already queued audio before it can reach another client.
+        # Mixed frames waiting for the broadcast worker (RoutingResult).
         self._mix_queue: queue.Queue[object] = queue.Queue(maxsize=SERVER_MIX_QUEUE_MAX)
         self._stop = threading.Event()
         self._seq_out = 0
         self._routing_epoch = 1
-        # Serializes the final epoch check with UDP sendto(). Session changes
-        # take this gate while advancing the epoch, closing the check/send
-        # TOCTOU window without holding it during encoding or packet building.
+        # Advanced by every session revocation. Broadcast compares it, under
+        # this gate and right before sendto(), with the value read alongside
+        # its destination list: a revoked address never gets one more packet.
+        # The gate is not held during encoding or packet building.
         self._routing_io_lock = threading.Lock()
 
         self._rx_packets = 0
@@ -281,9 +282,9 @@ class IntercomServer(PresetsMixin, OutputsMixin, ReturnInputMixin, ControlMixin,
             stream_active = self._stream_is_active(stream)
             if running and not stream_error:
                 if not stream_active:
-                    stream_error = "output stream is inactive"
+                    stream_error = "la carte son ne joue plus"
                 elif self._stream_stalled(last_callback, now=now):
-                    stream_error = "output stream callbacks stalled"
+                    stream_error = "la carte son ne répond plus"
             out[output_id] = {
                 "output_id": output_id,
                 "device": device,
@@ -403,9 +404,9 @@ class IntercomServer(PresetsMixin, OutputsMixin, ReturnInputMixin, ControlMixin,
         return_stream_active = self._stream_is_active(return_stream)
         if self._return_enabled and running and not self._stop.is_set() and not return_stream_error:
             if not return_stream_active:
-                return_stream_error = "return input stream is inactive"
+                return_stream_error = "l'entrée Programme ne capte plus"
             elif self._stream_stalled(return_last_callback, now=time.monotonic()):
-                return_stream_error = "return input stream callbacks stalled"
+                return_stream_error = "la carte de l'entrée Programme ne répond plus"
         return {
             "running": bool(running),
             "clients": int(clients),
@@ -491,7 +492,7 @@ class IntercomServer(PresetsMixin, OutputsMixin, ReturnInputMixin, ControlMixin,
         logger.info("client {} forgotten by the operator{}", cid, ", its session is kicked" if sock is not None else "")
         if sock is not None:
             with best_effort(f"kick send to {int(cid)}"):
-                self._control_send_with_lock(sock, send_lock, {"type": "kick", "message": "Tu as été kick"})
+                self._control_send_with_lock(sock, send_lock, {"type": "kick", "message": KICK_MESSAGE})
             with best_effort(f"kick socket close for {int(cid)}"):
                 sock.close()
 
@@ -533,19 +534,35 @@ class IntercomServer(PresetsMixin, OutputsMixin, ReturnInputMixin, ControlMixin,
         self._autosave_preset()
 
     def set_client_input_gain(self, client_id: int, gain_db: float) -> None:
+        cid = int(client_id)
         with self._lock:
-            st = self._clients.get(int(client_id))
-            if st is None:
-                return
-            changed = self._set_client_input_gain_locked(st, gain_db)
-            if changed:
-                self._input_gain_push_ids.add(int(client_id))
+            st = self._clients.get(cid)
+            if st is not None:
+                changed = self._set_client_input_gain_locked(st, gain_db)
+                if changed:
+                    self._input_gain_push_ids.add(cid)
+            else:
+                # A known station that has not connected yet: its profile is
+                # what its next welcome sends, so a pre-show setting sticks.
+                changed = self._set_profile_input_gain_locked(cid, gain_db)
 
         if not changed:
             return
 
-        self._request_config_push()
+        if st is not None:
+            self._request_config_push()
         self._autosave_preset()
+
+    def _set_profile_input_gain_locked(self, client_id: int, gain_db: object) -> bool:
+        next_gain = clamp_gain_db(gain_db)
+        for client_uuid, profile in self._client_profiles.items():
+            if int(client_id_from_uuid(client_uuid)) != client_id:
+                continue
+            if abs(float(profile.input_gain_db) - next_gain) < 0.01:
+                return False
+            profile.input_gain_db = next_gain
+            return True
+        return False
 
     def _set_client_input_gain_locked(self, st: ClientState, gain_db: object) -> bool:
         """Apply an input gain to a live client and its persistent profile.
@@ -591,32 +608,25 @@ class IntercomServer(PresetsMixin, OutputsMixin, ReturnInputMixin, ControlMixin,
         return token
 
     def _advance_routing_epoch_locked(self) -> int:
-        # Callers hold self._lock. Broadcast never acquires self._lock while it
-        # owns this gate, so the state -> routing-I/O lock order cannot invert.
+        """Invalidate every broadcast destination list taken before now.
+
+        Callers hold self._lock. Broadcast never acquires self._lock while it
+        owns this gate, so the state -> routing-I/O lock order cannot invert.
+        Audio already mixed is kept: it is a sum over every talker, so
+        dropping it would cut all the others to remove one revoked voice.
+        """
         with self._routing_io_lock:
             self._routing_epoch = (int(self._routing_epoch) + 1) & 0x7FFFFFFFFFFFFFFF
             if self._routing_epoch == 0:
                 self._routing_epoch = 1
-
-            # Physical outputs have their own bounded queues. Clear them
-            # together with network mixes so audio prepared under a revoked
-            # session cannot leak for the remaining buffered duration.
-            for output in self._outputs.values():
-                output.ring.clear()
-            while True:
-                try:
-                    self._mix_queue.get_nowait()
-                    self._stale_mix_epochs_dropped += 1
-                except queue.Empty:
-                    break
             return int(self._routing_epoch)
 
     def _expire_client_session(self, st: ClientState) -> None:
         """Revoke a client's audio session. Callers hold ``self._lock``.
 
-        Only a live token has audio in flight: the routing epoch (which flushes
-        every output and queued mix) advances once per revoked session, never
-        again for a session that is already expired.
+        Only a live token has audio in flight: the routing epoch (which stops
+        any send to the revoked address) advances once per revoked session,
+        never again for a session that is already expired.
         """
         revoked = int(st.session_token) != 0
         st.control_connected = False
@@ -710,19 +720,15 @@ class IntercomServer(PresetsMixin, OutputsMixin, ReturnInputMixin, ControlMixin,
             with self._lock:
                 outputs = list(self._outputs.values())
 
-            ok = 0
-            last_err: Exception | None = None
+            # A card that will not open (busy, unplugged) must not keep the
+            # stations from talking to each other: it shows in error and the
+            # supervisor started below keeps retrying it.
             for out in outputs:
                 try:
                     with out.open_lock:
                         self._open_output_stream(out)
-                    ok += 1
                 except Exception as e:
-                    last_err = e
                     logger.warning("output {} failed to start: {}", int(out.output_id), e)
-
-            if ok == 0 and last_err is not None:
-                raise last_err
 
             try:
                 logger.info(

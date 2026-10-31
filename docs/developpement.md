@@ -28,7 +28,7 @@ Aucune carte son n'est nécessaire. Les tests GUI tournent hors écran. La suite
 - 100 générations réseau simulées sans fuite de workers ;
 - presets, migrations, identité, logs, bootstrap, états GUI.
 
-`tests/conftest.py` charge `bin/opus.dll` avant tout import, comme le font `run_server.py` et `run_client.py`.
+`tests/conftest.py` charge `bin/opus.dll` avant tout import, comme le fait `run_intercom.py`.
 
 ## Conventions
 
@@ -56,8 +56,7 @@ Contenu de chaque release :
 
 | Fichier | Rôle |
 |---|---|
-| `py-intercom-server.exe` | Serveur Régie, fichier unique |
-| `py-intercom-client.exe` | Client, fichier unique |
+| `py-intercom.exe` | Régie ou poste, choisi au lancement (`--role server` ou `--role client` pour un raccourci) |
 | `py-intercom-licenses.zip` | Licence, notices tierces, licence et manifeste Opus |
 | `SHA256SUMS.txt` | Empreintes de contrôle |
 

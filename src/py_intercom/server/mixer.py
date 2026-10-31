@@ -34,11 +34,12 @@ from ..common.routing import (
     RoutedSource,
     RoutingConfig,
     RoutingError,
+    RoutingResult,
     build_destination_mix,
     heard_voice_dbfs,
     route_sources,
 )
-from .models import ClientState, _RoutingEnvelope
+from .models import ClientState
 
 # Windows reports these per datagram: the socket itself is still healthy.
 # A client meter with no frame this tick falls at the same rate as the
@@ -205,7 +206,6 @@ class MixerMixin:
                         for client_id, st in self._clients.items()
                     ]
                     outputs = list(self._outputs.values())
-                    routing_epoch = int(self._routing_epoch)
 
                 routed_sources: list[RoutedSource] = []
                 vu_updates: dict[int, float | None] = {}
@@ -216,9 +216,6 @@ class MixerMixin:
                     vu_updates[source.client_id] = vu
 
                 with self._lock:
-                    if int(self._routing_epoch) != int(routing_epoch):
-                        self._stale_mix_epochs_dropped += 1
-                        continue
                     for cid, vu in vu_updates.items():
                         st2 = self._clients.get(int(cid))
                         if st2 is None:
@@ -234,20 +231,12 @@ class MixerMixin:
                 regie_vu_dbfs = rms_dbfs(build_destination_mix(routing_result.regie_linear, None, listen_regie=True))
 
                 with self._lock:
-                    if int(self._routing_epoch) != int(routing_epoch):
-                        self._stale_mix_epochs_dropped += 1
-                        continue
                     self._regie_vu_dbfs = float(regie_vu_dbfs)
                     # Bus level after its fader, whether or not an output plays
                     # it. Updated in place: the mixer allocates nothing here.
                     for bus_id, bus_frame in routing_result.bus_frames.items():
                         self._bus_vu_dbfs[bus_id] = rms_dbfs(bus_frame)
-                    self._enqueue_latest_mix(
-                        _RoutingEnvelope(
-                            routing_epoch=int(routing_epoch),
-                            result=routing_result,
-                        )
-                    )
+                    self._enqueue_latest_mix(routing_result)
 
                     # Physical outputs get the linear bus sum (the ring copies
                     # it). Each output callback applies its own gain, then the
@@ -310,6 +299,10 @@ class MixerMixin:
             return True
 
     def _active_broadcast_destinations(self, *, now: float | None = None) -> list[tuple]:
+        return self._broadcast_snapshot(now=now)[0]
+
+    def _broadcast_snapshot(self, *, now: float | None = None) -> tuple[list[tuple], int]:
+        """Live destinations, and the routing epoch they are valid for."""
         current = time.monotonic() if now is None else float(now)
         with self._lock:
             destinations = []
@@ -336,7 +329,7 @@ class MixerMixin:
                         st.ducker if st.duck_return else None,
                     )
                 )
-            return destinations
+            return destinations, int(self._routing_epoch)
 
     def _log_bad_packet(self, addr, error: object) -> None:
         # A misconfigured device or a stray stream on the audio port can send
@@ -422,24 +415,15 @@ class MixerMixin:
             except queue.Empty:
                 continue
 
-            if not isinstance(item, _RoutingEnvelope):
+            if not isinstance(item, RoutingResult):
                 continue
-            routing_epoch = int(item.routing_epoch)
-            with self._lock:
-                if routing_epoch != int(self._routing_epoch):
-                    self._stale_mix_epochs_dropped += 1
-                    continue
-            raw_mix = item.result.regie_linear
-            contrib = item.result.regie_contribution_by_client
+            raw_mix = item.regie_linear
+            contrib = item.regie_contribution_by_client
 
             ts_ms = int(time.time() * 1000) & 0xFFFFFFFF
             self._seq_out = (self._seq_out + 1) & 0xFFFFFFFF
 
-            dests = self._active_broadcast_destinations()
-            with self._lock:
-                if routing_epoch != int(self._routing_epoch):
-                    self._stale_mix_epochs_dropped += 1
-                    continue
+            dests, routing_epoch = self._broadcast_snapshot()
 
             # The Return ring only ever holds limited, finite frames.
             return_frame = _zero_frame

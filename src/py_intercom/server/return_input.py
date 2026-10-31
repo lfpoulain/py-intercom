@@ -77,7 +77,7 @@ class ReturnInputMixin:
         try:
             with self._lock:
                 if self._return_input_device != old_device:
-                    raise RuntimeError("return input changed while opening replacement device")
+                    raise RuntimeError("l'entrée Programme a changé pendant l'ouverture du nouveau périphérique")
                 wants_live_stream = (
                     self._running and not self._stop.is_set() and self._return_enabled and dev_val is not None
                 )
@@ -238,7 +238,7 @@ class ReturnInputMixin:
                 # The selection may have moved on while the stream was opening;
                 # committing it anyway would play the wrong device for good.
                 if self._return_input_device != int(device):
-                    raise RuntimeError("return input device changed while opening")
+                    raise RuntimeError("le périphérique de l'entrée Programme a changé pendant l'ouverture")
                 replaced_stream = self._commit_return_input_stream(stream, gate)
         except Exception as exc:
             if gate is not None:

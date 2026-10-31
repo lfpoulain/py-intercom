@@ -191,3 +191,22 @@ def test_start_names_the_return_card_the_engine_could_not_find(window, monkeypat
     assert combo.currentIndex() == -1
     assert combo.placeholderText() == "absent : Programme"
     assert window._return_strip.caption_label.text() == "absent : Programme"
+
+
+def test_local_station_button_opens_one_station_at_a_time(window, monkeypatch) -> None:
+    import py_intercom.server.gui as server_gui
+
+    class _Running:
+        def poll(self):
+            return None
+
+    opened: list[_Running] = []
+    notices: list[str] = []
+    monkeypatch.setattr(server_gui, "open_local_client", lambda: opened.append(_Running()) or opened[-1])
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda _parent, _title, text: notices.append(text))
+
+    window._local_station_btn.click()
+    window._local_station_btn.click()
+
+    assert len(opened) == 1
+    assert notices == ["Un poste est déjà ouvert sur ce PC depuis la Régie."]

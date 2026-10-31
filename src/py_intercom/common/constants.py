@@ -53,6 +53,14 @@ PCM_RING_TRIM_ABOVE_FRAMES = 1
 # Client playout runs on the headphones' clock: each output callback asks the
 # decoder for the next frame, which is queued this many frames ahead.
 PLAYOUT_LEAD_FRAMES = 1
+# Some host APIs (DirectSound, MME) call the output callback several times in
+# a row: with one frame queued, every call after the first plays silence. Two
+# callbacks closer than PLAYOUT_BURST_GAP_MS are such a burst; once seen
+# PLAYOUT_BURSTS_BEFORE_LEAD times on a stream (one late WASAPI callback is not
+# enough), the lead grows to the longest burst + 1, up to PLAYOUT_MAX_LEAD_FRAMES.
+PLAYOUT_BURST_GAP_MS = 3.0
+PLAYOUT_BURSTS_BEFORE_LEAD = 3
+PLAYOUT_MAX_LEAD_FRAMES = 4
 # The jitter buffer is read this long before the card needs the frame, not
 # right after its callback: a frame arriving meanwhile (start of a talk spurt)
 # is then played one period sooner. It leaves the decoder 4 ms to wake up and

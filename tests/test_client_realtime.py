@@ -1993,3 +1993,41 @@ def test_control_round_trip_is_timed_from_ping_to_pong(client_factory, monkeypat
     client._control_handle_msg({"type": "pong", "return_vu_dbfs": -60.0})
     # Smoothed: one slow round trip moves the readout only part of the way.
     assert client._ctrl_rtt_ms == pytest.approx(4.0 + 0.2 * (10.0 - 4.0))
+
+
+def _play_at(client, monkeypatch, moments):
+    client._stop.clear()
+    client._udp_ready.set()
+    output = np.zeros((FRAME_SAMPLES, 1), dtype=np.float32)
+    for moment in moments:
+        monkeypatch.setattr(audio_io_mod.time, "monotonic", lambda moment=moment: moment)
+        client._out_callback(output, int(FRAME_SAMPLES), None, None)
+
+
+def test_regular_card_keeps_one_frame_of_lead(client_factory, monkeypatch):
+    client = client_factory(server_port=1)
+    client._udp_ready.set()
+
+    # One late WASAPI callback followed by an early one is a single burst.
+    _play_at(client, monkeypatch, [1.000, 1.010, 1.025, 1.026, 1.040, 1.050])
+
+    assert client._playout_lead == 1
+
+
+def test_card_calling_back_in_bursts_gets_more_lead(client_factory, monkeypatch):
+    client = client_factory(server_port=1)
+    client._udp_ready.set()
+
+    # DirectSound-like: two callbacks back to back every 20 ms.
+    _play_at(client, monkeypatch, [1.000, 1.0001, 1.020, 1.0201, 1.040, 1.0401])
+
+    assert client._playout_lead == 2
+    assert client.get_stats_snapshot()["playout_lead_frames"] == 2
+
+
+def test_kick_from_an_older_server_is_shown_in_french(client_factory):
+    client = client_factory(server_port=1)
+
+    client._control_handle_msg({"type": "kick", "message": "Tu as été kick"})
+
+    assert client.get_stats_snapshot()["kick_message"] == "La Régie a retiré ce poste de la session."

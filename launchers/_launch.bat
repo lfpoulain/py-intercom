@@ -76,7 +76,7 @@ exit /b 1
 :launch
 if /I "%MODE%"=="debug" goto :launch_debug
 if not exist "%PYW%" set "PYW=%PY%"
-start "py-intercom %COMPONENT%" /D "%ROOT%" "%PYW%" "%ROOT%\run_%COMPONENT%.py"
+start "py-intercom %COMPONENT%" /D "%ROOT%" "%PYW%" "%ROOT%\run_intercom.py" --role %COMPONENT%
 if errorlevel 1 (
     echo Echec du lancement de py-intercom %COMPONENT%.
     pause
@@ -86,7 +86,7 @@ exit /b 0
 
 :launch_debug
 pushd "%ROOT%"
-"%PY%" "%ROOT%\run_%COMPONENT%.py" --debug
+"%PY%" "%ROOT%\run_intercom.py" --role %COMPONENT% --debug
 set "APP_EXIT=%ERRORLEVEL%"
 popd
 if not "%APP_EXIT%"=="0" echo py-intercom %COMPONENT% s'est termine avec le code %APP_EXIT%.

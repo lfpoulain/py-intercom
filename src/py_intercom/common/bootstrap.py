@@ -59,15 +59,8 @@ def _opus_candidates(root: Path, meipass: Path | None) -> tuple[Path, ...]:
 def _prepend_to_path(directories: tuple[Path, ...], environ: MutableMapping[str, str]) -> None:
     current = [entry for entry in environ.get("PATH", "").split(os.pathsep) if entry]
     requested = [os.fspath(path) for path in directories]
-    requested_keys = {
-        os.path.normcase(os.path.abspath(entry))
-        for entry in requested
-    }
-    retained = [
-        entry
-        for entry in current
-        if os.path.normcase(os.path.abspath(entry)) not in requested_keys
-    ]
+    requested_keys = {os.path.normcase(os.path.abspath(entry)) for entry in requested}
+    retained = [entry for entry in current if os.path.normcase(os.path.abspath(entry)) not in requested_keys]
     environ["PATH"] = os.pathsep.join((*requested, *retained))
 
 
@@ -89,9 +82,7 @@ def prepare_windows_runtime(
     root_path = Path(root).resolve()
     raw_meipass = meipass if meipass is not None else getattr(sys, "_MEIPASS", None)
     meipass_path = Path(raw_meipass).resolve() if raw_meipass else None
-    existing_directories = tuple(
-        path for path in _dll_directories(root_path, meipass_path) if path.is_dir()
-    )
+    existing_directories = tuple(path for path in _dll_directories(root_path, meipass_path) if path.is_dir())
 
     add_dll_directory = getattr(os, "add_dll_directory", None)
     if add_dll_directory is not None:
@@ -131,9 +122,9 @@ def write_crash_report(
 ) -> Path | None:
     """Append a traceback to the component crash report, without masking it."""
 
-    safe_component = "".join(
-        character for character in str(component) if character.isalnum() or character in "-_"
-    ) or "app"
+    safe_component = (
+        "".join(character for character in str(component) if character.isalnum() or character in "-_") or "app"
+    )
     try:
         target_directory = Path(directory) if directory is not None else _crash_directory()
         crash_path = target_directory / f"{safe_component}_crash.txt"
@@ -166,7 +157,7 @@ def _show_crash_message(component: str, crash_path: Path) -> None:
 def run_application(
     entrypoint: Callable[[], int | None],
     *,
-    component: str,
+    component: str | Callable[[], str],
     frozen: bool | None = None,
     crash_directory: str | os.PathLike[str] | None = None,
 ) -> NoReturn:
@@ -177,6 +168,8 @@ def run_application(
     except SystemExit:
         raise
     except Exception:
+        # Resolved only now: the single executable learns its role at launch.
+        component = component() if callable(component) else component
         crash_path = write_crash_report(
             component,
             traceback.format_exc(),

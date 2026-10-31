@@ -18,6 +18,8 @@ from ..common.constants import (
 )
 from ..common.control_protocol import (
     CONTROL_PROTOCOL_VERSION,
+    KICK_MESSAGE,
+    LEGACY_KICK_MESSAGE,
     ControlProtocolError,
     JsonLineBuffer,
     encode_control_message,
@@ -112,7 +114,9 @@ class ControlMixin:
             logger.warning("control error from server: {}", reason)
             return
         if mtype == "kick":
-            kick_message = str(msg.get("message") or "Tu as été kick")[:_MAX_SERVER_MESSAGE_CHARS]
+            kick_message = str(msg.get("message") or "")[:_MAX_SERVER_MESSAGE_CHARS]
+            if not kick_message or kick_message == LEGACY_KICK_MESSAGE:
+                kick_message = KICK_MESSAGE
             logger.warning("session closed by the server (kick): {}", kick_message)
             with self._state_lock:
                 self._kicked = True

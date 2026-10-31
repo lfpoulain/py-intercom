@@ -583,7 +583,8 @@ def test_udp_gap_cuts_transmission_but_keeps_the_hook_and_toggles(client_window)
     assert hotkeys.stop_calls == 0 and window._global_ptt is hotkeys
     assert window._ptt_bus_toggle_state[PLATEAU_BUS_ID] is True
     assert window._ptt_pads[PLATEAU_BUS_ID].accessibleDescription().startswith("SUSPENDU")
-    assert window._ptt_pads[VMIX_BUS_ID].accessibleDescription().startswith("HORS LIGNE")
+    # Still connected: an unarmed pad is suspended too, never "offline".
+    assert window._ptt_pads[VMIX_BUS_ID].accessibleDescription().startswith("SUSPENDU")
     assert window._release_all_btn.isEnabled()
     client.sent.clear()
 

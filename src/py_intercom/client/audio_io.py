@@ -22,6 +22,10 @@ from ..common.buses import FIXED_BUS_IDS
 from ..common.constants import (
     CHANNELS,
     FRAME_SAMPLES,
+    PLAYOUT_BURST_GAP_MS,
+    PLAYOUT_BURSTS_BEFORE_LEAD,
+    PLAYOUT_LEAD_FRAMES,
+    PLAYOUT_MAX_LEAD_FRAMES,
     SAMPLE_RATE,
 )
 
@@ -29,6 +33,7 @@ from ..common.constants import (
 # The stream then reads inactive: the operator status turns degraded and cuts
 # PTT, and the next connection rebuilds the streams. Shorter bursts are ridden out.
 _CALLBACK_ABORT_AFTER_ERRORS = 50
+_PLAYOUT_BURST_GAP_S = PLAYOUT_BURST_GAP_MS / 1000.0
 
 
 class AudioIOMixin:
@@ -147,6 +152,11 @@ class AudioIOMixin:
         # New streams do not inherit the error streaks of the ones they replace.
         self._input_callback_error_streak = 0
         self._output_callback_error_streak = 0
+        # A new output stream may be on another host API: learn its cadence again.
+        self._playout_lead = int(PLAYOUT_LEAD_FRAMES)
+        self._playout_burst_run = 0
+        self._playout_burst_max_run = 0
+        self._playout_bursts = 0
         # Opening the microphone first is significant for Bluetooth headsets:
         # Windows establishes the bidirectional HFP profile when capture
         # starts. Playback is opened only after that transition, so it cannot
@@ -272,22 +282,43 @@ class AudioIOMixin:
                 return
             self._tx_ring.push(self._capture_work, metadata=metadata)
 
+    def _note_playout_burst(self) -> None:
+        """A callback right after the previous one: queue more frames ahead.
+
+        Runs in the output callback: integer updates only. The lead never
+        shrinks on a stream, so it cannot oscillate; WASAPI, which calls back
+        every 10 ms, stays at PLAYOUT_LEAD_FRAMES.
+        """
+        self._playout_burst_run += 1
+        if self._playout_burst_run == 1:
+            self._playout_bursts += 1
+        self._playout_burst_max_run = max(self._playout_burst_max_run, self._playout_burst_run)
+        if self._playout_bursts >= PLAYOUT_BURSTS_BEFORE_LEAD:
+            self._playout_lead = max(self._playout_lead, min(self._playout_burst_max_run + 1, PLAYOUT_MAX_LEAD_FRAMES))
+
     def _play_frame(self, outdata, frames, status) -> None:
         if status:
             self._output_callback_statuses += 1
 
         if self._stop.is_set() or not self._udp_ready.is_set():
             outdata.fill(0.0)
+            self._out_vu_dbfs = -60.0
             return
 
         if int(frames) != int(FRAME_SAMPLES):
             self._output_frame_mismatches += 1
             outdata.fill(0.0)
+            self._out_vu_dbfs = -60.0
             return
 
         played = self._playout_ring.pop_into(self._output_work) is not None
+        now = time.monotonic()
+        if now - self._playout_tick_at < _PLAYOUT_BURST_GAP_S:
+            self._note_playout_burst()
+        else:
+            self._playout_burst_run = 0
         # The card took its frame (or found none): ask for the next one.
-        self._playout_tick_at = time.monotonic()
+        self._playout_tick_at = now
         self._playout_tick.set()
         if not played:
             outdata.fill(0.0)

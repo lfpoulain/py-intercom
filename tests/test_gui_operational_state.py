@@ -121,7 +121,7 @@ def test_client_stale_udp_is_degraded_and_ptt_must_remain_disarmed() -> None:
     )
 
     assert status.state is ClientOperationalState.DEGRADED
-    assert "PTT désarmé" in status.detail
+    assert "PTT suspendu" in status.detail
 
 
 def test_client_control_loss_after_online_is_reconnecting() -> None:
@@ -373,7 +373,7 @@ def test_silent_idle_client_with_old_udp_is_healthy() -> None:
     assert derive_client_transport_state(clients[42]) is ClientTransportState.IDLE
     assert health.udp.state is ServerHealthState.HEALTHY
     assert health.overall.state is ServerHealthState.HEALTHY
-    assert "silencieux au repos" in health.udp.detail
+    assert "ne parle pas n'envoie rien" in health.udp.detail
 
 
 def test_client_speaking_without_recent_udp_is_degraded() -> None:

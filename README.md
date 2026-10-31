@@ -14,11 +14,9 @@ Push-to-talk, mix-minus et retours plateau en temps réel, avec de simples PC Wi
 
 <br>
 
-[![Télécharger le serveur](https://img.shields.io/badge/T%C3%A9l%C3%A9charger-Serveur%20R%C3%A9gie-d7261e?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/lfpoulain/py-intercom/releases/latest/download/py-intercom-server.exe)
-&nbsp;
-[![Télécharger le client](https://img.shields.io/badge/T%C3%A9l%C3%A9charger-Client-0b2c45?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/lfpoulain/py-intercom/releases/latest/download/py-intercom-client.exe)
+[![Télécharger py-intercom](https://img.shields.io/badge/T%C3%A9l%C3%A9charger-py--intercom.exe-d7261e?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/lfpoulain/py-intercom/releases/latest/download/py-intercom.exe)
 
-<sub>Aucune installation : un fichier, un double-clic.</sub>
+<sub>Aucune installation : un seul fichier pour la Régie et les postes, un double-clic.</sub>
 
 <br>
 
@@ -94,7 +92,7 @@ Le bouton **Tester micro et casque…** vérifie en 15 secondes le réseau, les 
 </td>
 <td width="50%" valign="top">
 
-<img src="docs/images/preflight.png" alt="Préflight du client">
+<img src="docs/images/preflight.png" alt="Test micro et casque du poste">
 
 </td>
 </tr>
@@ -128,9 +126,11 @@ Une machine fait tourner le **serveur**, chaque opérateur lance un **client**. 
 
 ## 🚀 Démarrer en 3 étapes
 
-1. **Sur la machine Régie** : lancer `py-intercom-server.exe`, ajouter les sorties physiques, cliquer sur **Démarrer**.
-2. **Sur chaque poste** : lancer `py-intercom-client.exe`, choisir le serveur, le micro et le casque, cliquer sur **Connecter**.
+1. **Sur la machine Régie** : lancer `py-intercom.exe`, choisir **Régie**, ajouter les sorties physiques, cliquer sur **Démarrer**.
+2. **Sur chaque poste** : lancer `py-intercom.exe`, choisir **Poste**, puis le serveur, le micro et le casque, et cliquer sur **Connecter**.
 3. **Attendre « En ligne »**, régler les touches PTT, puis faire un tour de micro.
+
+Le choix du rôle peut être retenu sur chaque PC ; maintenir **Maj** au lancement pour le revoir. Si l'opérateur Régie parle aussi, le bouton **🎧 Poste sur ce PC** de la Régie ouvre un poste déjà réglé sur ce serveur. Pour un raccourci dédié : `py-intercom.exe --role server` ou `--role client`.
 
 Ports utilisés : UDP 5000 (audio), TCP 5001 (contrôle), UDP 5002 (découverte). Le [guide d'exploitation](docs/guide-exploitation.md) couvre les gains, les casques Bluetooth et le dépannage.
 
@@ -151,7 +151,7 @@ Avec Python 3.11+ sous Windows, double-cliquer sur un lanceur de [`launchers/`](
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
-.\.venv\Scripts\python run_server.py   # ou run_client.py
+.\.venv\Scripts\python run_intercom.py --role server   # ou --role client, ou sans option pour choisir
 ```
 
 Chaque push sur `main` est testé, construit et publié automatiquement en nouvelle version : voir [Développement](docs/developpement.md).

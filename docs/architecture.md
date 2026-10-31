@@ -27,6 +27,7 @@ Ordre de priorité du produit :
 
 ```text
 src/py_intercom/
+├── launcher.py              choix du rôle (Régie ou poste), lancement d'un poste local
 ├── common/                  briques partagées, sans état global
 │   ├── audio.py             gains, RMS, limiteur
 │   ├── audio_errors.py      messages d'erreur PortAudio lisibles
@@ -47,6 +48,7 @@ src/py_intercom/
 │   ├── persistence.py       writer JSON unique avec debounce
 │   ├── preset_schema.py     schéma 2 et migrations
 │   ├── realtime.py          priorité Windows (ABOVE_NORMAL, MMCSS), options de sockets
+│   ├── role_dialog.py       fenêtre « Que fait ce PC ? » du premier lancement
 │   ├── routing.py           routeur pur et mix-minus
 │   ├── theme.py             thème Qt : couleurs, style, interrupteurs
 │   ├── console.py           widgets console : vu-mètres LED, faders, pads, tranches
@@ -77,7 +79,7 @@ src/py_intercom/
 
 `IntercomServer` et `IntercomClient` sont composés de *mixins*, un par responsabilité : chaque fichier se lit seul, et l'état partagé (verrous, compteurs, sessions) reste déclaré à un seul endroit, dans le `__init__` de la classe principale.
 
-`run_server.py` et `run_client.py` restent à la racine : ils rendent `bin/opus.dll` visible **avant** l'import d'`opuslib`.
+`run_intercom.py` reste à la racine : il rend `bin/opus.dll` visible **avant** l'import d'`opuslib`, puis passe la main à `launcher.py`. Ce dernier lit `--role server|client`, ou le rôle retenu sur ce PC, ou demande au lancement. Un seul exe porte donc les deux rôles, mais chacun tourne dans **son propre processus** : le bouton « Poste sur ce PC » de la Régie relance le même programme avec `--role client --server 127.0.0.1`. Serveur et client ne partagent ainsi ni interpréteur, ni GIL, ni plantage.
 
 ## Modèle d'exécution temps réel
 

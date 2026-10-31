@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import os
+import subprocess
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -31,7 +32,14 @@ from ..common.console import (
 from ..common.constants import AUDIO_UDP_PORT, MAX_GAIN_DB
 from ..common.devices import DeviceInfo, format_device_label, list_devices
 from ..common.diagnostics import CounterRates, format_rate
-from ..common.gui_utils import DEVICE_REFRESH_TIMEOUT_MS, DeviceRefresh, is_checked, run_window, set_app_icon
+from ..common.gui_utils import (
+    DEVICE_REFRESH_TIMEOUT_MS,
+    DeviceRefresh,
+    confirm,
+    is_checked,
+    run_window,
+    set_app_icon,
+)
 from ..common.identity import client_id_from_uuid
 from ..common.jsonio import JsonFileStatus, atomic_write_json, read_json_file_result
 from ..common.logging import best_effort
@@ -46,6 +54,7 @@ from ..common.theme import (
     repolish,
     set_status_label,
 )
+from ..launcher import open_local_client
 from .health import (
     ClientTransportState,
     derive_client_transport_state,
@@ -103,8 +112,8 @@ class ServerWindow(QtWidgets.QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(f"Py-Intercom Server {__version__}")
-        self.setMinimumSize(1040, 680)
+        self.setWindowTitle(f"Py-Intercom Régie {__version__}")
+        self.setMinimumSize(1080, 680)
         self.resize(1320, 820)
         set_app_icon(self, "py-intercom.server")
 
@@ -151,7 +160,9 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._server_name.setPlaceholderText("Nom annoncé aux postes")
         self._discovery_cb = QtWidgets.QCheckBox("Annoncer le serveur sur le réseau local")
         self._discovery_cb.setChecked(bool(self._settings.value("discovery_enabled", True, type=bool)))
-        self._discovery_cb.setToolTip("Broadcast LAN beacon so clients can auto-detect this server")
+        self._discovery_cb.setToolTip(
+            "Les postes du réseau local trouvent ce serveur tout seuls, sans saisir son adresse."
+        )
         self._autostart_cb = QtWidgets.QCheckBox("Démarrer le serveur au lancement")
         self._autostart_cb.setChecked(bool(self._settings.value("autostart", False, type=bool)))
         self._start_minimized_cb = QtWidgets.QCheckBox("Démarrer réduit")
@@ -196,6 +207,15 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._info_btn.setFixedSize(34, 34)
         self._info_btn.setToolTip("Informations techniques et remise à zéro")
         self._info_btn.clicked.connect(self._show_geek_info)
+
+        self._local_station: subprocess.Popen | None = None
+        self._local_station_btn = QtWidgets.QPushButton("🎧  Poste sur ce PC")
+        self._local_station_btn.setProperty("class", "secondary")
+        self._local_station_btn.setToolTip(
+            "Ouvre un poste (micro + casque) sur ce PC, déjà réglé pour joindre cette Régie.\n"
+            "Pratique quand l'opérateur Régie parle aussi. Le poste tourne dans sa propre fenêtre."
+        )
+        self._local_station_btn.clicked.connect(self._open_local_station)
 
         # -- Team: one strip per known client ---------------------------------
         self._client_row_ids: list[int] = []
@@ -404,6 +424,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._top_bar.right.addWidget(self._server_state_banner)
         self._top_bar.right.addWidget(self._start_btn)
         self._top_bar.right.addWidget(self._stop_btn)
+        self._top_bar.right.addWidget(self._local_station_btn)
         self._top_bar.right.addWidget(self._info_btn)
         self._server_name.textChanged.connect(self._refresh_identity_header)
         self._server_name.editingFinished.connect(self._on_server_name_edited)
@@ -566,6 +587,17 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._start_btn.setVisible(not running)
         self._stop_btn.setVisible(running)
 
+    def _open_local_station(self) -> None:
+        title = "Poste sur ce PC"
+        if self._local_station is not None and self._local_station.poll() is None:
+            QtWidgets.QMessageBox.information(self, title, "Un poste est déjà ouvert sur ce PC depuis la Régie.")
+            return
+        try:
+            self._local_station = open_local_client()
+        except OSError as exc:
+            logger.error("cannot open a local station: {}", exc)
+            QtWidgets.QMessageBox.warning(self, title, f"Impossible d'ouvrir le poste :\n{exc}")
+
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._device_refresh.close_must_wait():
             self._device_status.setText("Fermeture après la fin de l'inventaire audio…")
@@ -672,7 +704,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             "Preset serveur illisible",
             "Le preset serveur est corrompu ou inaccessible. Il ne sera pas écrasé "
             "automatiquement et le serveur ne démarrera pas avec une configuration "
-            "incertaine. Utilisez Reset config ou restaurez la sauvegarde.\n\n"
+            "incertaine. Utilisez « Réinitialiser la configuration » (bouton ⓘ) ou restaurez la sauvegarde.\n\n"
             f"Fichier : {path}\n"
             f"Sauvegarde ({backup_state}) : {backup}\n"
             f"État : {status.value}\n"
@@ -733,16 +765,13 @@ class ServerWindow(QtWidgets.QMainWindow):
 
     def _reset_total_config(self) -> None:
         if self._server is not None:
-            QtWidgets.QMessageBox.warning(self, "Running", "Stop the server first")
+            QtWidgets.QMessageBox.warning(self, "Serveur en marche", "Arrêtez d'abord le serveur.")
             return
 
-        if (
-            QtWidgets.QMessageBox.question(
-                self,
-                "Reset config",
-                "Delete server preset file and reset server configuration?",
-            )
-            != QtWidgets.QMessageBox.StandardButton.Yes
+        if not self._confirm(
+            "Réinitialiser la configuration",
+            "Supprimer le preset serveur (sorties, postes connus, gains) et repartir de zéro ?\n"
+            "La sauvegarde .bak est conservée.",
         ):
             return
 
@@ -1041,7 +1070,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         try:
             self._server.create_output(int(dev), int(bus_id))
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Output", str(e))
+            QtWidgets.QMessageBox.warning(self, "Sortie son", str(e))
 
     def _on_remove_output(self, output_id: int) -> None:
         if self._server is None:
@@ -1063,15 +1092,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._server.remove_output(int(output_id))
 
     def _confirm(self, title: str, text: str) -> bool:
-        """Ask before an action that cuts live audio; No is the default."""
-        answer = QtWidgets.QMessageBox.question(
-            self,
-            title,
-            text,
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-            QtWidgets.QMessageBox.StandardButton.No,
-        )
-        return answer == QtWidgets.QMessageBox.StandardButton.Yes
+        return confirm(self, title, text)
 
     def _on_output_device_changed(self, output_id: int) -> None:
         if self._server is None:
@@ -1156,7 +1177,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._return_input_device.blockSignals(True)
         try:
             self._return_input_device.clear()
-            self._return_input_device.addItem("(none)", None)
+            self._return_input_device.addItem("(aucune)", None)
             for d in devs:
                 if d.supports_input:
                     self._return_input_device.addItem(format_device_label(d), d.index)
@@ -1371,14 +1392,14 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._abort_start()
             QtWidgets.QMessageBox.critical(
                 self,
-                "Start failed",
+                "Échec du démarrage",
                 f"Impossible d'ouvrir le port UDP {int(AUDIO_UDP_PORT)}. "
                 f"Un autre serveur py-intercom est peut-être déjà lancé.\n\nDétail: {e}",
             )
             return
         except Exception as e:
             self._abort_start()
-            QtWidgets.QMessageBox.critical(self, "Start failed", str(e))
+            QtWidgets.QMessageBox.critical(self, "Échec du démarrage", str(e))
             return
 
         try:
@@ -1413,7 +1434,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             return
         except Exception as e:
             self._abort_start()
-            QtWidgets.QMessageBox.critical(self, "Preset", f"Preset load failed: {e}")
+            QtWidgets.QMessageBox.critical(self, "Preset illisible", f"Impossible de charger le preset : {e}")
             return
 
         try:
@@ -1421,7 +1442,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         except Exception as e:
             logger.exception("server start failed")
             self._abort_start()
-            QtWidgets.QMessageBox.critical(self, "Start failed", str(e))
+            QtWidgets.QMessageBox.critical(self, "Échec du démarrage", str(e))
             return
 
         self._start_btn.setEnabled(False)
@@ -1614,9 +1635,9 @@ class ServerWindow(QtWidgets.QMainWindow):
         lines.extend(["", f"Server preset: {server_preset}", f"Preset exists: {exists}"])
 
         box = QtWidgets.QMessageBox(self)
-        box.setWindowTitle("Info")
+        box.setWindowTitle("Informations techniques")
         box.setText("\n".join(lines))
-        reset_btn = box.addButton("Reset config", QtWidgets.QMessageBox.ActionRole)
+        reset_btn = box.addButton("Réinitialiser la configuration", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
         box.addButton(QtWidgets.QMessageBox.StandardButton.Close)
         box.exec()
         if box.clickedButton() is reset_btn:

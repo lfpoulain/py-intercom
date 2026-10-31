@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 import uuid
 from collections.abc import Mapping
@@ -30,7 +31,15 @@ from ..common.constants import AUDIO_UDP_PORT, CHANNELS, CONTROL_PORT_OFFSET, FR
 from ..common.devices import format_device_label, resolve_device
 from ..common.diagnostics import CounterRates, format_ms, format_rate
 from ..common.discovery import DiscoveryListener
-from ..common.gui_utils import DEVICE_REFRESH_TIMEOUT_MS, DeviceRefresh, is_checked, run_window, set_app_icon
+from ..common.gui_utils import (
+    DEVICE_REFRESH_TIMEOUT_MS,
+    DeviceRefresh,
+    confirm,
+    install_french_translations,
+    is_checked,
+    run_window,
+    set_app_icon,
+)
 from ..common.identity import client_id_from_uuid
 from ..common.jsonio import JsonFileStatus, atomic_write_json, read_json_file_result
 from ..common.logging import best_effort
@@ -43,6 +52,7 @@ from ..common.preset_schema import (
 )
 from ..common.theme import (
     TOKENS,
+    apply_theme,
     make_field,
     patch_combo,
     repolish,
@@ -65,6 +75,8 @@ CLIENT_VU_REFRESH_INTERVAL_MS = 67
 _MODE_BADGES = {"ptt": "PTT", "toggle": "BASCULE", "always_on": "PERMANENT"}
 # Wide enough for a two-line toggle such as "Baisser quand on me parle".
 _MONITOR_STRIP_WIDTH = 124
+# A loss keeps its verdict on the diagnostics line this long, in seconds.
+_DIAG_HOLD_S = 3.0
 # Shortcuts are stored in Qt's portable syntax, the one the hotkey engine
 # parses; the native (localized) one is only for display.
 _PORTABLE = QtGui.QKeySequence.SequenceFormat.PortableText
@@ -124,9 +136,9 @@ class _ShortcutKeySequenceEdit(QtWidgets.QKeySequenceEdit):
 
 
 class ClientWindow(QtWidgets.QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, server_host: str = "") -> None:
         super().__init__()
-        self.setWindowTitle(f"Py-Intercom Client {__version__}")
+        self.setWindowTitle(f"Py-Intercom Poste {__version__}")
         self.setMinimumSize(940, 560)
         self.resize(1140, 640)
         set_app_icon(self, "py-intercom.client")
@@ -182,7 +194,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
         self._discovered_servers.setMinimumContentsLength(20)
-        self._discovered_servers.addItem("(manual)", None)
+        self._discovered_servers.addItem("(saisie manuelle)", None)
         self._discovered_servers.currentIndexChanged.connect(self._on_discovered_server_selected)
 
         self._discovery_listener: DiscoveryListener | None = None
@@ -192,7 +204,8 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._discovery_signal.timeout.connect(self._poll_discovery_updates)
         self._start_discovery_listener()
 
-        self._server_ip = QtWidgets.QLineEdit(str(self._preset_get("server_ip", "")))
+        # A Poste opened from the Régie window is told where its server is.
+        self._server_ip = QtWidgets.QLineEdit(server_host or str(self._preset_get("server_ip", "")))
         self._server_ip.setPlaceholderText("ex. 192.168.1.20")
 
         client_uuid = str(self._preset_get("client_uuid", ""))
@@ -399,8 +412,10 @@ class ClientWindow(QtWidgets.QMainWindow):
             "Aller-retour : temps pour joindre le serveur et revenir.\n"
             "Audio en attente : marge gardée dans ce poste contre les à-coups du réseau.\n"
             "Carte son : retard ajouté par le micro et le casque (pilote Windows).\n"
-            "Paquets perdus : réparés à partir du paquet suivant (inaudible) ou comblés (audible)."
+            "Paquets perdus : réparés à partir du paquet suivant (inaudible) ; sinon comblés ou sautés (audible)."
         )
+        # Two lines reserved: the losses suffix must not resize the pads.
+        self._diag_label.setMinimumHeight(2 * self._diag_label.fontMetrics().lineSpacing() + 4)
         talk.body.addWidget(self._diag_label)
         talk.body.addStretch(0)
 
@@ -565,6 +580,8 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._ptt_start_failed: bool = False
         self._recovery = OnlineRecoveryHysteresis()
         self._diag_rates = CounterRates()
+        self._diag_loss_until = 0.0
+        self._diag_alert_until = 0.0
 
         self._global_ptt: GlobalPttHotkeys | None = None
 
@@ -624,8 +641,10 @@ class ClientWindow(QtWidgets.QMainWindow):
                 ClientOperationalState.DEGRADED,
                 "Dégradé",
                 "Raccourcis PTT indisponibles. Reconnectez le client après correction.",
+                needs_reconnect=True,
             )
         previous = self._operational_status.state
+        previous_needs_reconnect = self._operational_status.needs_reconnect
         going_online = status.state is ClientOperationalState.ONLINE and previous is not ClientOperationalState.ONLINE
         if going_online:
             # The shortcuts are armed only once the handshake and the audio
@@ -641,6 +660,7 @@ class ClientWindow(QtWidgets.QMainWindow):
                     ClientOperationalState.DEGRADED,
                     "Dégradé",
                     f"Raccourcis PTT indisponibles : {exc}",
+                    needs_reconnect=True,
                 )
                 self._disarm_ptt_for_safety()
         self._operational_status = status
@@ -680,7 +700,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         ):
             self._disarm_ptt_for_safety()
 
-        if previous is not status.state:
+        if previous is not status.state or previous_needs_reconnect != status.needs_reconnect:
             self._refresh_state_labels()
 
     def _ptt_bus_active(self, bus_id: int) -> bool:
@@ -723,8 +743,16 @@ class ClientWindow(QtWidgets.QMainWindow):
         state = self._operational_status.state
         pad.setEnabled(state is ClientOperationalState.ONLINE)
         name = BUS_BY_ID[int(bus_id)].name if int(bus_id) in BUS_BY_ID else str(bus_id)
-        if state is ClientOperationalState.DEGRADED and self._ptt_bus_armed(int(bus_id)):
-            pad.set_state("disarmed", "SUSPENDU", "Liaison dégradée : reprend toute seule au retour")
+        if state is ClientOperationalState.DEGRADED:
+            if self._operational_status.needs_reconnect:
+                hint = "Micro, casque ou raccourcis perdus : Déconnecter puis Connecter"
+            elif self._ptt_bus_armed(int(bus_id)):
+                hint = "Liaison dégradée : reprend toute seule au retour"
+            else:
+                hint = "Liaison dégradée : parole coupée pour l'instant"
+            pad.set_state("disarmed", "SUSPENDU", hint)
+        elif state in (ClientOperationalState.CONNECTING, ClientOperationalState.RECONNECTING):
+            pad.set_state("disarmed", "CONNEXION…", "Patiente, la liaison s'établit toute seule")
         elif state is not ClientOperationalState.ONLINE:
             pad.set_state("disarmed", "HORS LIGNE", "Connecte-toi pour pouvoir parler")
         elif self._ptt_bus_active(int(bus_id)):
@@ -747,15 +775,22 @@ class ClientWindow(QtWidgets.QMainWindow):
         if state is ClientOperationalState.ONLINE:
             self._talk_hint.setText(
                 "PTT : tu parles tant que tu maintiens · BASCULE : un clic ouvre, un autre ferme · "
-                "PERMANENT : toujours ouvert. La touche en haut à droite marche même fenêtre réduite."
+                "PERMANENT : toujours ouvert. Le raccourci affiché sur chaque pad marche même fenêtre réduite."
+            )
+        elif state is ClientOperationalState.DEGRADED and self._operational_status.needs_reconnect:
+            self._talk_hint.setText(
+                "Le micro, le casque ou les raccourcis ne répondent plus : ta voix ne part plus."
+                " Clique sur Déconnecter puis Connecter (en haut à droite)."
             )
         elif state is ClientOperationalState.DEGRADED:
             self._talk_hint.setText(
                 "Liaison dégradée : ta voix ne part plus. Ce qui était ouvert reprend tout seul au retour,"
                 " sauf si tu le relâches."
             )
+        elif state in (ClientOperationalState.CONNECTING, ClientOperationalState.RECONNECTING):
+            self._talk_hint.setText("Connexion au serveur en cours : les pads s'activent tout seuls.")
         else:
-            self._talk_hint.setText("Connecte-toi (bouton en haut à droite) pour activer les pads.")
+            self._talk_hint.setText("Connecte-toi (bouton Connecter en haut à droite) pour activer les pads.")
         # Releasing stays possible as long as something may still be armed.
         self._release_all_btn.setEnabled(state in (ClientOperationalState.ONLINE, ClientOperationalState.DEGRADED))
 
@@ -874,7 +909,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             mode_cb = require_focus_for_wheel(QtWidgets.QComboBox())
             patch_combo(mode_cb)
             mode_cb.addItem("PTT — maintenir pour parler", "ptt")
-            mode_cb.addItem("Toujours actif", "always_on")
+            mode_cb.addItem("Permanent — micro toujours ouvert", "always_on")
             mode_cb.addItem("Bascule — un appui active, un autre coupe", "toggle")
             mode_cb.setAccessibleName(f"Mode PTT {bus_name}")
             mode_cb.setToolTip(f"Choisir le mode de transmission vers {bus_name}")
@@ -946,7 +981,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._discovered_servers.blockSignals(True)
         try:
             self._discovered_servers.clear()
-            self._discovered_servers.addItem("(manual)", None)
+            self._discovered_servers.addItem("(saisie manuelle)", None)
             for key in sorted(servers.keys()):
                 srv = servers[key]
                 label = f"{srv.server_name}  ({srv.ip}:{srv.audio_port})"
@@ -970,16 +1005,14 @@ class ClientWindow(QtWidgets.QMainWindow):
 
     def _reset_total_config(self) -> None:
         if self._connected:
-            QtWidgets.QMessageBox.warning(self, "Connected", "Disconnect first to reset config")
+            QtWidgets.QMessageBox.warning(self, "Poste connecté", "Déconnectez-vous d'abord.")
             return
 
-        if (
-            QtWidgets.QMessageBox.question(
-                self,
-                "Reset config",
-                "Delete client preset file and reset client configuration?",
-            )
-            != QtWidgets.QMessageBox.StandardButton.Yes
+        if not confirm(
+            self,
+            "Réinitialiser les réglages",
+            "Supprimer les réglages de ce poste (serveur, périphériques, raccourcis, gains) et repartir de zéro ?\n"
+            "La sauvegarde .bak est conservée.",
         ):
             return
 
@@ -1060,7 +1093,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._output_device.blockSignals(False)
             self._show_all_devices.blockSignals(False)
 
-        self._device_status.setText("Config reset")
+        self._device_status.setText("Réglages réinitialisés")
         self._update_device_selection_state()
         QtCore.QTimer.singleShot(0, self._start_device_refresh)
 
@@ -1104,7 +1137,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             self,
             "Preset client illisible",
             "Le preset client est corrompu ou inaccessible. Il ne sera pas écrasé "
-            "automatiquement. Utilisez Reset config pour repartir de zéro, ou restaurez "
+            "automatiquement. Utilisez « Réinitialiser les réglages » (bouton ⓘ) pour repartir de zéro, ou restaurez "
             "la sauvegarde avant de relancer l'application.\n\n"
             f"Fichier : {path}\n"
             f"Sauvegarde ({backup_state}) : {backup}\n"
@@ -1236,16 +1269,14 @@ class ClientWindow(QtWidgets.QMainWindow):
 
     def _reset_identity(self) -> None:
         if self._connected:
-            QtWidgets.QMessageBox.warning(self, "Connected", "Disconnect first to reset identity")
+            QtWidgets.QMessageBox.warning(self, "Poste connecté", "Déconnectez-vous d'abord.")
             return
 
-        if (
-            QtWidgets.QMessageBox.question(
-                self,
-                "Reset identity",
-                "Generate a new identity for this client?",
-            )
-            != QtWidgets.QMessageBox.StandardButton.Yes
+        if not confirm(
+            self,
+            "Nouvelle identité",
+            "Donner une nouvelle identité à ce poste ?\n"
+            "La Régie le verra comme un nouveau poste : son nom et son gain y seront à refaire.",
         ):
             return
 
@@ -1305,10 +1336,10 @@ class ClientWindow(QtWidgets.QMainWindow):
         )
 
         box = QtWidgets.QMessageBox(self)
-        box.setWindowTitle("Info")
+        box.setWindowTitle("Informations techniques")
         box.setText(info)
-        reset_cfg_btn = box.addButton("Reset config", QtWidgets.QMessageBox.ActionRole)
-        reset_btn = box.addButton("Reset identity", QtWidgets.QMessageBox.ActionRole)
+        reset_cfg_btn = box.addButton("Réinitialiser les réglages", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        reset_btn = box.addButton("Nouvelle identité", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
         box.addButton(QtWidgets.QMessageBox.StandardButton.Close)
         box.exec()
         if box.clickedButton() is reset_cfg_btn:
@@ -1318,7 +1349,7 @@ class ClientWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._device_refresh.close_must_wait():
-            self._device_status.setText("Waiting for device enumeration to finish before closing...")
+            self._device_status.setText("Fermeture après la fin de l'inventaire audio…")
             event.ignore()
             return
         # A hung enumeration may still hold PortAudio: release everything that
@@ -1350,10 +1381,10 @@ class ClientWindow(QtWidgets.QMainWindow):
         if self._is_closing:
             return
         if self._device_refresh.running:
-            self._device_status.setText("Refreshing devices already in progress...")
+            self._device_status.setText("Inventaire des périphériques déjà en cours…")
             return
         if self._connected:
-            self._device_status.setText("Disconnect before refreshing audio devices.")
+            self._device_status.setText("Déconnectez-vous avant d'actualiser les périphériques.")
             return
 
         self._refresh_devices_btn.setEnabled(False)
@@ -1361,7 +1392,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._connect_btn.setEnabled(False)
 
         hostapi_filter = None if self._show_all_devices.isChecked() else "WASAPI"
-        self._device_status.setText(f"Refreshing devices ({hostapi_filter or 'ALL'})...")
+        self._device_status.setText(f"Inventaire des périphériques ({hostapi_filter or 'tous'})…")
         self._last_device_error = ""
         self._last_device_count = 0
         # If an existing client keeps PortAudio streams open for fast
@@ -1379,7 +1410,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._refresh_devices_btn.setEnabled(not self._connected)
         self._show_all_devices.setEnabled(not self._connected)
         if not self._last_device_error:
-            self._device_status.setText(f"Devices loaded: {self._last_device_count}")
+            self._device_status.setText(f"Périphériques chargés : {self._last_device_count}")
         self._update_device_selection_state()
 
         connect_requested, self._connect_after_device_refresh = self._connect_after_device_refresh, False
@@ -1389,14 +1420,14 @@ class ClientWindow(QtWidgets.QMainWindow):
     def _on_devices_refreshed(self, devs, error: str) -> None:
         if error:
             self._last_device_error = error
-            self._device_status.setText(f"Device refresh failed: {error}")
-            QtWidgets.QMessageBox.warning(self, "Device refresh failed", error)
+            self._device_status.setText(f"Échec de l'inventaire audio : {error}")
+            QtWidgets.QMessageBox.warning(self, "Échec de l'inventaire audio", error)
             return
 
         # A late inventory (after the timeout warning) is as good as any.
         self._last_device_error = ""
         self._last_device_count = int(len(devs))
-        self._device_status.setText(f"Devices loaded: {self._last_device_count}")
+        self._device_status.setText(f"Périphériques chargés : {self._last_device_count}")
 
         self._device_cache = {int(d.index): d for d in devs}
 
@@ -1466,12 +1497,14 @@ class ClientWindow(QtWidgets.QMainWindow):
         if self._connected:
             return
         if self._device_refresh.running:
-            self._device_status.setText("Wait for device enumeration before connecting.")
+            self._device_status.setText("Attendez la fin de l'inventaire audio avant de vous connecter.")
             return
 
         server_ip = self._server_ip.text().strip()
         if not server_ip:
-            QtWidgets.QMessageBox.warning(self, "Missing server", "Please enter server IP")
+            QtWidgets.QMessageBox.warning(
+                self, "Serveur manquant", "Saisissez l'adresse IP de la Régie (onglet Réglages)."
+            )
             return
 
         server_port = int(AUDIO_UDP_PORT)
@@ -1567,7 +1600,7 @@ class ClientWindow(QtWidgets.QMainWindow):
                     self._client.stop()
             self._client = None
             self._connected = False
-            QtWidgets.QMessageBox.critical(self, "Connect failed", str(e))
+            QtWidgets.QMessageBox.critical(self, "Connexion impossible", str(e))
             return
 
         self._connected = True
@@ -1801,7 +1834,7 @@ class ClientWindow(QtWidgets.QMainWindow):
                 if command.bus_id is not None and command.action != "on":
                     return RemoteReply(
                         HTTPStatus.CONFLICT,
-                        {"error": "bus en mode Always On : changez son mode dans le client"},
+                        {"error": "bus en mode Permanent : changez son mode dans le poste"},
                     )
                 continue
             if command.action == "toggle":
@@ -1963,29 +1996,37 @@ class ClientWindow(QtWidgets.QMainWindow):
     def _refresh_diagnostics(self, st: Mapping[str, object]) -> None:
         if self._operational_status.state is not ClientOperationalState.ONLINE:
             self._diag_rates.reset()
+            self._diag_loss_until = self._diag_alert_until = 0.0
             self._diag_label.setText("")
             return
+        now = time.monotonic()
         rates = self._diag_rates.update(
             {
                 "missing": int(st.get("jitter_missing", 0)),
                 "fec": int(st.get("jitter_fec", 0)),
                 "concealed": int(st.get("jitter_concealed", 0)),
             },
-            time.monotonic(),
+            now,
         )
         frames = sum(int(st.get(key, 0)) for key in ("jitter_buffered_frames", "playout_ring_depth", "tx_ring_depth"))
         buffered_ms = frames * 1000.0 * FRAME_SAMPLES / SAMPLE_RATE
-        lost = rates["missing"] > 0.0 or rates["concealed"] > 0.0
-        alert = rates["concealed"] > 0.0
-        verdict = "Liaison dégradée" if alert else "Pertes réparées" if lost else "Liaison parfaite"
+        # Every lost frame is either rebuilt by FEC (inaudible) or not: filled
+        # in by PLC, or skipped when the buffer catches up. Both are heard.
+        if rates["concealed"] > 0.0 or rates["missing"] > rates["fec"]:
+            self._diag_alert_until = now + _DIAG_HOLD_S
+        if rates["missing"] > 0.0 or rates["concealed"] > 0.0:
+            self._diag_loss_until = now + _DIAG_HOLD_S
+        alert = now < self._diag_alert_until
+        lost = now < self._diag_loss_until
+        verdict = "Pertes audibles" if alert else "Pertes réparées" if lost else "Liaison parfaite"
         text = (
             f"{verdict} · aller-retour {format_ms(st.get('control_rtt_ms'))} · "
             f"audio en attente {format_ms(buffered_ms)} · carte son {format_ms(st.get('audio_latency_ms'))}"
         )
         if lost:
             text += (
-                f" · paquets perdus {format_rate(rates['missing'])} : "
-                f"{format_rate(rates['fec'])} réparés, {format_rate(rates['concealed'])} comblés"
+                f" · paquets perdus {format_rate(rates['missing'])}, dont {format_rate(rates['fec'])} réparés"
+                f" · trames comblées {format_rate(rates['concealed'])}"
             )
         self._diag_label.setText(text)
         if bool(self._diag_label.property("alert")) != alert:
@@ -2001,5 +2042,28 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._release_pad_holds()
 
 
-def run_gui(minimized: bool = False) -> int:
-    return run_window(ClientWindow, lambda win: minimized or win._start_minimized.isChecked())
+def _client_lock_path() -> Path:
+    return Path.home() / "py-intercom" / "client.lock"
+
+
+def run_gui(minimized: bool = False, server_host: str = "") -> int:
+    # Two Postes on one PC would share the preset, the identity (one evicts the
+    # other's session on the server) and the HTTP control port.
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    lock_path = _client_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    instance_lock = QtCore.QLockFile(str(lock_path))
+    instance_lock.setStaleLockTime(0)  # only a live process holds it
+    if not instance_lock.tryLock(0):
+        install_french_translations(app)
+        apply_theme(app)
+        QtWidgets.QMessageBox.information(
+            None,
+            "Poste déjà ouvert",
+            "Un poste py-intercom est déjà ouvert sur ce PC.\nUtilisez sa fenêtre (elle est peut-être réduite).",
+        )
+        return 0
+    return run_window(
+        lambda: ClientWindow(server_host=server_host),
+        lambda win: minimized or win._start_minimized.isChecked(),
+    )
