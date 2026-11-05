@@ -1,12 +1,17 @@
 <#
 .SYNOPSIS
-  Builds the Windows executables into dist\.
+  Builds the Windows installer into dist\.
 
 .DESCRIPTION
   Produces, in dist\:
-    py-intercom.exe            (Régie or Poste, picked at launch)
+    py-intercom-setup.exe      (installer: Régie or Poste, picked at launch)
     py-intercom-licenses.zip   (LICENSE, third-party notices, Opus licence and build manifest)
     SHA256SUMS.txt
+  The unpacked program (the installer's input) is moved to build\ afterwards,
+  so dist\ holds exactly the released files.
+
+  Inno Setup 6 is required (found on PATH or in Program Files; installed through
+  Chocolatey when missing and Chocolatey is available).
 
   The same script runs locally and in CI. Locally, the .venv is created and
   filled on first use.
@@ -48,6 +53,11 @@ if (-not $Python) {
   }
 }
 
+# PyInstaller silently skips a missing module: catch it here, not on the user's PC.
+Invoke-Checked 'dependency check (run: pip install -r requirements.txt -r requirements-dev.txt)' {
+  & $Python -c "import cffi, loguru, numpy, opuslib, pynput, PySide6, sounddevice, PyInstaller"
+}
+
 foreach ($dir in @($build, $dist)) {
   if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
 }
@@ -66,6 +76,35 @@ try {
 } finally {
   [IO.File]::WriteAllText($versionFile, $originalVersionFile, $utf8)
 }
+
+function Find-InnoSetup {
+  $found = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+  if ($found) { return $found.Source }
+  foreach ($base in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, "$env:LOCALAPPDATA\Programs")) {
+    if (-not $base) { continue }
+    $candidate = Join-Path $base 'Inno Setup 6\ISCC.exe'
+    if (Test-Path $candidate) { return $candidate }
+  }
+  return $null
+}
+
+$iscc = Find-InnoSetup
+if (-not $iscc -and (Get-Command choco -ErrorAction SilentlyContinue)) {
+  Write-Host 'Installing Inno Setup...'
+  Invoke-Checked 'Inno Setup installation' { choco install innosetup -y --no-progress }
+  $iscc = Find-InnoSetup
+}
+if (-not $iscc) { throw 'Inno Setup 6 not found: install it from https://jrsoftware.org/isdl.php' }
+
+if (-not $Version) {
+  $Version = ([regex]::Match($originalVersionFile, '__version__ = "([^"]*)"')).Groups[1].Value
+}
+$programDir = Join-Path $dist 'py-intercom'
+Invoke-Checked 'Inno Setup' {
+  & $iscc /Qp "/DAppVersion=$Version" "/DSourceDir=$programDir" "/DOutputDir=$dist" (Join-Path $PSScriptRoot 'py-intercom.iss')
+}
+# The unpacked folder is only the installer's input.
+Move-Item $programDir (Join-Path $build 'py-intercom-unpacked') -Force
 
 $licenses = Join-Path $build 'licenses'
 New-Item -ItemType Directory -Force $licenses | Out-Null

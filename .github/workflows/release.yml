@@ -1,4 +1,4 @@
-# Every push and pull request: lint, test and build the Windows executables.
+# Every push and pull request: lint, test and build the Windows installer.
 # Every push to main: also publish them as a GitHub release.
 name: Build & release
 
@@ -49,7 +49,7 @@ jobs:
           $base = python -c "import sys; sys.path.insert(0, 'src'); import py_intercom as p; print('.'.join(p.__version__.split('.')[:2]))"
           "version=$base.${{ github.run_number }}" >> $env:GITHUB_OUTPUT
 
-      - name: Build executables
+      - name: Build installer
         run: ./scripts/build_exe.ps1 -Python python -Version ${{ steps.version.outputs.version }}
 
       - uses: actions/upload-artifact@v4
@@ -80,11 +80,11 @@ jobs:
           cat > notes.md <<NOTES
           ## Télécharger
 
-          - [py-intercom.exe](${latest}/py-intercom.exe) : un seul programme pour la Régie et les postes.
+          - [py-intercom-setup.exe](${latest}/py-intercom-setup.exe) : l'installateur, identique pour la Régie et les postes.
 
-          Au premier lancement, choisir ce que fait ce PC (Régie ou Poste) ; maintenir Maj au lancement pour revoir ce choix. Pour un raccourci dédié : \`py-intercom.exe --role server\` ou \`--role client\`.
+          Lancer l'installateur, puis ouvrir py-intercom. Au premier lancement, choisir ce que fait ce PC (Régie ou Poste) ; maintenir Maj au lancement pour revoir ce choix. Le menu Démarrer propose aussi des raccourcis « py-intercom Régie » et « py-intercom Poste ».
 
-          Aucune installation : télécharger puis double-cliquer. Si Windows SmartScreen s'affiche, choisir « Informations complémentaires » puis « Exécuter quand même ».
+          Installer une nouvelle version par-dessus l'ancienne la met à jour ; les réglages et presets (dossier \`py-intercom\` de l'utilisateur) sont conservés. Si Windows SmartScreen s'affiche, choisir « Informations complémentaires » puis « Exécuter quand même ».
           NOTES
           gh release create "v${VERSION}" dist/* \
             --target "${GITHUB_SHA}" \

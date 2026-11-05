@@ -14,9 +14,9 @@ Push-to-talk, mix-minus et retours plateau en temps réel, avec de simples PC Wi
 
 <br>
 
-[![Télécharger py-intercom](https://img.shields.io/badge/T%C3%A9l%C3%A9charger-py--intercom.exe-d7261e?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/lfpoulain/py-intercom/releases/latest/download/py-intercom.exe)
+[![Télécharger py-intercom](https://img.shields.io/badge/T%C3%A9l%C3%A9charger-py--intercom--setup.exe-d7261e?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/lfpoulain/py-intercom/releases/latest/download/py-intercom-setup.exe)
 
-<sub>Aucune installation : un seul fichier pour la Régie et les postes, un double-clic.</sub>
+<sub>Un seul installateur pour la Régie et les postes ; le rôle se choisit au lancement.</sub>
 
 <br>
 
@@ -126,11 +126,11 @@ Une machine fait tourner le **serveur**, chaque opérateur lance un **client**. 
 
 ## 🚀 Démarrer en 3 étapes
 
-1. **Sur la machine Régie** : lancer `py-intercom.exe`, choisir **Régie**, ajouter les sorties physiques, cliquer sur **Démarrer**.
-2. **Sur chaque poste** : lancer `py-intercom.exe`, choisir **Poste**, puis le serveur, le micro et le casque, et cliquer sur **Connecter**.
+1. **Sur la machine Régie** : lancer py-intercom (menu Démarrer), choisir **Régie**, ajouter les sorties physiques, cliquer sur **Démarrer**.
+2. **Sur chaque poste** : lancer py-intercom (menu Démarrer), choisir **Poste**, puis le serveur, le micro et le casque, et cliquer sur **Connecter**.
 3. **Attendre « En ligne »**, régler les touches PTT, puis faire un tour de micro.
 
-Le choix du rôle peut être retenu sur chaque PC ; maintenir **Maj** au lancement pour le revoir. Si l'opérateur Régie parle aussi, le bouton **🎧 Poste sur ce PC** de la Régie ouvre un poste déjà réglé sur ce serveur. Pour un raccourci dédié : `py-intercom.exe --role server` ou `--role client`.
+Le choix du rôle peut être retenu sur chaque PC ; maintenir **Maj** au lancement pour le revoir. Si l'opérateur Régie parle aussi, le bouton **🎧 Poste sur ce PC** de la Régie ouvre un poste déjà réglé sur ce serveur. Le menu Démarrer contient aussi les raccourcis **py-intercom Régie** et **py-intercom Poste** (`--role server` / `--role client`).
 
 Ports utilisés : UDP 5000 (audio), TCP 5001 (contrôle), UDP 5002 (découverte). Le [guide d'exploitation](docs/guide-exploitation.md) couvre les gains, les casques Bluetooth et le dépannage.
 

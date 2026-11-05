@@ -45,7 +45,7 @@ Aucune carte son n'est nécessaire. Les tests GUI tournent hors écran. La suite
 
 **Pousser sur `main` suffit.** Le workflow [`.github/workflows/release.yml`](../.github/workflows/release.yml) :
 
-1. à chaque push et pull request : lint, tests, construction des exécutables (téléchargeables comme artefact du run) ;
+1. à chaque push et pull request : lint, tests, construction de l'installateur (téléchargeable comme artefact du run) ;
 2. sur `main` uniquement : publication d'une release GitHub `vX.Y.N`, marquée comme la plus récente.
 
 Un push qui ne touche que la documentation (`*.md`, `docs/`) ne publie pas de nouvelle version.
@@ -56,19 +56,21 @@ Contenu de chaque release :
 
 | Fichier | Rôle |
 |---|---|
-| `py-intercom.exe` | Régie ou poste, choisi au lancement (`--role server` ou `--role client` pour un raccourci) |
+| `py-intercom-setup.exe` | Installateur (Inno Setup) : Régie ou poste, choisi au lancement ; raccourcis Démarrer `--role server` / `--role client` |
 | `py-intercom-licenses.zip` | Licence, notices tierces, licence et manifeste Opus |
 | `SHA256SUMS.txt` | Empreintes de contrôle |
 
 Les liens `https://github.com/lfpoulain/py-intercom/releases/latest/download/<fichier>` pointent toujours vers la dernière version.
 
-## Build local des exécutables
+## Build local de l'installateur
 
 ```powershell
 & '.\scripts\build_exe.ps1'
 ```
 
-Même script que la CI : il produit les quatre fichiers ci-dessus dans `dist\` à partir de [`scripts/py-intercom.spec`](../scripts/py-intercom.spec). `-Version 2.0.42` estampille une version précise.
+Même script que la CI : il construit le dossier `py-intercom\` avec PyInstaller ([`scripts/py-intercom.spec`](../scripts/py-intercom.spec)), puis l'installateur avec Inno Setup 6 ([`scripts/py-intercom.iss`](../scripts/py-intercom.iss)), et dépose les fichiers ci-dessus dans `dist\`. Sans `-Python`, il utilise le `.venv` du projet ; avec un autre interpréteur, il vérifie d'abord que les dépendances y sont. Ne jamais changer l'`AppId` du `.iss` : c'est lui qui permet à une nouvelle version de remplacer l'ancienne.
+
+Les icônes Régie et Poste (logo + pastille) se régénèrent avec `python scripts/make_icons.py`. `-Version 2.0.42` estampille une version précise.
 
 ## Captures d'écran du README
 
