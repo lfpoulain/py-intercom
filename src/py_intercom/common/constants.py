@@ -47,6 +47,13 @@ JB_BURST_TRIM_AFTER_FRAMES = 10
 # longer silence playout stops and resumes, without a new pre-buffer, from the
 # first frame that was missing.
 JB_MAX_CONCEALED_FRAMES = 2
+# A station ticked "Liaison Wi-Fi" gets a fixed, deeper margin on both ends
+# of its link: its own playout and its voice at the server. A Wi-Fi card goes
+# quiet for 30 to 100 ms when it scans or wakes from power saving, then
+# delivers everything at once; 3 frames do not cover that. Never adaptive:
+# the latency stays what the operator chose (+30 ms on that link only).
+WIFI_JB_START_FRAMES = 6
+WIFI_JB_MAX_CONCEALED_FRAMES = 5
 # One frame of margin against the phase jitter between a producer thread and
 # the sound card callback that reads the ring (server outputs and Return).
 PCM_RING_TRIM_ABOVE_FRAMES = 1

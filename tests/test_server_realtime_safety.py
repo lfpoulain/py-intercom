@@ -25,6 +25,7 @@ from py_intercom.common.constants import (
     FRAME_SAMPLES,
     JB_MAX_CONCEALED_FRAMES,
     JB_START_FRAMES,
+    WIFI_JB_START_FRAMES,
 )
 from py_intercom.common.control_protocol import (
     CONTROL_PROTOCOL_VERSION,
@@ -2600,3 +2601,71 @@ def test_operator_gain_on_a_station_not_yet_connected_is_kept(server):
     server.set_client_input_gain(client_id, 6.0)
 
     assert server.get_clients_snapshot()[client_id]["input_gain_db"] == pytest.approx(6.0)
+
+
+def _wifi_hello(client_uuid: str, *, udp_port: int = 41000, **extra) -> bytes:
+    return encode_control_message(
+        {
+            "type": "hello",
+            "version": CONTROL_PROTOCOL_VERSION,
+            "client_id": client_id_from_uuid(client_uuid),
+            "client_uuid": client_uuid,
+            "name": "Wi-Fi",
+            "udp_port": udp_port,
+            **extra,
+        }
+    )
+
+
+class _RecordingQos:
+    def __init__(self):
+        self.calls: list[tuple[str, tuple[str, int]]] = []
+
+    def add(self, addr):
+        self.calls.append(("add", tuple(addr)))
+        return True
+
+    def remove(self, addr):
+        self.calls.append(("remove", tuple(addr)))
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("wifi_link", [True, False, None])
+def test_hello_wifi_link_sizes_the_station_jitter_buffer(server, wifi_link):
+    extra = {} if wifi_link is None else {"wifi_link": wifi_link}
+    connection = _ScriptedConnection(_wifi_hello(f"wifi-{wifi_link}", **extra), b"")
+
+    server._ctrl_session_loop(connection, ("127.0.0.1", 50000))
+
+    state = server._clients[client_id_from_uuid(f"wifi-{wifi_link}")]
+    assert state.wifi_link is bool(wifi_link)
+    assert state.jb.start_frames == (WIFI_JB_START_FRAMES if wifi_link else JB_START_FRAMES)
+
+
+def test_hello_rejects_a_non_boolean_wifi_link(server):
+    connection = _ScriptedConnection(_wifi_hello("wifi-invalid", wifi_link="yes"), b"")
+
+    server._ctrl_session_loop(connection, ("127.0.0.1", 50000))
+
+    _assert_refused_with_error(connection, retry=True)
+    assert client_id_from_uuid("wifi-invalid") not in server._clients
+
+
+def test_station_audio_address_is_marked_as_voice_and_follows_the_station(server):
+    qos = _RecordingQos()
+    server._voice_qos = qos
+
+    server._ctrl_session_loop(_ScriptedConnection(_wifi_hello("qos-station"), b""), ("10.0.0.20", 50000))
+    server._ctrl_session_loop(
+        _ScriptedConnection(_wifi_hello("qos-station", udp_port=41001), b""), ("10.0.0.20", 50001)
+    )
+    server.forget_client(client_id_from_uuid("qos-station"))
+
+    assert qos.calls == [
+        ("add", ("10.0.0.20", 41000)),
+        ("remove", ("10.0.0.20", 41000)),
+        ("add", ("10.0.0.20", 41001)),
+        ("remove", ("10.0.0.20", 41001)),
+    ]

@@ -11,8 +11,9 @@ from .constants import (
     JB_MAX_CONCEALED_FRAMES,
     JB_MAX_FRAMES,
     JB_START_FRAMES,
-    JB_TRIM_ABOVE_FRAMES,
     LATENCY_TRIM_AFTER_FRAMES,
+    WIFI_JB_MAX_CONCEALED_FRAMES,
+    WIFI_JB_START_FRAMES,
 )
 
 if TYPE_CHECKING:
@@ -96,17 +97,21 @@ class OpusPacketJitterBuffer:
         max_frames: int = 50,
         trim_above: int | None = None,
         trim_after: int = 50,
+        max_concealed: int = JB_MAX_CONCEALED_FRAMES,
     ) -> None:
         """``trim_above`` enables the latency cap on the depth left after a pop
         (never below ``start_frames - 1``, the steady-state depth). An excess
         that lasts ``trim_after`` consecutive pops loses one frame, which
         absorbs clock drift. An excess above ``JB_BURST_EXCESS_FRAMES`` that
         lasts ``JB_BURST_TRIM_AFTER_FRAMES`` pops (network burst, stalled
-        reader) is dropped at once. Latency can therefore only go back down."""
+        reader) is dropped at once. Latency can therefore only go back down.
+        An underrun is concealed for at most ``max_concealed`` ticks before
+        playout stops."""
         self.start_frames = int(max(1, start_frames))
         self.max_frames = int(max(self.start_frames + 1, max_frames))
         self.trim_above = None if trim_above is None else int(max(self.start_frames - 1, trim_above))
         self.trim_after = int(max(1, trim_after))
+        self.max_concealed = int(max(0, max_concealed))
 
         self._buf: dict[int, JitterFrame] = {}
         self._expected_seq: int | None = None
@@ -257,7 +262,7 @@ class OpusPacketJitterBuffer:
             # without skipping it, so a frame that is only late still plays.
             # A longer silence (end of a talk spurt, network outage) stops
             # playout; it resumes from that same frame as soon as it arrives.
-            if self._underrun_pops >= JB_MAX_CONCEALED_FRAMES:
+            if self._underrun_pops >= self.max_concealed:
                 self._restart_locked()
                 self._resume_seq = exp
                 return None
@@ -298,13 +303,18 @@ class OpusPacketJitterBuffer:
         self.stats.missing += _seq_distance(newest_dropped, exp) + 1 - int(count)
 
 
-def new_realtime_jitter_buffer() -> OpusPacketJitterBuffer:
-    """Jitter buffer with the engine's pre-buffer, hard cap and latency cap."""
+def new_realtime_jitter_buffer(*, wifi: bool = False) -> OpusPacketJitterBuffer:
+    """Jitter buffer with the engine's pre-buffer, hard cap and latency cap.
+
+    ``wifi`` selects the deeper fixed margin of a "Liaison Wi-Fi" station.
+    """
+    start_frames = WIFI_JB_START_FRAMES if wifi else JB_START_FRAMES
     return OpusPacketJitterBuffer(
-        start_frames=JB_START_FRAMES,
+        start_frames=start_frames,
         max_frames=JB_MAX_FRAMES,
-        trim_above=JB_TRIM_ABOVE_FRAMES,
+        trim_above=start_frames - 1,
         trim_after=LATENCY_TRIM_AFTER_FRAMES,
+        max_concealed=WIFI_JB_MAX_CONCEALED_FRAMES if wifi else JB_MAX_CONCEALED_FRAMES,
     )
 
 

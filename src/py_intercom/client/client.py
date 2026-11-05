@@ -23,6 +23,7 @@ from ..common.constants import (
 from ..common.frame_ring import FrameRingBuffer
 from ..common.jitter_buffer import new_realtime_jitter_buffer
 from ..common.logging import best_effort
+from ..common.qos import VoiceQos
 from ..common.realtime import configure_udp_socket, run_as_audio_thread
 from .audio_io import AudioIOMixin
 from .control import ControlMixin
@@ -63,6 +64,8 @@ class ClientConfig:
     listen_return_bus: bool = False
     listen_regie: bool = True
     duck_return: bool = False
+    # Deeper fixed network margin on both ends of this station's link.
+    wifi_link: bool = False
 
 
 class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
@@ -93,8 +96,10 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         self._sock.bind(("0.0.0.0", 0))
         self._resolve_server_address()
         self._sock.settimeout(0.5)
+        # The audio sent to the server is marked as voice (see _start_network).
+        self._voice_qos = VoiceQos(self._sock)
 
-        self._jb = new_realtime_jitter_buffer()
+        self._jb = new_realtime_jitter_buffer(wifi=bool(self.config.wifi_link))
 
         self._seq = 0
         # Only the TX worker may touch the stateful encoder, sequence number or
@@ -450,6 +455,13 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
             # The audio session is already empty: either this client is new or
             # _stop_network reset it. Only the socket backlog is left.
             self._resolve_server_address()
+            # No worker runs: the "Liaison Wi-Fi" choice of this connection
+            # takes effect without racing a reader.
+            self._jb = new_realtime_jitter_buffer(wifi=bool(self.config.wifi_link))
+            for marked in self._voice_qos.marked:
+                if marked != self._server_addr:
+                    self._voice_qos.remove(marked)
+            self._voice_qos.add(self._server_addr)
             self._drain_udp_socket()
             self._reset_network_counters()
 
@@ -649,6 +661,7 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
             # Audio cleanup must not depend on a network worker shutting down
             # cleanly.  This is also the rollback path for a failed stream
             # start, so it must leave no PortAudio handle behind.
+            self._voice_qos.close()
             with best_effort("_sock.close()"):
                 self._sock.close()
             self._close_audio_streams()

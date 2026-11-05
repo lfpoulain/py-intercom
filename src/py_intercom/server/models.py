@@ -132,6 +132,8 @@ class ClientState:
     last_control_monotonic: float = 0.0
     input_gain_db: float = 0.0
     applies_input_gain_locally: bool = False
+    # The station asked for the deeper "Liaison Wi-Fi" margin (see jb).
+    wifi_link: bool = False
     session_token: int = 0
 
     ptt_buses: dict[int, bool] = field(default_factory=dict)

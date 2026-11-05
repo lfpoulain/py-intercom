@@ -42,6 +42,7 @@ from ..common.persistence import DebouncedJsonWriter
 from ..common.preset_schema import (
     PRESET_SCHEMA_VERSION,
 )
+from ..common.qos import VoiceQos
 from ..common.realtime import configure_udp_socket, run_as_audio_thread
 from .control import ControlMixin
 from .mixer import MixerMixin
@@ -89,6 +90,8 @@ class IntercomServer(PresetsMixin, OutputsMixin, ReturnInputMixin, ControlMixin,
         configure_udp_socket(self._sock)
         self._sock.bind((self.bind_ip, self.port))
         self._sock.settimeout(0.5)
+        # Each station's audio address is marked as voice once its session opens.
+        self._voice_qos = VoiceQos(self._sock)
 
         self._opus_ok: bool = True
         self._opus_err: str = ""
@@ -480,6 +483,7 @@ class IntercomServer(PresetsMixin, OutputsMixin, ReturnInputMixin, ControlMixin,
                 u = str(st.client_uuid or "") if st is not None else ""
                 if st is not None:
                     self._expire_client_session(st)
+                    self._voice_qos.remove(tuple(st.addr))
                 if not u:
                     for client_uuid in self._client_profiles:
                         if int(client_id_from_uuid(client_uuid)) == cid:
@@ -768,6 +772,7 @@ class IntercomServer(PresetsMixin, OutputsMixin, ReturnInputMixin, ControlMixin,
                     self._ctrl_sock.close()
             self._ctrl_sock = None
 
+            self._voice_qos.close()
             with best_effort("_sock.close()"):
                 self._sock.close()
 

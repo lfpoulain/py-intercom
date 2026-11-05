@@ -343,7 +343,7 @@ class _FakeRemoteServer:
 
 def test_reset_config_restores_default_preferences_and_stops_remote(client_window, monkeypatch) -> None:
     window = client_window
-    for checkbox in (window._autoconnect_cb, window._start_minimized, window._duck_return):
+    for checkbox in (window._autoconnect_cb, window._start_minimized, window._duck_return, window._wifi_link):
         checkbox.setChecked(True)
     window._listen_regie.setChecked(False)
     window._remote_enabled.blockSignals(True)
@@ -364,6 +364,7 @@ def test_reset_config_restores_default_preferences_and_stops_remote(client_windo
     assert not window._autoconnect_cb.isChecked()
     assert not window._start_minimized.isChecked()
     assert not window._duck_return.isChecked()
+    assert not window._wifi_link.isChecked()
     assert not window._remote_enabled.isChecked()
     assert window._listen_regie.isChecked()
     assert remote.stopped and window._remote_server is None
@@ -723,3 +724,11 @@ def test_a_later_command_supersedes_a_pending_lease(qt_app, client_window) -> No
     assert window._ptt_bus_active(REGIE_BUS_ID) is True
     assert window._ptt_bus_active(VMIX_BUS_ID) is True
     window._handle_remote_command(RemoteCommand("off", None))
+
+
+def test_wifi_link_choice_is_saved_in_the_preset(client_window) -> None:
+    client_window._wifi_link.setChecked(True)
+    assert client_window._preset_get("wifi_link", False) is True
+
+    client_window._wifi_link.setChecked(False)
+    assert client_window._preset_get("wifi_link", True) is False

@@ -47,6 +47,7 @@ src/py_intercom/
 │   ├── packets.py           en-tête audio UDP V2
 │   ├── persistence.py       writer JSON unique avec debounce
 │   ├── preset_schema.py     schéma 2 et migrations
+│   ├── qos.py               marquage voix de l'audio UDP (qWAVE, DSCP 56)
 │   ├── realtime.py          priorité Windows (ABOVE_NORMAL, MMCSS), options de sockets
 │   ├── role_dialog.py       fenêtre « Que fait ce PC ? » du premier lancement
 │   ├── routing.py           routeur pur et mix-minus
@@ -142,7 +143,7 @@ Le catalogue `common/buses.py` est la source unique des bus. Chaque paquet audio
 | Étape | Contribution |
 |---|---|
 | Trame de capture | 10 ms |
-| Pré-buffer réseau (jitter buffer) | ~30 ms par saut (`JB_START_FRAMES = 3`) ; un paquet en retard isolé au-delà est rattrapé par le FEC |
+| Pré-buffer réseau (jitter buffer) | ~30 ms par saut (`JB_START_FRAMES = 3`) ; un paquet en retard isolé au-delà est rattrapé par le FEC. ~60 ms pour un poste « en Wi-Fi » (`WIFI_JB_START_FRAMES = 6`), dans les deux sens de sa liaison seulement |
 | Encodage / décodage Opus | quelques ms |
 | Réseau LAN, ordonnanceur | variable |
 | Buffers WASAPI et carte son | dépend du pilote |

@@ -49,6 +49,18 @@ class ControlMixin:
         with self._ctrl_send_lock:
             sock.sendall(data)
 
+    def _hello_message(self) -> dict[str, object]:
+        return {
+            "type": "hello",
+            "version": int(CONTROL_PROTOCOL_VERSION),
+            "client_id": int(self.client_id),
+            "client_uuid": str(self.config.client_uuid or ""),
+            "name": str(self.config.name or ""),
+            "applies_input_gain_locally": True,
+            "wifi_link": bool(self.config.wifi_link),
+            "udp_port": int(self._sock.getsockname()[1]),
+        }
+
     def _control_send_state(self) -> None:
         sock = self._ctrl_sock
         # Never before the hello: the server would refuse the session. The full
@@ -232,16 +244,7 @@ class ControlMixin:
                     self._ctrl_last_tx_monotonic = time.monotonic()
                 connected = True
 
-                hello = {
-                    "type": "hello",
-                    "version": int(CONTROL_PROTOCOL_VERSION),
-                    "client_id": int(self.client_id),
-                    "client_uuid": str(self.config.client_uuid or ""),
-                    "name": str(self.config.name or ""),
-                    "applies_input_gain_locally": True,
-                    "udp_port": int(self._sock.getsockname()[1]),
-                }
-                self._control_send(sock, hello)
+                self._control_send(sock, self._hello_message())
 
                 parser = JsonLineBuffer()
                 welcomed = False

@@ -92,6 +92,7 @@ def new_client_preset(client_uuid: str) -> dict:
             "listen_regie": True,
             "listen_return_bus": False,
             "duck_return": False,
+            "wifi_link": False,
             "input_gain_db": 0.0,
             "output_gain_db": 0.0,
             "show_all_devices": False,
@@ -298,6 +299,16 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._autoconnect_cb.setChecked(bool(self._preset_get("autoconnect", False)))
         self._autoconnect_cb.stateChanged.connect(self._on_autoconnect_changed)
 
+        self._wifi_link = QtWidgets.QCheckBox("Ce poste est en Wi-Fi (marge réseau plus grande)")
+        self._wifi_link.setToolTip(
+            "Le Wi-Fi s'interrompt parfois quelques dizaines de millisecondes : cette option garde "
+            "60 ms d'avance au lieu de 30, dans ce casque et à la Régie pour cette voix. "
+            "Coûte 30 ms de latence sur ce poste seulement. Prise en compte à la prochaine connexion."
+        )
+        with best_effort("_wifi_link.setChecked()"):
+            self._wifi_link.setChecked(bool(self._preset_get("wifi_link", False)))
+        self._wifi_link.stateChanged.connect(self._on_wifi_link_changed)
+
         self._listen_regie = chip(
             "Entendre la Régie",
             "Coché : tu entends dans ton casque ce que les autres disent sur Régie.\n"
@@ -475,6 +486,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         conn_row.addWidget(make_field("NOM DE CE POSTE", self._name), 1)
         conn_card.body.addLayout(conn_row)
         conn_card.body.addWidget(self._autoconnect_cb)
+        conn_card.body.addWidget(self._wifi_link)
         conn_card.body.addWidget(self._start_minimized)
 
         audio_card = Card("Audio", "Micro et casque de ce poste. Modifiables hors connexion.")
@@ -1063,6 +1075,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             (self._listen_regie, True),
             (self._listen_return_bus, False),
             (self._duck_return, False),
+            (self._wifi_link, False),
             (self._remote_enabled, False),
             (self._remote_lan, False),
         ):
@@ -1546,6 +1559,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             listen_return_bus=bool(self._listen_return_bus.isChecked()),
             duck_return=bool(self._duck_return.isChecked()),
             listen_regie=bool(self._listen_regie.isChecked()),
+            wifi_link=bool(self._wifi_link.isChecked()),
         )
 
         if self._drop_engine_with_dead_streams():
@@ -1576,6 +1590,7 @@ class ClientWindow(QtWidgets.QMainWindow):
                 self._client.config.client_uuid = cfg.client_uuid
                 self._client.config.listen_return_bus = bool(cfg.listen_return_bus)
                 self._client.config.listen_regie = bool(cfg.listen_regie)
+                self._client.config.wifi_link = bool(cfg.wifi_link)
                 self._client.set_input_gain_db(cfg.input_gain_db)
                 self._client.set_output_gain_db(cfg.output_gain_db)
                 self._client.set_return_gain_db(cfg.return_gain_db)
@@ -1924,6 +1939,10 @@ class ClientWindow(QtWidgets.QMainWindow):
     def _on_autoconnect_changed(self, state: int) -> None:
         with best_effort("save autoconnect"):
             self._preset_set("autoconnect", bool(is_checked(state)))
+
+    def _on_wifi_link_changed(self, state: int) -> None:
+        with best_effort("save wifi_link"):
+            self._preset_set("wifi_link", bool(is_checked(state)))
 
     def _maybe_autoconnect(self) -> None:
         if (

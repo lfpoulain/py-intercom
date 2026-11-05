@@ -430,6 +430,10 @@ class ControlMixin:
                     if not isinstance(raw_applies_input_gain_locally, bool):
                         raise ControlProtocolError("hello applies_input_gain_locally must be a boolean")
                     applies_input_gain_locally = raw_applies_input_gain_locally
+                    # Absent from stations older than the "Liaison Wi-Fi" option.
+                    wifi_link = msg.get("wifi_link", False)
+                    if not isinstance(wifi_link, bool):
+                        raise ControlProtocolError("hello wifi_link must be a boolean")
                     raw_udp_port = msg.get("udp_port")
                     if isinstance(raw_udp_port, bool) or not isinstance(raw_udp_port, int):
                         raise ControlProtocolError("hello udp_port must be an integer")
@@ -452,7 +456,7 @@ class ControlMixin:
                     try:
                         next_decoder = opus_codec.OpusDecoder()
                         next_encoder = opus_codec.OpusEncoder()
-                        next_jitter = new_realtime_jitter_buffer()
+                        next_jitter = new_realtime_jitter_buffer(wifi=wifi_link)
                     except Exception as exc:
                         self._ctrl_codec_init_errors += 1
                         raise ControlProtocolError(f"failed to initialize a fresh audio session: {exc}") from exc
@@ -501,6 +505,7 @@ class ControlMixin:
                                 profile_changed = True
 
                             st = self._clients.get(int(client_id))
+                            previous_addr = None if st is None else tuple(st.addr)
                             if st is None:
                                 st = ClientState(
                                     addr=(str(addr[0]), int(udp_port)),
@@ -525,6 +530,7 @@ class ControlMixin:
                             st.client_uuid = client_uuid
                             st.input_gain_db = float(profile.input_gain_db) if profile is not None else 0.0
                             st.applies_input_gain_locally = bool(applies_input_gain_locally)
+                            st.wifi_link = wifi_link
                             st.ptt_buses = {}
                             st.vu_dbfs = -60.0
                             st.addr = (str(addr[0]), int(udp_port))
@@ -555,12 +561,17 @@ class ControlMixin:
                         )
                     finally:
                         welcome_lock.release()
+                    audio_addr = (str(addr[0]), int(udp_port))
+                    if previous_addr is not None and previous_addr != audio_addr:
+                        self._voice_qos.remove(previous_addr)
+                    self._voice_qos.add(audio_addr)
                     logger.info(
-                        "control session opened: client {} ({!r}) from {}, audio port {}",
+                        "control session opened: client {} ({!r}) from {}, audio port {}{}",
                         int(client_id),
                         name,
                         addr[0],
                         udp_port,
+                        ", Wi-Fi link" if wifi_link else "",
                     )
                     opened = True
                     # The welcome config is the one that restores the

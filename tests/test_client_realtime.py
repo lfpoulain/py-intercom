@@ -24,6 +24,7 @@ from py_intercom.common.constants import (
     FRAME_SAMPLES,
     MAX_GAIN_DB,
     PLAYOUT_LEAD_FRAMES,
+    WIFI_JB_START_FRAMES,
 )
 from py_intercom.common.control_protocol import (
     CONTROL_PROTOCOL_VERSION,
@@ -2031,3 +2032,17 @@ def test_kick_from_an_older_server_is_shown_in_french(client_factory):
     client._control_handle_msg({"type": "kick", "message": "Tu as été kick"})
 
     assert client.get_stats_snapshot()["kick_message"] == "La Régie a retiré ce poste de la session."
+
+
+def test_wifi_link_station_uses_the_deeper_margin_and_tells_the_server(monkeypatch):
+    monkeypatch.setattr(opus_codec_mod, "OpusEncoder", _FakeEncoder)
+    monkeypatch.setattr(opus_codec_mod, "OpusDecoder", _FakeDecoder)
+    client = IntercomClient(
+        client_id=123,
+        config=ClientConfig(server_ip="127.0.0.1", server_port=1, control_port=1, wifi_link=True),
+    )
+    try:
+        assert client._jb.start_frames == WIFI_JB_START_FRAMES
+        assert client._hello_message()["wifi_link"] is True
+    finally:
+        client.stop()
