@@ -55,7 +55,8 @@ if (-not $Python) {
 
 # PyInstaller silently skips a missing module: catch it here, not on the user's PC.
 Invoke-Checked 'dependency check (run: pip install -r requirements.txt -r requirements-dev.txt)' {
-  & $Python -c "import cffi, loguru, numpy, opuslib, pynput, PySide6, sounddevice, PyInstaller"
+  # find_spec, not import: opuslib needs opus.dll, which only the program prepares.
+  & $Python -c "import importlib.util as u, sys; m = [n for n in ('cffi', 'loguru', 'numpy', 'opuslib', 'pynput', 'PySide6', 'sounddevice', 'PyInstaller') if u.find_spec(n) is None]; print('missing:', *m) if m else None; sys.exit(bool(m))"
 }
 
 foreach ($dir in @($build, $dist)) {
