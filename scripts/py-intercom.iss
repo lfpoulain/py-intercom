@@ -54,13 +54,25 @@ Source: "..\licenses\OPUS.txt"; DestDir: "{app}"; DestName: "OPUS_LICENSE.txt"; 
 
 [Icons]
 Name: "{group}\py-intercom"; Filename: "{app}\py-intercom.exe"; Comment: "Régie ou Poste, au choix au lancement"
-Name: "{group}\py-intercom Régie"; Filename: "{app}\py-intercom.exe"; Parameters: "--role server"; IconFilename: "{app}\_internal\img\logo-server.ico"
-Name: "{group}\py-intercom Poste"; Filename: "{app}\py-intercom.exe"; Parameters: "--role client"; IconFilename: "{app}\_internal\img\logo-client.ico"
+Name: "{group}\py-intercom Régie"; Filename: "{app}\py-intercom.exe"; Parameters: "--role server"; AppUserModelID: "py-intercom.server"; IconFilename: "{app}\_internal\img\logo-server.ico"
+Name: "{group}\py-intercom Poste"; Filename: "{app}\py-intercom.exe"; Parameters: "--role client"; AppUserModelID: "py-intercom.client"; IconFilename: "{app}\_internal\img\logo-client.ico"
 Name: "{group}\Désinstaller py-intercom"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\py-intercom Régie"; Filename: "{app}\py-intercom.exe"; Parameters: "--role server"; IconFilename: "{app}\_internal\img\logo-server.ico"; Tasks: desktopicon
-Name: "{autodesktop}\py-intercom Poste"; Filename: "{app}\py-intercom.exe"; Parameters: "--role client"; IconFilename: "{app}\_internal\img\logo-client.ico"; Tasks: desktopicon
+Name: "{autodesktop}\py-intercom Régie"; Filename: "{app}\py-intercom.exe"; Parameters: "--role server"; AppUserModelID: "py-intercom.server"; IconFilename: "{app}\_internal\img\logo-server.ico"; Tasks: desktopicon
+Name: "{autodesktop}\py-intercom Poste"; Filename: "{app}\py-intercom.exe"; Parameters: "--role client"; AppUserModelID: "py-intercom.client"; IconFilename: "{app}\_internal\img\logo-client.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\py-intercom.exe"; Description: "Lancer py-intercom"; Flags: nowait postinstall skipifsilent
+; In-app update: the program runs the installer silently with /RELAUNCH=server|client
+; and expects to come back in the same role, as the user who was running it.
+Filename: "{app}\py-intercom.exe"; Parameters: "--role {param:RELAUNCH|client}"; Flags: nowait runasoriginaluser; Check: UpdateRelaunch
 
 ; The presets and settings live in the user's py-intercom folder and are kept on uninstall.
+
+[Code]
+function UpdateRelaunch: Boolean;
+var
+  Role: String;
+begin
+  Role := ExpandConstant('{param:RELAUNCH|}');
+  Result := (Role = 'server') or (Role = 'client');
+end;

@@ -62,6 +62,17 @@ Contenu de chaque release :
 
 Les liens `https://github.com/lfpoulain/py-intercom/releases/latest/download/<fichier>` pointent toujours vers la dernière version.
 
+## Mise à jour intégrée
+
+Au démarrage (+ 20 s, puis toutes les 6 h), chaque fenêtre interroge l'API GitHub (`releases/latest`) dans un thread de fond ([`common/updater.py`](../src/py_intercom/common/updater.py), [`common/update_ui.py`](../src/py_intercom/common/update_ui.py)). Si la version est plus récente, un bouton « ⬆ Version X » apparaît dans l'en-tête ; rien ne s'installe sans clic ni confirmation. Le clic télécharge `py-intercom-setup.exe`, vérifie sa taille et son SHA-256 (champ `digest` de l'API, sinon `SHA256SUMS.txt` ; **sans somme de contrôle, pas d'installation**), ferme la fenêtre (avec son avertissement habituel pour la Régie), re-vérifie le fichier une dernière fois, puis lance l'installateur en silence (`/SILENT … /RELAUNCH=server|client`) : il remplace le programme et le relance dans le même rôle. Seuls les hôtes HTTPS de GitHub sont acceptés, redirections comprises.
+
+- **Autorisation administrateur** : une installation dans Program Files est lancée avec le verbe `runas`, pour qu'un refus de l'UAC revienne tout de suite comme une erreur. Le programme annonce alors l'échec et se rouvre dans la version actuelle (après 2 s, le temps de libérer le verrou de l'instance unique du Poste).
+- **Un seul py-intercom par PC pendant la mise à jour** : la Régie et son Poste local sont deux processus des mêmes fichiers, que l'installateur fermerait ensemble. Tant qu'un autre py-intercom de ce PC tourne, la mise à jour est refusée avec un message qui demande de le fermer d'abord.
+
+- Actif seulement dans le programme installé (Windows, PyInstaller). Depuis les sources, le bouton ouvre la page de la release : `PY_INTERCOM_UPDATE_CHECK=1` force la vérification.
+- `PY_INTERCOM_NO_UPDATE_CHECK=1` la désactive (Régie sans accès Internet : la vérification échoue alors sans bruit).
+- Une release sans `py-intercom-setup.exe` est ignorée ; les brouillons et pré-versions aussi.
+
 ## Build local de l'installateur
 
 ```powershell
@@ -70,7 +81,9 @@ Les liens `https://github.com/lfpoulain/py-intercom/releases/latest/download/<fi
 
 Même script que la CI : il construit le dossier `py-intercom\` avec PyInstaller ([`scripts/py-intercom.spec`](../scripts/py-intercom.spec)), puis l'installateur avec Inno Setup 6 ([`scripts/py-intercom.iss`](../scripts/py-intercom.iss)), et dépose les fichiers ci-dessus dans `dist\`. Sans `-Python`, il utilise le `.venv` du projet ; avec un autre interpréteur, il vérifie d'abord que les dépendances y sont. Ne jamais changer l'`AppId` du `.iss` : c'est lui qui permet à une nouvelle version de remplacer l'ancienne.
 
-Les icônes Régie et Poste (logo + pastille) se régénèrent avec `python scripts/make_icons.py`. `-Version 2.0.42` estampille une version précise.
+Les icônes Régie et Poste (logo + pastille) se régénèrent avec `python scripts/make_icons.py`. Les raccourcis portent le même `AppUserModelID` que les fenêtres (`py-intercom.server` / `py-intercom.client`) : épinglé dans la barre des tâches, un raccourci se groupe avec la fenêtre qu'il ouvre.
+
+Le numéro de version de la CI est `X.Y.N`, avec `N` au moins égal au numéro de run **et** supérieur à toute release déjà publiée pour ce `X.Y` : une release faite à la main ne peut donc plus entrer en collision avec la suivante. `-Version 2.0.42` estampille une version précise.
 
 ## Captures d'écran du README
 

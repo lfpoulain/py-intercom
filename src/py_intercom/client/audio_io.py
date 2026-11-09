@@ -34,6 +34,12 @@ from ..common.constants import (
 # PTT, and the next connection rebuilds the streams. Shorter bursts are ridden out.
 _CALLBACK_ABORT_AFTER_ERRORS = 50
 _PLAYOUT_BURST_GAP_S = PLAYOUT_BURST_GAP_MS / 1000.0
+# A frame the card plays after (or before) silence starts (ends) with a 2 ms
+# ramp: a hard step to or from zero is a click, and every slot the card finds
+# empty (late worker, network hole) would otherwise produce one.
+_DECLICK_SAMPLES = SAMPLE_RATE // 500
+_DECLICK_DOWN = np.linspace(1.0, 0.0, _DECLICK_SAMPLES, endpoint=False, dtype=np.float32)
+_DECLICK_UP = np.ascontiguousarray(_DECLICK_DOWN[::-1])
 
 
 class AudioIOMixin:
@@ -302,12 +308,16 @@ class AudioIOMixin:
 
         if self._stop.is_set() or not self._udp_ready.is_set():
             outdata.fill(0.0)
+            self._out_was_silent = True
+            self._out_last_sample = 0.0
             self._out_vu_dbfs = -60.0
             return
 
         if int(frames) != int(FRAME_SAMPLES):
             self._output_frame_mismatches += 1
             outdata.fill(0.0)
+            self._out_was_silent = True
+            self._out_last_sample = 0.0
             self._out_vu_dbfs = -60.0
             return
 
@@ -322,10 +332,23 @@ class AudioIOMixin:
         self._playout_tick.set()
         if not played:
             outdata.fill(0.0)
+            if not self._out_was_silent:
+                # Fade out from the last sample played instead of cutting to 0.
+                np.multiply(_DECLICK_DOWN, self._out_last_sample, out=outdata[:_DECLICK_SAMPLES, 0])
+                self._out_was_silent = True
+                self._out_last_sample = 0.0
             self._out_vu_dbfs = -60.0
             return
 
         np.multiply(self._output_work, db_to_linear(self._output_gain_db), out=self._output_work)
         np.clip(self._output_work, -1.0, 1.0, out=self._output_work)
+        if self._out_was_silent:
+            np.multiply(
+                self._output_work[:_DECLICK_SAMPLES],
+                _DECLICK_UP,
+                out=self._output_work[:_DECLICK_SAMPLES],
+            )
+            self._out_was_silent = False
+        self._out_last_sample = float(self._output_work[-1])
         self._out_vu_dbfs = rms_dbfs(self._output_work)
         np.copyto(outdata[:, 0], self._output_work, casting="same_kind")

@@ -130,6 +130,10 @@ class IntercomClient(AudioIOMixin, ControlMixin, TransportMixin):
         self._playout_bursts = 0
         self._capture_work = np.empty((int(FRAME_SAMPLES),), dtype=np.float32)
         self._output_work = np.empty((int(FRAME_SAMPLES),), dtype=np.float32)
+        # Output declick (audio_io): the last sample played, and whether the
+        # previous callback played silence. Written by the output callback only.
+        self._out_last_sample = 0.0
+        self._out_was_silent = True
         self._silence_frame = np.zeros((int(FRAME_SAMPLES),), dtype=np.float32)
 
         self._network_lifecycle_lock = threading.RLock()

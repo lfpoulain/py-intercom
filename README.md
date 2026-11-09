@@ -16,7 +16,7 @@ Push-to-talk, mix-minus et retours plateau en temps réel, avec de simples PC Wi
 
 [![Télécharger py-intercom](https://img.shields.io/badge/T%C3%A9l%C3%A9charger-py--intercom--setup.exe-d7261e?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/lfpoulain/py-intercom/releases/latest/download/py-intercom-setup.exe)
 
-<sub>Un seul installateur pour la Régie et les postes ; le rôle se choisit au lancement.</sub>
+<sub>Un seul installateur pour la Régie et les postes ; le rôle se choisit au lancement. Les mises à jour se proposent dans l'application (bouton « ⬆ Version X » en haut à droite).</sub>
 
 <br>
 

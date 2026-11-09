@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
+from .audio import rms_dbfs
 from .constants import (
     JB_BURST_EXCESS_FRAMES,
+    JB_BURST_FAST_EXCESS_FRAMES,
+    JB_BURST_PATIENCE_AFTER_FRAMES,
     JB_BURST_TRIM_AFTER_FRAMES,
+    JB_CATCH_UP_AFTER_FRAMES,
+    JB_CATCH_UP_QUIET_DBFS,
     JB_MAX_CONCEALED_FRAMES,
     JB_MAX_FRAMES,
+    JB_RESUME_FRACTION,
     JB_START_FRAMES,
     LATENCY_TRIM_AFTER_FRAMES,
     WIFI_JB_MAX_CONCEALED_FRAMES,
@@ -98,6 +104,8 @@ class OpusPacketJitterBuffer:
         trim_above: int | None = None,
         trim_after: int = 50,
         max_concealed: int = JB_MAX_CONCEALED_FRAMES,
+        burst_trim_after: int = JB_BURST_TRIM_AFTER_FRAMES,
+        resume_frames: int = 1,
     ) -> None:
         """``trim_above`` enables the latency cap on the depth left after a pop
         (never below ``start_frames - 1``, the steady-state depth). An excess
@@ -106,12 +114,19 @@ class OpusPacketJitterBuffer:
         lasts ``JB_BURST_TRIM_AFTER_FRAMES`` pops (network burst, stalled
         reader) is dropped at once. Latency can therefore only go back down.
         An underrun is concealed for at most ``max_concealed`` ticks before
-        playout stops."""
+        playout stops. The burst trim waits ``burst_trim_after`` pops, or
+        JB_BURST_TRIM_AFTER_FRAMES when the excess is above
+        JB_BURST_FAST_EXCESS_FRAMES; ``catch_up_skip`` lets the reader shed a
+        smaller excess in a pause meanwhile. A stream that goes on after playout
+        stopped waits up to ``resume_frames`` pops for that many buffered frames
+        (a talk spurt starting with an empty buffer), then plays anyway."""
         self.start_frames = int(max(1, start_frames))
         self.max_frames = int(max(self.start_frames + 1, max_frames))
         self.trim_above = None if trim_above is None else int(max(self.start_frames - 1, trim_above))
         self.trim_after = int(max(1, trim_after))
         self.max_concealed = int(max(0, max_concealed))
+        self.burst_trim_after = int(max(1, burst_trim_after))
+        self.resume_frames = int(min(self.start_frames, max(1, resume_frames)))
 
         self._buf: dict[int, JitterFrame] = {}
         self._expected_seq: int | None = None
@@ -121,6 +136,7 @@ class OpusPacketJitterBuffer:
         self._underrun_pops = 0
         # Sequence to resume from after an underrun stopped playout.
         self._resume_seq: int | None = None
+        self._resume_wait = 0
         self.stats = JitterStats()
         self._lock = threading.Lock()
 
@@ -138,6 +154,7 @@ class OpusPacketJitterBuffer:
     def _restart_locked(self) -> None:
         """Forget the playout position: playout waits for a new pre-buffer."""
         self._resume_seq = None
+        self._resume_wait = 0
         self._expected_seq = None
         self._started = False
         self._excess_pops = 0
@@ -178,21 +195,13 @@ class OpusPacketJitterBuffer:
                     key = _sequence_order(self._buf.keys())[0]
                     del self._buf[key]
                 else:
-                    exp = int(self._expected_seq)
-                    ahead = []
-                    for k in self._buf.keys():
-                        d = _seq_distance(int(k), exp)
-                        if d >= 0:
-                            ahead.append((int(d), int(k)))
-
-                    if len(ahead) > 0:
-                        # Realtime policy: drop the oldest pending frame first.
-                        # Keeping newest frames avoids slowly drifting into high latency.
-                        _oldest_dist, oldest_key = min(ahead, key=lambda t: int(t[0]))
-                        del self._buf[int(oldest_key)]
-                    else:
-                        key = _sequence_order(self._buf.keys())[0]
-                        del self._buf[int(key)]
+                    # Realtime policy: skip the oldest pending frame, playout
+                    # moves on past it. Deleting it in place would leave a
+                    # hole at the playout position: every later tick would
+                    # conceal, the depth would never go down (a trim only
+                    # runs after a frame was played) and the stream would
+                    # stay degraded at the full cap.
+                    self._drop_oldest_locked(1)
 
     def pop_frame(self) -> JitterFrame | None:
         """Return the frame due now, a concealment frame, or None while pre-buffering.
@@ -204,14 +213,25 @@ class OpusPacketJitterBuffer:
         with self._lock:
             if not self._started:
                 resume = self._resume_seq
+                start_key = None
                 if resume is not None and resume in self._buf:
                     # The same stream goes on where it stopped (next talk
-                    # spurt, delayed packets): play it at once, a new
-                    # pre-buffer would add its whole margin as latency.
-                    start_key = int(resume)
-                elif len(self._buf) < int(self.start_frames):
-                    return None
-                else:
+                    # spurt, delayed packets): play it from that frame, a full
+                    # new pre-buffer would add its whole margin as latency.
+                    # Delayed packets arrive together, so they are already
+                    # there; a talk spurt waits for ``resume_frames`` frames
+                    # from the resume point on (older ones will be dropped),
+                    # but never longer than that many ticks: a lone packet,
+                    # the tail of the previous spurt, plays as it always did.
+                    ready = sum(1 for key in self._buf if _seq_distance(int(key), int(resume)) >= 0)
+                    if ready >= self.resume_frames or self._resume_wait >= self.resume_frames:
+                        start_key = int(resume)
+                    else:
+                        self._resume_wait += 1
+                        return None
+                if start_key is None:
+                    if len(self._buf) < int(self.start_frames):
+                        return None
                     # Realtime startup: do not begin from the oldest enqueued
                     # packet, keep only a minimal safety window.
                     keys_sorted = _sequence_order(self._buf.keys())
@@ -223,6 +243,7 @@ class OpusPacketJitterBuffer:
                     # Older than the resume point: they arrived too late.
                     self.stats.late_dropped += len(stale)
                 self._resume_seq = None
+                self._resume_wait = 0
                 self._expected_seq = start_key
                 self._started = True
 
@@ -280,7 +301,8 @@ class OpusPacketJitterBuffer:
             return
         self._excess_pops += 1
         self._burst_pops = self._burst_pops + 1 if excess > JB_BURST_EXCESS_FRAMES else 0
-        if self._burst_pops >= JB_BURST_TRIM_AFTER_FRAMES:
+        fast = excess > JB_BURST_FAST_EXCESS_FRAMES and self._burst_pops >= JB_BURST_TRIM_AFTER_FRAMES
+        if self._burst_pops >= self.burst_trim_after or fast:
             drop = excess
         elif self._excess_pops >= self.trim_after:
             drop = 1
@@ -289,6 +311,37 @@ class OpusPacketJitterBuffer:
         self._excess_pops = 0
         self._burst_pops = 0
         self._drop_oldest_locked(drop)
+
+    def _catch_up_wanted_locked(self) -> bool:
+        """A real excess (a stall, not jitter) that has lasted a few pops."""
+        if not self._started or self.trim_above is None:
+            return False
+        excess = len(self._buf) - self.trim_above
+        return excess > JB_BURST_EXCESS_FRAMES and self._excess_pops >= JB_CATCH_UP_AFTER_FRAMES
+
+    def catch_up_due(self) -> bool:
+        """True when the depth has stayed well above its steady level for a while."""
+        with self._lock:
+            return self._catch_up_wanted_locked()
+
+    def catch_up_skip(self) -> JitterFrame | None:
+        """Shed one frame of excess depth: the slot after the one just popped.
+
+        The caller found the frame it popped silent and asks for the next one
+        instead, so the latency drops by 10 ms where nobody can hear it.
+        Returns None, and changes nothing, unless the excess is still there and
+        the next frame is really there.
+        """
+        with self._lock:
+            if self._expected_seq is None or not self._catch_up_wanted_locked():
+                return None
+            exp = int(self._expected_seq)
+            frame = self._buf.pop(exp, None)
+            if frame is None:
+                return None
+            self._expected_seq = (exp + 1) & 0xFFFFFFFF
+            self.stats.trimmed += 1
+            return frame
 
     def _drop_oldest_locked(self, count: int) -> None:
         """Skip the ``count`` oldest buffered frames; playout resumes after them."""
@@ -315,6 +368,8 @@ def new_realtime_jitter_buffer(*, wifi: bool = False) -> OpusPacketJitterBuffer:
         trim_above=start_frames - 1,
         trim_after=LATENCY_TRIM_AFTER_FRAMES,
         max_concealed=WIFI_JB_MAX_CONCEALED_FRAMES if wifi else JB_MAX_CONCEALED_FRAMES,
+        burst_trim_after=JB_BURST_PATIENCE_AFTER_FRAMES,
+        resume_frames=round(start_frames * JB_RESUME_FRACTION),
     )
 
 
@@ -323,3 +378,27 @@ def decode_jitter_frame(decoder: OpusDecoder, frame: JitterFrame) -> np.ndarray:
     if frame.fec_payload:
         return decoder.decode(frame.fec_payload, fec=True)
     return decoder.decode(frame.payload)
+
+
+def skip_silent_slot(
+    jb: OpusPacketJitterBuffer,
+    frame: JitterFrame,
+    decoded: np.ndarray,
+    decode: Callable[[JitterFrame], np.ndarray],
+) -> tuple[JitterFrame, np.ndarray]:
+    """Latency catch-up in a pause: play the next slot instead of a silent one.
+
+    ``frame`` was just popped and decoded to ``decoded``. When the buffer holds
+    more than its steady depth and that frame is below JB_CATCH_UP_QUIET_DBFS,
+    it is never played: ``decode`` turns the next one into what is played
+    instead. The skipped frame was decoded, so the Opus state stays continuous.
+    Anything else returns its arguments unchanged.
+    """
+    if frame.concealed or not jb.catch_up_due():
+        return frame, decoded
+    if rms_dbfs(decoded) >= JB_CATCH_UP_QUIET_DBFS:
+        return frame, decoded
+    following = jb.catch_up_skip()
+    if following is None:
+        return frame, decoded
+    return following, decode(following)

@@ -58,6 +58,7 @@ from ..common.theme import (
     repolish,
     set_status_label,
 )
+from ..common.update_ui import UpdateController
 from .client import ClientConfig, IntercomClient
 from .hotkeys import GlobalPttHotkeys, _parse_qt_shortcut
 from .preflight import PreflightDialog
@@ -392,6 +393,9 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._nav = SegmentedNav(["Console", "Réglages"])
         self._top_bar.center.addWidget(self._nav)
         self._connection_state_banner.setMinimumWidth(130)
+        self._updates = UpdateController(self, "client")
+        self._top_bar.right.addWidget(self._updates.button)
+        self._updates.start()
         self._top_bar.right.addWidget(self._connection_state_banner)
         self._top_bar.right.addWidget(self._connect_btn)
         self._top_bar.right.addWidget(self._disconnect_btn)

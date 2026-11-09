@@ -54,6 +54,7 @@ from ..common.theme import (
     repolish,
     set_status_label,
 )
+from ..common.update_ui import UpdateController
 from ..launcher import open_local_client
 from .health import (
     ClientTransportState,
@@ -421,6 +422,9 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._nav.changed.connect(self._pages.setCurrentIndex)
         self._top_bar.center.addWidget(self._nav)
         self._server_state_banner.setMinimumWidth(130)
+        self._updates = UpdateController(self, "server")
+        self._top_bar.right.addWidget(self._updates.button)
+        self._updates.start()
         self._top_bar.right.addWidget(self._server_state_banner)
         self._top_bar.right.addWidget(self._start_btn)
         self._top_bar.right.addWidget(self._stop_btn)

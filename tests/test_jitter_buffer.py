@@ -1,10 +1,16 @@
 from dataclasses import FrozenInstanceError
 
+import numpy as np
 import pytest
 
 from py_intercom.common.constants import (
+    JB_BURST_EXCESS_FRAMES,
+    JB_BURST_FAST_EXCESS_FRAMES,
+    JB_BURST_PATIENCE_AFTER_FRAMES,
     JB_BURST_TRIM_AFTER_FRAMES,
+    JB_CATCH_UP_AFTER_FRAMES,
     JB_MAX_CONCEALED_FRAMES,
+    JB_MAX_FRAMES,
     JB_START_FRAMES,
     JB_TRIM_ABOVE_FRAMES,
     LATENCY_TRIM_AFTER_FRAMES,
@@ -17,6 +23,7 @@ from py_intercom.common.jitter_buffer import (
     _seq_distance,
     decode_jitter_frame,
     new_realtime_jitter_buffer,
+    skip_silent_slot,
 )
 
 
@@ -206,11 +213,9 @@ def test_overflow_drops_oldest_frame_without_detaching_metadata():
         )
 
     assert jb.buffered_frames == 3
-    dropped = jb.pop_frame()
-    assert dropped is not None
-    assert dropped.sequence_number == 1
-    assert dropped.concealed is True
-    assert dropped.metadata is FAIL_CLOSED_METADATA
+    # The overflowing frame is skipped, playout moves on past it (see
+    # test_a_full_buffer_does_not_stay_stuck_at_its_cap).
+    assert jb.stats.trimmed == 1
     for expected_sequence in (2, 3, 4):
         frame = jb.pop_frame()
         assert frame is not None
@@ -313,7 +318,7 @@ def test_short_network_hole_is_concealed_and_depth_returns_to_target():
     assert depths[-1] == JB_TRIM_ABOVE_FRAMES
 
 
-def test_burst_is_trimmed_back_to_target_within_a_hundred_ms():
+def test_burst_is_trimmed_back_to_target_within_the_patience():
     jb = new_realtime_jitter_buffer()
     frames, depths, seq = _steady_stream(jb, ticks=20)
 
@@ -321,7 +326,7 @@ def test_burst_is_trimmed_back_to_target_within_a_hundred_ms():
     for _ in range(25):
         jb.push(seq, _payload(seq))
         seq += 1
-    seq = _run_ticks(jb, seq, ticks=JB_BURST_TRIM_AFTER_FRAMES, frames=frames, depths=depths)
+    seq = _run_ticks(jb, seq, ticks=JB_BURST_PATIENCE_AFTER_FRAMES, frames=frames, depths=depths)
 
     assert depths[-1] == JB_TRIM_ABOVE_FRAMES
     assert jb.stats.trimmed == 25
@@ -383,7 +388,7 @@ def _replay(jb, arrivals_ms: dict[int, float], *, ticks: int) -> list:
     return frames
 
 
-def test_next_talk_spurt_resumes_at_once_without_losing_audio():
+def test_next_talk_spurt_resumes_after_a_short_prebuffer_without_losing_audio():
     jb = new_realtime_jitter_buffer()
 
     def jitter_ms(seq: int) -> float:
@@ -401,9 +406,12 @@ def test_next_talk_spurt_resumes_at_once_without_losing_audio():
 
     second = frames[70:]
     first_played = next(i for i, f in enumerate(second) if f is not None)
-    # No new pre-buffer: the first frame plays on the tick it arrives.
-    arrival_tick = next(i for i in range(130) if i * 10.0 + 5.0 >= arrivals[20]) - 70
-    assert first_played == arrival_tick
+    # Only the short resume pre-buffer, not the full one: the first frame plays
+    # on the tick by which the ``resume_frames`` first packets have arrived.
+    ready_at = max(arrivals[20 + n] for n in range(jb.resume_frames))
+    ready_tick = next(i for i in range(130) if i * 10.0 + 5.0 >= ready_at) - 70
+    assert 1 <= jb.resume_frames < jb.start_frames
+    assert first_played == ready_tick
     assert second[first_played].sequence_number == 20
     # Jitter is concealed without skipping: every frame of the spurt plays.
     spurt = [f.sequence_number for f in second[first_played:] if f is not None and not f.concealed]
@@ -490,3 +498,193 @@ def test_decode_uses_fec_only_when_the_next_packet_is_there():
     decode_jitter_frame(_Decoder(), JitterFrame(7, b"", concealed=True))
 
     assert calls == [(b"own", False), (b"next", True), (b"", False)]
+
+
+def test_a_full_buffer_does_not_stay_stuck_at_its_cap():
+    jb = new_realtime_jitter_buffer()
+    frames, depths, seq = _steady_stream(jb, ticks=20)
+
+    # A 350 ms hole, then everything arrives at once: more than the hard cap.
+    for _ in range(JB_MAX_FRAMES + 5):
+        jb.push(seq, _payload(seq))
+        seq += 1
+    after = []
+    seq = _run_ticks(jb, seq, ticks=JB_BURST_PATIENCE_AFTER_FRAMES + 20, frames=after, depths=depths)
+
+    # Skipping past the dropped frame keeps playout on real audio: it used to
+    # conceal every tick while the depth stayed at the cap.
+    assert all(frame is not None and not frame.concealed for frame in after)
+    assert depths[-1] == JB_TRIM_ABOVE_FRAMES
+    played = [frame.sequence_number for frame in after]
+    assert played == sorted(played)
+    assert jb.stats.concealed == 0
+
+
+def _jb_with_excess(excess_frames: int):
+    """A started buffer holding ``excess_frames`` above its steady depth for a while."""
+    jb = new_realtime_jitter_buffer()
+    frames, depths, seq = _steady_stream(jb, ticks=20)
+    for _ in range(excess_frames):
+        jb.push(seq, _payload(seq))
+        seq += 1
+    for _ in range(JB_CATCH_UP_AFTER_FRAMES):
+        seq = _run_ticks(jb, seq, ticks=1, frames=frames, depths=depths)
+    return jb, seq
+
+
+def _loud(frame):
+    return np.full(480, 0.1, dtype=np.float32)
+
+
+def _quiet(frame):
+    return np.full(480, 1e-4, dtype=np.float32)
+
+
+def test_a_pause_sheds_the_excess_depth_without_cutting_speech():
+    jb, _seq = _jb_with_excess(4)
+    assert jb.catch_up_due()
+    depth = jb.buffered_frames
+    popped = jb.pop_frame()
+
+    played, pcm = skip_silent_slot(jb, popped, _quiet(popped), _quiet)
+
+    assert played.sequence_number == popped.sequence_number + 1
+    assert not played.concealed
+    assert jb.stats.trimmed == 1
+    assert jb.buffered_frames == depth - 2  # the popped frame and the skipped one
+
+
+def test_speech_is_never_skipped_to_catch_up():
+    jb, _seq = _jb_with_excess(4)
+    popped = jb.pop_frame()
+
+    played, _pcm = skip_silent_slot(jb, popped, _loud(popped), _loud)
+
+    assert played is popped
+    assert jb.stats.trimmed == 0
+
+
+def test_catch_up_ignores_jitter_and_stops_once_the_excess_is_small():
+    jb = new_realtime_jitter_buffer()
+    frames, depths, seq = _steady_stream(jb, ticks=20)
+    # One or two frames above steady for a long time is plain jitter (the depth
+    # of a buffer riding out 25-40 ms of it): the adapted cushion stays.
+    for _ in range(JB_BURST_EXCESS_FRAMES):
+        jb.push(seq, _payload(seq))
+        seq += 1
+    for _ in range(3 * JB_CATCH_UP_AFTER_FRAMES):
+        jb.push(seq, _payload(seq))
+        seq += 1
+        popped = jb.pop_frame()
+        assert not jb.catch_up_due()
+        assert skip_silent_slot(jb, popped, _quiet(popped), _quiet)[0] is popped
+    assert jb.stats.trimmed == 0
+
+    # A stall leaves more: the silent slots shed it down to the jitter margin.
+    jb, seq = _jb_with_excess(4)
+    skipped = 0
+    for _ in range(10):
+        jb.push(seq, _payload(seq))
+        seq += 1
+        popped = jb.pop_frame()
+        played, _pcm = skip_silent_slot(jb, popped, _quiet(popped), _quiet)
+        skipped += played is not popped
+    assert skipped == 4 - JB_BURST_EXCESS_FRAMES
+    assert jb.stats.trimmed == skipped
+
+
+def test_a_concealed_slot_is_never_skipped():
+    jb, _seq = _jb_with_excess(4)
+    concealed = JitterFrame(sequence_number=1, payload=b"", concealed=True)
+
+    played, _pcm = skip_silent_slot(jb, concealed, _quiet(concealed), _quiet)
+
+    assert played is concealed
+
+
+def test_a_talk_spurt_waits_for_the_resume_prebuffer_but_delayed_packets_play_at_once():
+    jb = new_realtime_jitter_buffer(wifi=True)
+    assert jb.resume_frames == 3
+    _frames, _depths, seq = _steady_stream(jb, ticks=30, first_seq=0)
+    # The talk ends: concealment, then playout stops and remembers its place.
+    for _ in range(40):
+        jb.pop_frame()
+    assert jb.pop_frame() is None
+
+    # Next spurt: its first packets are the ones expected.
+    jb.push(seq, _payload(seq))
+    assert jb.pop_frame() is None  # one frame is not enough
+    jb.push(seq + 1, _payload(seq + 1))
+    assert jb.pop_frame() is None
+    jb.push(seq + 2, _payload(seq + 2))
+    first = jb.pop_frame()
+    assert first is not None and first.sequence_number == seq
+    assert jb.stats.late_dropped == 0
+
+    # Packets that were only delayed arrive together: already there, play at once.
+    jb2 = new_realtime_jitter_buffer(wifi=True)
+    _f, _d, seq2 = _steady_stream(jb2, ticks=30, first_seq=0)
+    for _ in range(40):
+        jb2.pop_frame()
+    assert jb2.pop_frame() is None
+    for late in range(seq2, seq2 + jb2.resume_frames):
+        jb2.push(late, _payload(late))
+    assert jb2.pop_frame().sequence_number == seq2
+
+
+def _stopped_after_a_spurt(**kwargs):
+    """A buffer whose playout stopped after a talk spurt, waiting for sequence ``resume``."""
+    jb = new_realtime_jitter_buffer(**kwargs)
+    _frames, _depths, seq = _steady_stream(jb, ticks=30)
+    while jb.pop_frame() is not None:
+        pass
+    return jb, seq
+
+
+def test_a_lone_packet_still_plays_after_the_resume_wait():
+    jb, seq = _stopped_after_a_spurt()
+    assert jb.resume_frames == 2
+
+    # The tail of the previous spurt arrives alone (or a one-packet tap): the
+    # wait for a second packet is bounded, then it plays as it always did.
+    jb.push(seq, _payload(seq))
+    waits = 0
+    frame = jb.pop_frame()
+    while frame is None:
+        waits += 1
+        assert waits <= jb.resume_frames
+        frame = jb.pop_frame()
+    assert frame.sequence_number == seq
+    assert not frame.concealed
+    assert waits == jb.resume_frames
+
+
+def test_frames_older_than_the_resume_point_do_not_count_for_the_resume_wait():
+    jb, seq = _stopped_after_a_spurt()
+
+    # A late duplicate of an earlier frame plus the expected one: only one real
+    # frame, so playout still waits for the next packet.
+    jb.push(seq - 1, _payload(seq - 1))
+    jb.push(seq, _payload(seq))
+    assert jb.pop_frame() is None
+    jb.push(seq + 1, _payload(seq + 1))
+    frame = jb.pop_frame()
+    assert frame is not None and frame.sequence_number == seq
+    assert jb.buffered_frames == 1  # the second real frame is still buffered
+
+
+def test_a_large_excess_is_trimmed_fast_and_a_moderate_one_waits_for_a_pause():
+    for excess, trimmed_after in (
+        (JB_BURST_FAST_EXCESS_FRAMES + 3, JB_BURST_TRIM_AFTER_FRAMES),
+        (JB_BURST_FAST_EXCESS_FRAMES - 1, JB_BURST_PATIENCE_AFTER_FRAMES),
+    ):
+        jb = new_realtime_jitter_buffer()
+        frames, depths, seq = _steady_stream(jb, ticks=20)
+        for _ in range(excess):
+            jb.push(seq, _payload(seq))
+            seq += 1
+        seq = _run_ticks(jb, seq, ticks=trimmed_after - 1, frames=frames, depths=depths)
+        assert jb.stats.trimmed == 0
+        seq = _run_ticks(jb, seq, ticks=1, frames=frames, depths=depths)
+        assert jb.stats.trimmed == excess
+        assert depths[-1] == JB_TRIM_ABOVE_FRAMES

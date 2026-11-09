@@ -17,7 +17,12 @@ from ..common.constants import (
     FRAME_SAMPLES,
     SAMPLE_RATE,
 )
-from ..common.jitter_buffer import JitterFrameMetadata, OpusPacketJitterBuffer, decode_jitter_frame
+from ..common.jitter_buffer import (
+    JitterFrameMetadata,
+    OpusPacketJitterBuffer,
+    decode_jitter_frame,
+    skip_silent_slot,
+)
 from ..common.opus_codec import OpusDecoder
 from ..common.packets import (
     WSAECONNRESET,
@@ -117,6 +122,24 @@ class MixerMixin:
             # newest item if the queue filled again before this retry.
             self._mix_queue_drops += 1
 
+    def _frame_bus_mask(self, source: _MixSource, jitter_frame, now: float) -> int:
+        """Live bus route of one playout slot of a client."""
+        if jitter_frame.concealed:
+            # Deep PLC continues the last real frame, so it inherits that
+            # frame's route, never one from another session.
+            route_token, route_mask = source.state.last_frame_route
+            bus_mask = route_mask if route_token == source.session_token else 0
+        else:
+            metadata = jitter_frame.metadata
+            bus_mask = int(metadata.bus_mask) if int(metadata.session_token) == source.session_token else 0
+            source.state.last_frame_route = (source.session_token, bus_mask)
+        return self._live_frame_bus_mask(
+            bus_mask,
+            source.control_connected,
+            source.last_control_monotonic,
+            now=now,
+        )
+
     def _pull_mix_source(self, source: _MixSource, *, now: float) -> tuple[RoutedSource | None, float | None]:
         """Decode the next frame of one client and attach its live bus route.
 
@@ -132,24 +155,19 @@ class MixerMixin:
         if jitter_frame is None:
             return None, None
 
-        if jitter_frame.concealed:
-            # Deep PLC continues the last real frame, so it inherits that
-            # frame's route, never one from another session.
-            route_token, route_mask = source.state.last_frame_route
-            bus_mask = route_mask if route_token == source.session_token else 0
-        else:
-            metadata = jitter_frame.metadata
-            bus_mask = int(metadata.bus_mask) if int(metadata.session_token) == source.session_token else 0
-            source.state.last_frame_route = (source.session_token, bus_mask)
-        bus_mask = self._live_frame_bus_mask(
-            bus_mask,
-            source.control_connected,
-            source.last_control_monotonic,
-            now=now,
-        )
+        bus_mask = self._frame_bus_mask(source, jitter_frame, now)
 
         try:
             decoded = decode_jitter_frame(source.decoder, jitter_frame)
+            # Extra depth left by a stall goes away in a pause between words.
+            played_frame, decoded = skip_silent_slot(
+                source.jitter,
+                jitter_frame,
+                decoded,
+                lambda following: decode_jitter_frame(source.decoder, following),
+            )
+            if played_frame is not jitter_frame:
+                bus_mask = self._frame_bus_mask(source, played_frame, now)
         except Exception as exc:
             self._rx_decode_errors += 1
             logger.debug("Opus decode failed for client {}: {}", source.client_id, exc)

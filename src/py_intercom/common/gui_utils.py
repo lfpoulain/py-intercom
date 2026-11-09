@@ -165,27 +165,30 @@ class DeviceRefresh(QtCore.QObject):
             QtWidgets.QApplication.restoreOverrideCursor()
 
 
-def set_app_icon(window: QtWidgets.QWidget, app_user_model_id: str) -> None:
-    """Window and taskbar icon, from the sources or a PyInstaller bundle.
+def load_app_icon(role: str) -> QtGui.QIcon | None:
+    """Logo of a role ("server", "client"; any other name gives the plain logo).
 
-    The Régie and the Poste each have their own badge on the logo, picked from
-    the suffix of the AppUserModelID ("...server" / "...client"); the plain
-    logo is the fallback.
+    The Régie and the Poste each have their own badge on the logo. Read from the
+    sources or a PyInstaller bundle; None when no icon file is found.
     """
+    names = [f"logo-{role}.ico", "logo.ico"]
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        folders = [Path(base) / "py_intercom" / "img", Path(base) / "img", Path(base)]
+    else:
+        folders = [Path(__file__).resolve().parents[1] / "img"]
+    candidates = [folder / name for name in names for folder in folders]
+    if not base:
+        candidates.append(folders[0] / "logo.png")
+    icon_path = next((path for path in candidates if path.is_file()), None)
+    return None if icon_path is None else QtGui.QIcon(str(icon_path))
+
+
+def set_app_icon(window: QtWidgets.QWidget, app_user_model_id: str) -> None:
+    """Window and taskbar icon; the role comes from the AppUserModelID suffix ("...server")."""
     with best_effort("set window icon"):
-        role = app_user_model_id.rsplit(".", 1)[-1]
-        names = [f"logo-{role}.ico", "logo.ico"]
-        base = getattr(sys, "_MEIPASS", None)
-        if base:
-            folders = [Path(base) / "py_intercom" / "img", Path(base) / "img", Path(base)]
-        else:
-            folders = [Path(__file__).resolve().parents[1] / "img"]
-        candidates = [folder / name for name in names for folder in folders]
-        if not base:
-            candidates.append(folders[0] / "logo.png")
-        icon_path = next((path for path in candidates if path.is_file()), None)
-        if icon_path is not None:
-            icon = QtGui.QIcon(str(icon_path))
+        icon = load_app_icon(app_user_model_id.rsplit(".", 1)[-1])
+        if icon is not None:
             window.setWindowIcon(icon)
             app = QtWidgets.QApplication.instance()
             if app is not None:

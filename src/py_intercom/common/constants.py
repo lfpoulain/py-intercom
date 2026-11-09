@@ -41,11 +41,27 @@ JB_TRIM_ABOVE_FRAMES = JB_START_FRAMES - 1
 # above the target: once that lasts JB_BURST_TRIM_AFTER_FRAMES consecutive
 # pops, the whole excess is dropped at once. The delay outlasts the server
 # mixer's own catch-up (at most 100 ms), so a late reader is never starved.
+# The PCM rings (frame_ring.py) always use these two values.
 JB_BURST_EXCESS_FRAMES = 2
 JB_BURST_TRIM_AFTER_FRAMES = 10
+# Catching up after a stall (the extra depth left by a network hole or a late
+# reader) costs speech when frames are cut blindly. A jitter buffer that holds
+# more than JB_BURST_EXCESS_FRAMES above its steady depth for JB_CATCH_UP_AFTER_FRAMES
+# consecutive pops (30 ms: ordinary jitter, which makes the depth hover 1-2
+# frames above steady, is left alone) skips a slot as soon as the frame about to
+# be played decodes below JB_CATCH_UP_QUIET_DBFS, i.e. in a pause between words:
+# the latency comes back down without an audible cut. The blind trim of a jitter
+# buffer therefore waits JB_BURST_PATIENCE_AFTER_FRAMES (0.3 s, a long breath)
+# instead of JB_BURST_TRIM_AFTER_FRAMES, except for a large excess of more than
+# JB_BURST_FAST_EXCESS_FRAMES frames (a stall above ~100 ms), which would keep
+# a lot of latency for too long: that one is dropped after 10 pops as before.
+JB_CATCH_UP_AFTER_FRAMES = 3
+JB_CATCH_UP_QUIET_DBFS = -50.0
+JB_BURST_PATIENCE_AFTER_FRAMES = 30
+JB_BURST_FAST_EXCESS_FRAMES = 6
 # A jitter buffer underrun is concealed for at most this many frames; after a
-# longer silence playout stops and resumes, without a new pre-buffer, from the
-# first frame that was missing.
+# longer silence playout stops and resumes from the first frame that was
+# missing, with only JB_RESUME_FRACTION of the pre-buffer (see below).
 JB_MAX_CONCEALED_FRAMES = 2
 # A station ticked "Liaison Wi-Fi" gets a fixed, deeper margin on both ends
 # of its link: its own playout and its voice at the server. A Wi-Fi card goes
@@ -54,6 +70,14 @@ JB_MAX_CONCEALED_FRAMES = 2
 # the latency stays what the operator chose (+30 ms on that link only).
 WIFI_JB_START_FRAMES = 6
 WIFI_JB_MAX_CONCEALED_FRAMES = 5
+# A talk spurt that starts after a pause (push-to-talk) has no pre-buffer of
+# its own: its first packet is the one expected, so it used to play at once
+# with an empty buffer, and the first late packet became a glitch. It now waits
+# for this share of the pre-buffer, which the packets that follow fill in
+# 10 ms steps (+10 ms on a wired link, +30 ms in Wi-Fi mode, at the start of a
+# spurt only; never more than that wait, a lone packet plays anyway). Packets
+# that were merely delayed are already buffered and play at once.
+JB_RESUME_FRACTION = 0.5
 # One frame of margin against the phase jitter between a producer thread and
 # the sound card callback that reads the ring (server outputs and Return).
 PCM_RING_TRIM_ABOVE_FRAMES = 1
@@ -70,9 +94,10 @@ PLAYOUT_BURSTS_BEFORE_LEAD = 3
 PLAYOUT_MAX_LEAD_FRAMES = 4
 # The jitter buffer is read this long before the card needs the frame, not
 # right after its callback: a frame arriving meanwhile (start of a talk spurt)
-# is then played one period sooner. It leaves the decoder 4 ms to wake up and
-# decode (~0.5 ms); see scripts/latency_bench.py.
-PLAYOUT_DECODE_AHEAD_MS = 4.0
+# is then played one period sooner. It leaves the decoder 6 ms to wake up and
+# decode (~0.5 ms), which rides out a worker held up by the GIL (a long Qt call,
+# a garbage collection) for up to ~5 ms; see scripts/latency_bench.py.
+PLAYOUT_DECODE_AHEAD_MS = 6.0
 
 # --- Return ducking (optional, per client) ---------------------------------
 RETURN_DUCK_DEPTH_DB = -15.0  # Return attenuation while voices are heard

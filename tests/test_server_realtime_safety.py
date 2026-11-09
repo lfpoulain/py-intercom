@@ -101,6 +101,9 @@ class _OneFrameJitter:
             ),
         )
 
+    def catch_up_due(self):
+        return False
+
     def pop_frame(self):
         frame, self._frame = self._frame, None
         return frame
@@ -110,6 +113,9 @@ class _OneFrameJitter:
 
 
 class _AlwaysReadyJitter:
+    def catch_up_due(self):
+        return False
+
     def pop_frame(self):
         return JitterFrame(
             sequence_number=1,
@@ -423,6 +429,9 @@ def test_routing_epoch_keeps_old_packet_out_of_replacement_decoder(server):
     state = _client_state(now=now, decoder=old_decoder)
 
     class _ReplacingJitter:
+        def catch_up_due(self):
+            return False
+
         def pop_frame(self):
             with server._lock:
                 state.decoder = replacement_decoder
@@ -1577,6 +1586,9 @@ class _ScriptedJitter:
     def __init__(self, frames):
         self._frames = list(frames)
 
+    def catch_up_due(self):
+        return False
+
     def pop_frame(self):
         return self._frames.pop(0) if self._frames else None
 
@@ -1719,6 +1731,69 @@ def test_concealed_frame_never_opens_a_route_of_its_own(server, monkeypatch, rem
 
     calls = _run_mix_ticks(server, monkeypatch, 1)
 
+    assert [source.bus_mask for source in calls[0]] == [0]
+
+
+def _jitter_with_excess(token_of=lambda sequence: SESSION_TOKEN):
+    """A real realtime jitter buffer after a stall: 15 frames arrived at once.
+
+    Playout had started (sequences 0-3 are popped); the next one due is 4. Even
+    sequences are routed to the Régie bus, odd ones to Plateau.
+    """
+    jb = new_realtime_jitter_buffer()
+
+    def push(sequence):
+        bus = REGIE_BUS_ID if sequence % 2 == 0 else PLATEAU_BUS_ID
+        jb.push(sequence, b"opus", JitterFrameMetadata(session_token=token_of(sequence), bus_mask=1 << bus))
+
+    for sequence in range(3):
+        push(sequence)
+    assert jb.pop_frame() is not None
+    for sequence in range(3, 18):
+        push(sequence)
+    for _ in range(3):
+        assert jb.pop_frame() is not None
+    assert jb.catch_up_due()
+    return jb
+
+
+def test_a_silent_slot_is_skipped_to_shed_the_stall_and_keeps_the_route_of_the_frame_played(server, monkeypatch):
+    state = _client_state(decoder=_ValueDecoder(1e-4))  # a pause between words
+    state.jb = _jitter_with_excess()
+    with server._lock:
+        server._clients[7] = state
+
+    calls = _run_mix_ticks(server, monkeypatch, 1)
+
+    # Sequence 4 (Régie) was popped, found silent and skipped: sequence 5,
+    # routed to Plateau, is what is mixed, with its own route.
+    assert [source.bus_mask for source in calls[0]] == [1 << PLATEAU_BUS_ID]
+    assert state.jb.stats.trimmed == 1
+    assert state.last_frame_route == (SESSION_TOKEN, 1 << PLATEAU_BUS_ID)
+
+
+def test_speech_is_never_skipped_by_the_mixer(server, monkeypatch):
+    state = _client_state(decoder=_ValueDecoder(0.1))
+    state.jb = _jitter_with_excess()
+    with server._lock:
+        server._clients[7] = state
+
+    calls = _run_mix_ticks(server, monkeypatch, 1)
+
+    assert [source.bus_mask for source in calls[0]] == [1 << REGIE_BUS_ID]  # sequence 4, as popped
+    assert state.jb.stats.trimmed == 0
+
+
+def test_a_replacement_frame_of_another_session_is_not_routed(server, monkeypatch):
+    state = _client_state(decoder=_ValueDecoder(1e-4))
+    # Sequence 5, the one skipped to, carries another session's token.
+    state.jb = _jitter_with_excess(lambda sequence: SESSION_TOKEN if sequence < 5 else SESSION_TOKEN + 1)
+    with server._lock:
+        server._clients[7] = state
+
+    calls = _run_mix_ticks(server, monkeypatch, 1)
+
+    # The skipped-to frame carries a foreign session token: it is mixed with no route.
     assert [source.bus_mask for source in calls[0]] == [0]
 
 

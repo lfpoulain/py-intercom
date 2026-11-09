@@ -10,11 +10,11 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6 import QtTest, QtWidgets
+from PySide6 import QtCore, QtTest, QtWidgets
 
 import py_intercom.common.gui_utils as gui_utils_mod
 from py_intercom.common.devices import DeviceInfo
-from py_intercom.common.gui_utils import DeviceRefresh, set_app_icon
+from py_intercom.common.gui_utils import DeviceRefresh, load_app_icon, set_app_icon
 
 _SPEAKERS = DeviceInfo(1, "Speakers", "Windows WASAPI", 0, 2, 48000)
 
@@ -161,3 +161,15 @@ def test_set_app_icon_finds_the_bundled_logo(qt_app, monkeypatch) -> None:
     finally:
         qt_app.setWindowIcon(previous)
         win.deleteLater()
+
+
+def test_each_role_has_its_own_icon_and_any_other_name_gets_the_plain_logo(qt_app) -> None:
+    server, client, plain, launcher = (load_app_icon(name) for name in ("server", "client", "plain", "launcher"))
+
+    assert all(icon is not None and not icon.isNull() for icon in (server, client, plain, launcher))
+    # Distinct images: the role badge is what tells the two windows apart in the taskbar.
+    size = QtCore.QSize(32, 32)
+    server_image, client_image, plain_image = (icon.pixmap(size).toImage() for icon in (server, client, plain))
+    assert server_image != client_image
+    assert server_image != plain_image
+    assert launcher.pixmap(size).toImage() == plain_image

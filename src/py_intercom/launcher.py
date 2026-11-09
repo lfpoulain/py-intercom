@@ -10,6 +10,7 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROLES = ("server", "client")
@@ -58,6 +59,29 @@ def open_local_client() -> subprocess.Popen:
     )
 
 
+START_DELAY_ENV = "PY_INTERCOM_START_DELAY_S"
+
+
+def restart_role(role: str, delay_s: float = 0.0) -> subprocess.Popen:
+    """Start this program again in ``role``, independent of the process that calls it.
+
+    ``delay_s``: the new process waits that long before doing anything, for a
+    caller that is still exiting (it holds the Poste's single-instance lock).
+    """
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"} if getattr(sys, "frozen", False) else None
+    if delay_s > 0:
+        env = {**(os.environ if env is None else env), START_DELAY_ENV: str(delay_s)}
+    return subprocess.Popen(
+        role_command(role),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=flags,
+        env=env,
+    )
+
+
 def choose_role() -> str | None:
     """The remembered role, or the operator's pick; None when they cancel.
 
@@ -65,10 +89,14 @@ def choose_role() -> str | None:
     """
     from PySide6 import QtCore, QtGui, QtWidgets
 
-    from .common.gui_utils import install_french_translations
+    from .common.gui_utils import install_french_translations, load_app_icon
     from .common.theme import apply_theme
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    # Without it, the role question gets Windows' generic icon in the taskbar.
+    icon = load_app_icon("launcher")
+    if icon is not None:
+        app.setWindowIcon(icon)
     settings = QtCore.QSettings(*_SETTINGS_SCOPE)
     remembered = str(settings.value(_ROLE_KEY, "") or "")
     shift_held = bool(QtGui.QGuiApplication.queryKeyboardModifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier)
@@ -89,8 +117,20 @@ def choose_role() -> str | None:
     return dialog.role
 
 
+def _honour_start_delay() -> None:
+    """Wait for the process that restarted this one to be gone (see restart_role)."""
+    raw = os.environ.pop(START_DELAY_ENV, "")
+    try:
+        delay = min(10.0, max(0.0, float(raw)))
+    except ValueError:
+        return
+    if delay:
+        time.sleep(delay)
+
+
 def main() -> int:
     global active_role
+    _honour_start_delay()
     role, rest = split_role(sys.argv[1:])
     if role is None:
         role = choose_role()

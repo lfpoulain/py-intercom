@@ -16,7 +16,7 @@ from ..common.constants import (
     PLAYOUT_DECODE_AHEAD_MS,
     SAMPLE_RATE,
 )
-from ..common.jitter_buffer import JitterFrame, JitterFrameMetadata, decode_jitter_frame
+from ..common.jitter_buffer import JitterFrame, JitterFrameMetadata, decode_jitter_frame, skip_silent_slot
 from ..common.logging import best_effort
 from ..common.opus_codec import OpusDecoder, OpusEncoder
 from ..common.packets import (
@@ -211,7 +211,8 @@ class TransportMixin:
         exactly as fast as the card plays: no second clock, no drift between
         them, and no PCM ring margin to trim. A slot the card had to play as
         silence (late worker) is not made up: its frame stays in the jitter
-        buffer, whose latency cap removes it.
+        buffer, which sheds that extra depth in the next pause between words
+        (skip_silent_slot), or through its latency cap.
         """
 
         decoder: OpusDecoder | None = None
@@ -265,6 +266,18 @@ class TransportMixin:
                     self._opus_decoder_resets += 1
 
                 decoded = self._decode_playout_frame(jitter_frame, decoder)
+                # Extra depth left by a stall goes away in a pause between
+                # words, not as a cut in the middle of one.
+                played_frame, decoded = skip_silent_slot(
+                    self._jb,
+                    jitter_frame,
+                    decoded,
+                    lambda following, _decoder=decoder: self._decode_playout_frame(following, _decoder),
+                )
+                if played_frame is not jitter_frame:
+                    jitter_frame = played_frame
+                    if int(jitter_frame.metadata.session_token) != session_token:
+                        break
 
                 # Prevent a decode from the previous session from being published
                 # after reconnect cleared the PCM ring.

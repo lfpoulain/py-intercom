@@ -32,7 +32,7 @@ from py_intercom.common.control_protocol import (
     encode_control_message,
     format_session_token,
 )
-from py_intercom.common.jitter_buffer import JitterFrame, JitterFrameMetadata
+from py_intercom.common.jitter_buffer import JitterFrame, JitterFrameMetadata, new_realtime_jitter_buffer
 from py_intercom.common.packets import (
     AudioPacketDirection,
     pack_audio_packet_v2,
@@ -101,6 +101,14 @@ def _wait_until(predicate, timeout: float = 1.0) -> bool:
             return True
         time.sleep(0.005)
     return bool(predicate())
+
+
+def _assert_faded_in(frame, level: float) -> None:
+    """A frame played after silence ramps up over the declick, then holds its level."""
+    ramp = audio_io_mod._DECLICK_SAMPLES
+    assert frame[0] < level * 0.05
+    assert np.all(np.diff(frame[:ramp]) > 0.0)
+    assert np.array_equal(frame[ramp:], np.full(frame.shape[0] - ramp, level, dtype=np.float32))
 
 
 def test_network_restart_uses_a_new_generation_and_stops_backoff(client_factory):
@@ -728,7 +736,50 @@ def test_portaudio_callbacks_never_call_codec_socket_or_jitter(client_factory, m
     assert client._tx_ring.depth == 1
     assert id(client._capture_work) == capture_work_id
     assert id(client._output_work) == output_work_id
-    assert np.array_equal(output[:, 0], np.full(int(FRAME_SAMPLES), 0.5, dtype=np.float32))
+    _assert_faded_in(output[:, 0], 0.5)
+    sender.close()
+
+
+def test_output_declick_fades_out_from_the_last_sample_and_fades_in_after_silence(client_factory):
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender.bind(("127.0.0.1", 0))
+    client = client_factory(server_port=sender.getsockname()[1])
+    client._stop = threading.Event()
+    client._udp_ready = threading.Event()
+    client._udp_ready.set()
+    client._output_gain_db = 0.0
+    ramp = audio_io_mod._DECLICK_SAMPLES
+    output = np.empty((int(FRAME_SAMPLES), 1), dtype=np.float32)
+
+    def play(level: float | None) -> np.ndarray:
+        if level is not None:
+            client._playout_ring.push(np.full((int(FRAME_SAMPLES),), level, dtype=np.float32), metadata=1)
+        client._out_callback(output, int(FRAME_SAMPLES), None, None)
+        assert client._output_callback_errors == 0
+        return output[:, 0].copy()
+
+    # Silence stays exact silence: nothing to fade.
+    assert not play(None).any()
+    # Speech starts: ramp up, then the level.
+    _assert_faded_in(play(0.5), 0.5)
+    assert np.array_equal(play(0.5), np.full(int(FRAME_SAMPLES), 0.5, dtype=np.float32))
+    # The card finds the ring empty: the slot starts at the last sample (no step
+    # to zero), decays, and is silent after the ramp.
+    gap = play(None)
+    assert gap[0] == pytest.approx(0.5)
+    assert np.all(np.diff(gap[:ramp]) < 0.0)
+    assert not gap[ramp:].any()
+    # A second empty slot is plain silence.
+    assert not play(None).any()
+    # Speech goes on: it fades in again rather than stepping up from zero.
+    _assert_faded_in(play(0.5), 0.5)
+    # The session drops while speech plays, then comes back: the hard cut of the
+    # inactive callbacks leaves no stale last sample to decay from silence.
+    client._udp_ready.clear()
+    assert not play(None).any()
+    client._udp_ready.set()
+    assert not play(None).any()
+    _assert_faded_in(play(0.5), 0.5)
     sender.close()
 
 
@@ -782,6 +833,9 @@ def test_playout_worker_exclusively_decodes_before_output_callback(
                 metadata=JitterFrameMetadata(session_token=SESSION_TOKEN),
             )
 
+        def catch_up_due(self):
+            return False
+
         def pop_frame(self):
             frame, self.frame = self.frame, None
             return frame
@@ -823,10 +877,92 @@ def test_playout_worker_exclusively_decodes_before_output_callback(
     assert decoder.thread_ids == [playout_thread.ident]
     assert client._opus_decoder_resets == 1
     assert client._opus_decoder_reset_errors == 0
-    assert np.array_equal(
-        output[:, 0],
-        np.full((int(FRAME_SAMPLES),), 0.25, dtype=np.float32),
+    _assert_faded_in(output[:, 0], 0.25)
+    sender.close()
+
+
+def _playout_with_excess(client, monkeypatch, decoder_value, *, tokens=None):
+    """Run the playout worker once on a real jitter buffer holding a stall's excess.
+
+    Returns the sequence number of the frame the worker queued for the card.
+    """
+    jb = new_realtime_jitter_buffer()
+
+    def push(sequence):
+        token = SESSION_TOKEN if tokens is None else tokens(sequence)
+        jb.push(sequence, b"opus", JitterFrameMetadata(session_token=token))
+
+    for sequence in range(3):
+        push(sequence)
+    jb.pop_frame()  # playout starts; a stall then leaves 15 frames queued
+    for sequence in range(3, 18):
+        push(sequence)
+    for _ in range(3):
+        jb.pop_frame()  # sequences 1-3 played, the next one due is 4
+    assert jb.catch_up_due()
+
+    class _Decoder:
+        def decode(self, payload: bytes) -> np.ndarray:
+            return np.full((int(FRAME_SAMPLES),), decoder_value, dtype=np.float32)
+
+    client._jb = jb
+    monkeypatch.setattr(opus_codec_mod, "OpusDecoder", lambda: _Decoder())
+    client._stop = threading.Event()
+    client._udp_ready = threading.Event()
+    client._udp_ready.set()
+    client._session_token = SESSION_TOKEN
+    worker = threading.Thread(
+        target=client._playout_loop, args=(client._stop, client._network_generation, client._udp_ready)
     )
+    worker.start()
+    client._playout_tick.set()
+    assert _wait_until(
+        lambda: client._playout_ring.depth == 1 or jb.stats.trimmed or not worker.is_alive(), timeout=2.0
+    )
+    time.sleep(0.05)
+    client._stop.set()
+    worker.join(timeout=1.0)
+    assert not worker.is_alive()
+    return jb, client._playout_ring.depth, client._playout_ring.stats
+
+
+def test_playout_skips_a_silent_slot_to_shed_the_stall(client_factory, monkeypatch):
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender.bind(("127.0.0.1", 0))
+    client = client_factory(server_port=sender.getsockname()[1])
+
+    jb, depth, _stats = _playout_with_excess(client, monkeypatch, 1e-4)
+
+    assert depth == 1
+    assert jb.stats.trimmed == 1
+    # Sequence 4 was popped and found silent: the card plays sequence 5.
+    assert jb.pop_frame().sequence_number == 6
+    sender.close()
+
+
+def test_playout_never_skips_speech(client_factory, monkeypatch):
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender.bind(("127.0.0.1", 0))
+    client = client_factory(server_port=sender.getsockname()[1])
+
+    jb, depth, _stats = _playout_with_excess(client, monkeypatch, 0.1)
+
+    assert depth == 1
+    assert jb.stats.trimmed == 0
+    assert jb.pop_frame().sequence_number == 5
+    sender.close()
+
+
+def test_playout_does_not_play_a_replacement_frame_of_another_session(client_factory, monkeypatch):
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender.bind(("127.0.0.1", 0))
+    client = client_factory(server_port=sender.getsockname()[1])
+
+    _jb, depth, _stats = _playout_with_excess(
+        client, monkeypatch, 1e-4, tokens=lambda sequence: SESSION_TOKEN if sequence < 5 else SESSION_TOKEN + 1
+    )
+
+    assert depth == 0  # the foreign frame stops the worker, nothing is queued
     sender.close()
 
 
@@ -961,6 +1097,9 @@ def test_playout_worker_recreates_decoder_for_each_authenticated_epoch(
                     )
                 )
 
+        def catch_up_due(self):
+            return False
+
         def pop_frame(self):
             with self._lock:
                 if not self._frames:
@@ -1084,6 +1223,9 @@ def test_decoder_reset_failure_publishes_no_pcm(client_factory, monkeypatch):
                 payload=b"opus",
                 metadata=JitterFrameMetadata(session_token=SESSION_TOKEN),
             )
+
+        def catch_up_due(self):
+            return False
 
         def pop_frame(self):
             frame, self.frame = self.frame, None
@@ -1680,6 +1822,9 @@ def _run_playout_on_card_clock(
             pass
 
     class _EndlessJitterBuffer:
+        def catch_up_due(self):
+            return False
+
         def pop_frame(self):
             pops.append(len(card_reads))
             return JitterFrame(
