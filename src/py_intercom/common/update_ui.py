@@ -140,7 +140,7 @@ class UpdateController(QtCore.QObject):
             self._window,
             "Mise à jour de py-intercom",
             "Un autre py-intercom (la Régie ou un poste) tourne sur ce PC.\n\n"
-            "Fermez-le d'abord, puis relancez la mise à jour depuis cette fenêtre : "
+            "Quittez-le d'abord (bouton ⏻ ou Ctrl+Q : la croix ne fait que réduire la fenêtre), puis relancez la mise à jour depuis cette fenêtre : "
             "l'installation arrêterait sinon les deux programmes.",
         )
         return True

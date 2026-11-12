@@ -11,6 +11,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from .devices import list_devices
 from .logging import best_effort
+from .single_instance import SingleInstance
 from .theme import apply_theme
 
 DEVICE_REFRESH_TIMEOUT_MS = 5000
@@ -224,13 +225,66 @@ def install_french_translations(app: QtWidgets.QApplication) -> None:
     app.setProperty("pyIntercomTranslated", True)
 
 
-def run_window(make_window: Callable[[], _Window], start_minimized: Callable[[_Window], bool]) -> int:
-    """Runs a py-intercom window until it closes and returns the exit code."""
+def minimize_on_user_close(window: QtWidgets.QWidget, event: QtGui.QCloseEvent) -> bool:
+    """For closeEvent: the operator's own close (X, Alt+F4) only minimizes.
+
+    The intercom must not drop on a stray click on the X. Closes made by the
+    program (the Quit button, the updater, Windows ending the session) are not
+    spontaneous events and go through, so quitting stays possible.
+    Returns True when the close was turned into a minimize: closeEvent returns.
+    """
+    if not event.spontaneous():
+        return False
+    event.ignore()
+    window.showMinimized()
+    return True
+
+
+def make_quit_button(window: QtWidgets.QWidget) -> QtWidgets.QToolButton:
+    """Header button (and Ctrl+Q) that really closes the window, since X only minimizes."""
+    button = QtWidgets.QToolButton()
+    button.setText("⏻")
+    button.setProperty("class", "ghost")
+    button.setFixedSize(34, 34)
+    button.setToolTip("Quitter py-intercom (Ctrl+Q). La croix de la fenêtre ne fait que la réduire.")
+    button.setAccessibleName("Quitter py-intercom")
+    button.clicked.connect(window.close)
+    shortcut = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Q"), window)
+    shortcut.activated.connect(window.close)
+    return button
+
+
+def bring_to_front(window: QtWidgets.QWidget) -> None:
+    """Restore a minimized window and give it the focus."""
+    window.setWindowState(window.windowState() & ~QtCore.Qt.WindowState.WindowMinimized)
+    window.show()
+    window.raise_()
+    window.activateWindow()
+
+
+def run_window(
+    make_window: Callable[[], _Window],
+    start_minimized: Callable[[_Window], bool],
+    single_instance_role: str | None = None,
+) -> int:
+    """Runs a py-intercom window until it closes and returns the exit code.
+
+    ``single_instance_role``: only one window of that role per PC; a second
+    launch brings the first one to the front and returns 0.
+    """
     # The role picker may already have created the application.
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    guard = None
+    if single_instance_role is not None:
+        guard = SingleInstance(single_instance_role)
+        if not guard.acquire():
+            logger.info("a {} is already running on this PC: leaving", single_instance_role)
+            return 0
     install_french_translations(app)
     apply_theme(app)
     window = make_window()
+    if guard is not None:
+        guard.activated.connect(lambda: bring_to_front(window))
     if start_minimized(window):
         window.showMinimized()
     else:

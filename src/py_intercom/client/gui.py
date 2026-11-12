@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import time
 import uuid
 from collections.abc import Mapping
@@ -35,8 +34,9 @@ from ..common.gui_utils import (
     DEVICE_REFRESH_TIMEOUT_MS,
     DeviceRefresh,
     confirm,
-    install_french_translations,
     is_checked,
+    make_quit_button,
+    minimize_on_user_close,
     run_window,
     set_app_icon,
 )
@@ -52,7 +52,6 @@ from ..common.preset_schema import (
 )
 from ..common.theme import (
     TOKENS,
-    apply_theme,
     make_field,
     patch_combo,
     repolish,
@@ -400,6 +399,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._top_bar.right.addWidget(self._connect_btn)
         self._top_bar.right.addWidget(self._disconnect_btn)
         self._top_bar.right.addWidget(self._info_btn)
+        self._top_bar.right.addWidget(make_quit_button(self))
 
         # -- Console page: talk pads + monitoring strips ------------------------
         talk = Section(
@@ -1365,6 +1365,8 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._reset_identity()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if minimize_on_user_close(self, event):
+            return
         if self._device_refresh.close_must_wait():
             self._device_status.setText("Fermeture après la fin de l'inventaire audio…")
             event.ignore()
@@ -2065,28 +2067,12 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._release_pad_holds()
 
 
-def _client_lock_path() -> Path:
-    return Path.home() / "py-intercom" / "client.lock"
-
-
 def run_gui(minimized: bool = False, server_host: str = "") -> int:
     # Two Postes on one PC would share the preset, the identity (one evicts the
-    # other's session on the server) and the HTTP control port.
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    lock_path = _client_lock_path()
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    instance_lock = QtCore.QLockFile(str(lock_path))
-    instance_lock.setStaleLockTime(0)  # only a live process holds it
-    if not instance_lock.tryLock(0):
-        install_french_translations(app)
-        apply_theme(app)
-        QtWidgets.QMessageBox.information(
-            None,
-            "Poste déjà ouvert",
-            "Un poste py-intercom est déjà ouvert sur ce PC.\nUtilisez sa fenêtre (elle est peut-être réduite).",
-        )
-        return 0
+    # other's session on the server) and the HTTP control port: a second launch
+    # brings the first Poste to the front instead.
     return run_window(
         lambda: ClientWindow(server_host=server_host),
         lambda win: minimized or win._start_minimized.isChecked(),
+        single_instance_role="client",
     )

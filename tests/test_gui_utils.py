@@ -173,3 +173,51 @@ def test_each_role_has_its_own_icon_and_any_other_name_gets_the_plain_logo(qt_ap
     assert server_image != client_image
     assert server_image != plain_image
     assert launcher.pixmap(size).toImage() == plain_image
+
+
+def test_the_operators_close_only_minimizes_but_a_program_close_goes_through(qt_app) -> None:
+    from PySide6 import QtGui
+
+    window = QtWidgets.QWidget()
+    minimized: list[bool] = []
+    window.showMinimized = lambda: minimized.append(True)  # type: ignore[method-assign]
+    ignored: list[bool] = []
+    operator_close = SimpleNamespace(spontaneous=lambda: True, ignore=lambda: ignored.append(True))
+
+    assert gui_utils_mod.minimize_on_user_close(window, operator_close)
+    assert ignored == [True]
+    assert minimized == [True]
+
+    # window.close(), the Quit button, the updater: not a spontaneous event.
+    program_close = QtGui.QCloseEvent()
+    assert not gui_utils_mod.minimize_on_user_close(window, program_close)
+    assert program_close.isAccepted()
+    assert minimized == [True]
+
+
+def test_quit_button_really_closes_the_window(qt_app) -> None:
+    window = QtWidgets.QWidget()
+    window.show()
+    button = gui_utils_mod.make_quit_button(window)
+
+    button.click()
+
+    assert not window.isVisible()
+
+
+def test_a_second_launch_of_a_role_wakes_the_first_and_leaves(qt_app) -> None:
+    from py_intercom.common.single_instance import SingleInstance
+
+    role = f"test-{os.getpid()}"
+    first = SingleInstance(role)
+    woken: list[bool] = []
+    first.activated.connect(lambda: woken.append(True))
+    assert first.acquire()
+
+    assert not SingleInstance(role).acquire()
+    _wait_until(lambda: woken)
+
+    # Another role is a different program: it is not blocked.
+    other = SingleInstance(role + "-other")
+    assert other.acquire()
+    assert woken == [True]

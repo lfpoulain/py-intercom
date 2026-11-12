@@ -130,7 +130,7 @@ Une machine fait tourner le **serveur**, chaque opérateur lance un **client**. 
 2. **Sur chaque poste** : lancer py-intercom (menu Démarrer), choisir **Poste**, puis le serveur, le micro et le casque, et cliquer sur **Connecter**.
 3. **Attendre « En ligne »**, régler les touches PTT, puis faire un tour de micro.
 
-Le choix du rôle peut être retenu sur chaque PC ; maintenir **Maj** au lancement pour le revoir. Si l'opérateur Régie parle aussi, le bouton **🎧 Poste sur ce PC** de la Régie ouvre un poste déjà réglé sur ce serveur. Le menu Démarrer contient aussi les raccourcis **py-intercom Régie** et **py-intercom Poste** (`--role server` / `--role client`).
+Le choix du rôle peut être retenu sur chaque PC ; maintenir **Maj** au lancement pour le revoir. Si l'opérateur Régie parle aussi, le bouton **🎧 Poste sur ce PC** de la Régie ouvre un poste déjà réglé sur ce serveur. Un seul exemplaire de chaque rôle tourne par PC : relancer py-intercom remet la fenêtre déjà ouverte au premier plan. La croix de la fenêtre la **réduit** seulement (pas de coupure par un clic de travers) ; pour quitter, utiliser le bouton **⏻** de l'en-tête ou **Ctrl+Q**. Le menu Démarrer contient aussi les raccourcis **py-intercom Régie** et **py-intercom Poste** (`--role server` / `--role client`).
 
 Ports utilisés : UDP 5000 (audio), TCP 5001 (contrôle), UDP 5002 (découverte). Le [guide d'exploitation](docs/guide-exploitation.md) couvre les gains, les casques Bluetooth et le dépannage.
 

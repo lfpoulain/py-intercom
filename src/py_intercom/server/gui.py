@@ -37,6 +37,8 @@ from ..common.gui_utils import (
     DeviceRefresh,
     confirm,
     is_checked,
+    make_quit_button,
+    minimize_on_user_close,
     run_window,
     set_app_icon,
 )
@@ -430,6 +432,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self._top_bar.right.addWidget(self._stop_btn)
         self._top_bar.right.addWidget(self._local_station_btn)
         self._top_bar.right.addWidget(self._info_btn)
+        self._top_bar.right.addWidget(make_quit_button(self))
         self._server_name.textChanged.connect(self._refresh_identity_header)
         self._server_name.editingFinished.connect(self._on_server_name_edited)
         self._discovery_cb.stateChanged.connect(self._refresh_identity_header)
@@ -603,6 +606,8 @@ class ServerWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, title, f"Impossible d'ouvrir le poste :\n{exc}")
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if minimize_on_user_close(self, event):
+            return
         if self._device_refresh.close_must_wait():
             self._device_status.setText("Fermeture après la fin de l'inventaire audio…")
             event.ignore()
@@ -1818,4 +1823,9 @@ class ServerWindow(QtWidgets.QMainWindow):
 
 
 def run_gui(minimized: bool = False) -> int:
-    return run_window(ServerWindow, lambda win: minimized or win._start_minimized_cb.isChecked())
+    # Two Régies on one PC would fight over the UDP port and the preset.
+    return run_window(
+        ServerWindow,
+        lambda win: minimized or win._start_minimized_cb.isChecked(),
+        single_instance_role="server",
+    )
