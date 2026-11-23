@@ -368,7 +368,8 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         self._remote_enabled = QtWidgets.QCheckBox("Activer le contrôle HTTP")
         self._remote_enabled.setToolTip(
-            "Piloter les PTT à distance (Stream Deck, Companion, scripts) : POST /ptt/<bus>/on|off|toggle, GET /status."
+            "Piloter les PTT à distance (Stream Deck, py-livedeck, Companion, scripts) : "
+            "/api/deck pour py-livedeck, POST /ptt/<bus>/on|off|toggle et GET /status pour le reste."
         )
         self._remote_port = require_focus_for_wheel(QtWidgets.QSpinBox())
         self._remote_port.setRange(1024, 65535)
@@ -379,12 +380,20 @@ class ClientWindow(QtWidgets.QMainWindow):
             "Accepter les commandes des autres machines du réseau local. "
             "Sinon, seules les applications de ce poste peuvent piloter le PTT."
         )
+        self._remote_token = QtWidgets.QLineEdit()
+        self._remote_token.setPlaceholderText("Jeton (facultatif)")
+        self._remote_token.setEchoMode(QtWidgets.QLineEdit.EchoMode.PasswordEchoOnEdit)
+        self._remote_token.setToolTip(
+            "Vide : pas de jeton. Rempli : chaque requête doit porter l'en-tête "
+            "« Authorization: Bearer <jeton> » (à recopier dans py-livedeck)."
+        )
         self._remote_status = QtWidgets.QLabel("")
         self._remote_status.setProperty("role", "muted")
         self._remote_status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         with best_effort("restore remote control settings"):
             self._remote_port.setValue(int(self._preset_get("remote_port", REMOTE_DEFAULT_PORT)))
             self._remote_lan.setChecked(bool(self._preset_get("remote_lan", False)))
+            self._remote_token.setText(str(self._preset_get("remote_token", "") or ""))
             self._remote_enabled.setChecked(bool(self._preset_get("remote_enabled", False)))
 
         # -- Header ------------------------------------------------------------
@@ -513,7 +522,8 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         remote_card = Card(
             "Contrôle à distance",
-            "Pour Stream Deck, Bitfocus Companion ou un script : POST /ptt/regie/on, /off, /toggle et GET /status.",
+            "py-livedeck : /api/deck (touches décrites par le poste). Companion ou script : "
+            "POST /ptt/regie/on, /off, /toggle et GET /status.",
         )
         remote_card.body.addWidget(self._remote_enabled)
         remote_row = QtWidgets.QHBoxLayout()
@@ -522,6 +532,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         remote_row.addWidget(self._remote_status, 1)
         remote_card.body.addLayout(remote_row)
         remote_card.body.addWidget(self._remote_lan)
+        remote_card.body.addWidget(self._remote_token)
 
         settings_inner = QtWidgets.QWidget()
         settings_grid = QtWidgets.QGridLayout(settings_inner)
@@ -568,6 +579,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._remote_enabled.stateChanged.connect(self._on_remote_settings_changed)
         self._remote_lan.stateChanged.connect(self._on_remote_settings_changed)
         self._remote_port.editingFinished.connect(self._on_remote_settings_changed)
+        self._remote_token.editingFinished.connect(self._on_remote_settings_changed)
         for fader, label, preset_key, setter in self._gain_controls:
             fader.valueChanged.connect(
                 lambda value, lbl=label, key=preset_key, apply=setter: self._on_gain_changed(value, lbl, key, apply)
@@ -749,6 +761,9 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._apply_ptt_bus(int(bid))
 
     def _refresh_pad(self, bus_id: int) -> None:
+        server = getattr(self, "_remote_server", None)
+        if server is not None:
+            server.notify_changed()  # a live deck stream sends its patch now, not within a second
         pad = self._ptt_pads.get(int(bus_id))
         if pad is None:
             return
@@ -1087,6 +1102,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             checkbox.setChecked(checked)
             checkbox.blockSignals(False)
         self._remote_port.setValue(REMOTE_DEFAULT_PORT)
+        self._remote_token.setText("")
         for bus_id, mode_cb in self._ptt_bus_mode_widgets.items():
             mode_cb.blockSignals(True)
             mode_cb.setCurrentIndex(mode_cb.findData("ptt"))
@@ -1771,6 +1787,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._preset_set("remote_enabled", bool(self._remote_enabled.isChecked()))
             self._preset_set("remote_port", int(self._remote_port.value()))
             self._preset_set("remote_lan", bool(self._remote_lan.isChecked()))
+            self._preset_set("remote_token", self._remote_token.text().strip())
         self._restart_remote_server()
 
     def _stop_remote_server(self) -> None:
@@ -1793,6 +1810,7 @@ class ClientWindow(QtWidgets.QMainWindow):
         enabled = self._remote_enabled.isChecked()
         self._remote_port.setEnabled(not enabled)
         self._remote_lan.setEnabled(not enabled)
+        self._remote_token.setEnabled(not enabled)
         if not enabled:
             self._remote_status.setText("")
             return
@@ -1803,6 +1821,7 @@ class ClientWindow(QtWidgets.QMainWindow):
                 self._remote_dispatcher,
                 host="0.0.0.0" if lan else "127.0.0.1",
                 port=port,
+                token=self._remote_token.text().strip(),
             )
             server.start()
         except OSError as exc:
@@ -1810,6 +1829,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._remote_status.setText(f"Port {port} indisponible")
             self._remote_port.setEnabled(True)
             self._remote_lan.setEnabled(True)
+            self._remote_token.setEnabled(True)
             self._remote_enabled.blockSignals(True)
             self._remote_enabled.setChecked(False)
             self._remote_enabled.blockSignals(False)
@@ -1823,6 +1843,8 @@ class ClientWindow(QtWidgets.QMainWindow):
         status = self._operational_status
         return {
             "state": status.label,
+            "operational": status.state.value,
+            "detail": status.detail,
             "online": status.state is ClientOperationalState.ONLINE,
             "buses": {
                 bus_label(int(bid)): {

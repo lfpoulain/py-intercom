@@ -137,6 +137,33 @@ Sémantique :
 
 Les commandes sont exécutées sur le thread de l'interface, par le même chemin que les raccourcis clavier.
 
+Jeton facultatif : s'il est renseigné dans le client, **toutes** les routes (`/ptt`, `/status`, `/api/deck`) exigent l'en-tête `Authorization: Bearer <jeton>`, sinon `401` (`INVALID_TOKEN` sous `/api/deck`). Il n'est jamais lu dans l'URL.
+
+### API Stream Deck commune (`/api/deck`)
+
+Même serveur, même port. C'est le contrat partagé avec orchestream-v2, que py-livedeck lit sans rien coder en dur.
+
+| Méthode | Chemin | Effet |
+|---|---|---|
+| `GET` | `/api/deck/state` | État complet : `token`, `client`, `buses`, `commands`, `keys`, `updatedAt` |
+| `GET` | `/api/deck/events` | `text/event-stream` : `state` à l'ouverture, puis `patch` à chaque changement, `: keepalive` toutes les 25 s au plus (8 flux au plus, sinon `429 TOO_MANY_STREAMS`) |
+| `GET` | `/api/deck/commands` | `{"commands": [...]}` avec les valeurs possibles de `bus` |
+| `POST` | `/api/deck/commands/<id>` | Corps vide, `{}` ou `{"args": {"bus": "regie"}}` ; répond `{"ok": true, "message", "data"}` (`data` : l'état de `/status`) |
+
+Commandes : `ptt.toggle`, `ptt.on`, `ptt.off` (argument `bus` : `regie`, `plateau`, `vmix`) et `ptt.allOff`. Elles passent par le même chemin que `/ptt/...`, avec les mêmes règles de sécurité.
+
+Touches (`keys`), identifiants stables :
+
+| `id` | Groupe | Rôle |
+|---|---|---|
+| `client.status` | État | Affichage seul (`command: null`) : état de la liaison |
+| `ptt.toggle:regie`, `ptt.toggle:plateau`, `ptt.toggle:vmix` | Parole | Bascule la parole ; `tone` `live` quand le bus transmet, sinon la couleur du bus ; grisée hors ligne ou en mode Permanent |
+| `ptt.allOff` | Parole | Tout couper, toujours disponible |
+
+Le flux relit l'état chaque seconde et aussitôt après une commande ou un changement dans la fenêtre (raccourci, pad, connexion). Un `patch` contient `changed` (sections modifiées, entières), `keys` (touches modifiées), `removedKeys` et `updatedAt`.
+
+Erreurs : `{"error": {"code", "message", "details?"}}`. `404 COMMAND_NOT_FOUND` (commande inconnue), `404 ROUTE_NOT_FOUND` (route inconnue), `422 VALIDATION_FAILED` (bus manquant ou inconnu, JSON illisible ; `details: {"args.bus": ...}`), `409 COMMAND_REFUSED` (PTT désarmé, bus Permanent), `405 METHOD_NOT_ALLOWED`, `401 INVALID_TOKEN`, `403 FORBIDDEN` (navigateur), `503 BUSY`. Jamais `NOT_FOUND` sous `/api/deck` : py-livedeck le lit comme une adresse refusée.
+
 ## Découverte LAN
 
 Le serveur diffuse toutes les 2 s une balise JSON en broadcast UDP (port audio + 2) : nom du serveur, ports audio et contrôle, version. Le client liste les serveurs vus depuis moins de 6 s.
