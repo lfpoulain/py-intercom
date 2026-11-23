@@ -230,9 +230,6 @@ class ClientWindow(QtWidgets.QMainWindow):
         # Buses held down by the HTTP remote, and by the mouse on a pad (PTT mode only).
         self._ptt_remote_active: dict[int, bool] = {}
         self._ptt_pad_held: dict[int, bool] = {}
-        # Per bus, bumped by every remote command: a lease timer only expires
-        # the remote "on" that armed it, never a later command.
-        self._remote_lease_generation: dict[int, int] = {}
         self._remote_server: RemoteControlServer | None = None
         self._remote_dispatcher = QtDispatcher(self._handle_remote_command, self)
         self._ptt_pads: dict[int, TalkPad] = {}
@@ -368,8 +365,7 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         self._remote_enabled = QtWidgets.QCheckBox("Activer le contrôle HTTP")
         self._remote_enabled.setToolTip(
-            "Piloter les PTT à distance (Stream Deck, py-livedeck, Companion, scripts) : "
-            "/api/deck pour py-livedeck, POST /ptt/<bus>/on|off|toggle et GET /status pour le reste."
+            "Piloter les PTT à distance depuis py-livedeck (Stream Deck) par l'API /api/deck."
         )
         self._remote_port = require_focus_for_wheel(QtWidgets.QSpinBox())
         self._remote_port.setRange(1024, 65535)
@@ -522,8 +518,7 @@ class ClientWindow(QtWidgets.QMainWindow):
 
         remote_card = Card(
             "Contrôle à distance",
-            "py-livedeck : /api/deck (touches décrites par le poste). Companion ou script : "
-            "POST /ptt/regie/on, /off, /toggle et GET /status.",
+            "Pour py-livedeck (Stream Deck) : API /api/deck, le poste décrit lui-même ses touches.",
         )
         remote_card.body.addWidget(self._remote_enabled)
         remote_row = QtWidgets.QHBoxLayout()
@@ -644,7 +639,6 @@ class ClientWindow(QtWidgets.QMainWindow):
         self._ptt_bus_toggle_state = {int(bus_id): False for bus_id in self._ptt_bus_toggle_state}
         self._ptt_remote_active = {}
         self._ptt_pad_held = {}
-        self._cancel_remote_leases()
         client = self._client
         if client is not None:
             for bus_id in list(self._ptt_bus_keys):
@@ -885,8 +879,6 @@ class ClientWindow(QtWidgets.QMainWindow):
         bid = int(bus_id)
         online = self._operational_status.state is ClientOperationalState.ONLINE
         if str(self._ptt_bus_modes.get(bid, "ptt")) == "toggle":
-            # The keyboard takes the bus over from any remote lease.
-            self._cancel_remote_lease(bid)
             if online:
                 self._ptt_bus_toggle_state[bid] = bool(active)
             else:
@@ -907,7 +899,6 @@ class ClientWindow(QtWidgets.QMainWindow):
             return
         mode = str(cb.currentData() or "ptt")
         self._ptt_bus_modes[int(bus_id)] = mode
-        self._cancel_remote_lease(int(bus_id))
         self._ptt_remote_active.pop(int(bus_id), None)
         self._ptt_pad_held.pop(int(bus_id), None)
         if mode != "toggle":
@@ -1799,7 +1790,6 @@ class ClientWindow(QtWidgets.QMainWindow):
         # stay, the keyboard or a pad can still close them.
         held = [bid for bid, active in self._ptt_remote_active.items() if active]
         for bid in held:
-            self._cancel_remote_lease(bid)
             self._ptt_remote_active[bid] = False
             self._apply_ptt_bus(bid)
         if held:
@@ -1885,11 +1875,6 @@ class ClientWindow(QtWidgets.QMainWindow):
             else:
                 target = command.action == "on"
             self._set_remote_target(bid, target)
-            # Every command supersedes a pending lease on its bus.
-            if target and command.hold_ms is not None:
-                self._arm_remote_lease(bid, int(command.hold_ms))
-            else:
-                self._cancel_remote_lease(bid)
             self._apply_ptt_bus(bid)
         self._refresh_state_labels()
         return RemoteReply(HTTPStatus.OK, self._remote_status_payload())
@@ -1902,34 +1887,6 @@ class ClientWindow(QtWidgets.QMainWindow):
                 self._global_ptt.set_toggle_state(int(bus_id), bool(active))
         else:
             self._ptt_remote_active[int(bus_id)] = bool(active)
-
-    def _cancel_remote_lease(self, bus_id: int) -> None:
-        bid = int(bus_id)
-        self._remote_lease_generation[bid] = self._remote_lease_generation.get(bid, 0) + 1
-
-    def _cancel_remote_leases(self) -> None:
-        for bid in list(self._remote_lease_generation):
-            self._cancel_remote_lease(bid)
-
-    def _arm_remote_lease(self, bus_id: int, hold_ms: int) -> None:
-        """Release a remote "on" after ``hold_ms`` unless a new command renews or ends it.
-
-        A controller that crashes or loses the network between its "on" and
-        its "off" can then never leave a microphone open.
-        """
-        bid = int(bus_id)
-        self._cancel_remote_lease(bid)
-        generation = self._remote_lease_generation[bid]
-        QtCore.QTimer.singleShot(int(hold_ms), self, lambda: self._expire_remote_lease(bid, generation))
-
-    def _expire_remote_lease(self, bus_id: int, generation: int) -> None:
-        if self._remote_lease_generation.get(int(bus_id)) != int(generation):
-            return
-        self._cancel_remote_lease(bus_id)
-        logger.info("remote PTT lease expired on bus {}: releasing it", bus_label(int(bus_id)))
-        self._set_remote_target(int(bus_id), False)
-        self._apply_ptt_bus(int(bus_id))
-        self._refresh_state_labels()
 
     def _open_preflight(self) -> None:
         input_device = self._input_device.currentData()

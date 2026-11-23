@@ -4,11 +4,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import json
 import threading
 import time
-import urllib.error
-import urllib.request
 from http import HTTPStatus
 from types import SimpleNamespace
 
@@ -21,7 +18,6 @@ from py_intercom.client.remote import (
     RemoteCommand,
     RemoteControlServer,
     RemoteReply,
-    route,
 )
 from py_intercom.client.status import ClientOperationalState, ClientOperationalStatus
 from py_intercom.common.buses import PLATEAU_BUS_ID, REGIE_BUS_ID, VMIX_BUS_ID
@@ -32,126 +28,7 @@ def qt_app() -> QtWidgets.QApplication:
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
-# --- Routing ----------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("method", "path", "expected"),
-    [
-        ("POST", "/ptt/regie/on", RemoteCommand("on", REGIE_BUS_ID)),
-        ("POST", "/ptt/plateau/off", RemoteCommand("off", PLATEAU_BUS_ID)),
-        ("POST", "/ptt/2/toggle", RemoteCommand("toggle", VMIX_BUS_ID)),
-        ("POST", "/ptt/VMIX/ON/", RemoteCommand("on", VMIX_BUS_ID)),
-        ("POST", "/ptt/all/off", RemoteCommand("off", None)),
-        ("GET", "/status", RemoteCommand("status")),
-        ("GET", "/status?x=1", RemoteCommand("status")),
-        ("POST", "/ptt/regie/on?hold_ms=1000", RemoteCommand("on", REGIE_BUS_ID, 1000)),
-        ("POST", "/ptt/plateau/on?hold_ms=100", RemoteCommand("on", PLATEAU_BUS_ID, 100)),
-        ("POST", "/ptt/vmix/on?hold_ms=10000", RemoteCommand("on", VMIX_BUS_ID, 10000)),
-    ],
-)
-def test_routes(method, path, expected) -> None:
-    assert route(method, path) == expected
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        "/ptt/regie/on?hold_ms=99",
-        "/ptt/regie/on?hold_ms=10001",
-        "/ptt/regie/on?hold_ms=abc",
-        "/ptt/regie/on?hold_ms=-5",
-        "/ptt/regie/on?hold_ms=",
-        "/ptt/regie/on?hold_ms=500&hold_ms=600",
-        "/ptt/regie/off?hold_ms=500",
-        "/ptt/regie/toggle?hold_ms=500",
-        "/ptt/all/off?hold_ms=500",
-    ],
-)
-def test_invalid_hold_is_a_bad_request(path) -> None:
-    reply = route("POST", path)
-    assert isinstance(reply, RemoteReply)
-    assert reply.status == HTTPStatus.BAD_REQUEST
-    assert "hold_ms" in reply.body["error"]
-
-
-@pytest.mark.parametrize(
-    ("method", "path", "status"),
-    [
-        ("GET", "/ptt/regie/on", HTTPStatus.METHOD_NOT_ALLOWED),
-        ("POST", "/status", HTTPStatus.METHOD_NOT_ALLOWED),
-        ("POST", "/ptt/studio/on", HTTPStatus.NOT_FOUND),
-        ("POST", "/ptt/regie/maybe", HTTPStatus.NOT_FOUND),
-        ("POST", "/ptt/all/on", HTTPStatus.BAD_REQUEST),
-        ("GET", "/", HTTPStatus.NOT_FOUND),
-    ],
-)
-def test_rejected_routes(method, path, status) -> None:
-    reply = route(method, path)
-    assert isinstance(reply, RemoteReply)
-    assert reply.status == status
-    assert reply.body["error"]
-
-
-# --- HTTP server --------------------------------------------------------------
-
-
-@pytest.fixture
-def http_server():
-    commands: list[RemoteCommand] = []
-
-    def dispatcher(command: RemoteCommand) -> RemoteReply:
-        commands.append(command)
-        return RemoteReply(HTTPStatus.OK, {"ok": True, "action": command.action})
-
-    server = RemoteControlServer(dispatcher, port=0)
-    server.start()
-    yield f"http://127.0.0.1:{server.port}", commands
-    server.stop()
-
-
-def _request(url: str, method: str = "POST", headers: dict | None = None) -> tuple[int, dict]:
-    request = urllib.request.Request(url, method=method, data=b"" if method == "POST" else None, headers=headers or {})
-    try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as error:
-        return error.code, json.loads(error.read())
-
-
-def test_post_reaches_the_dispatcher(http_server) -> None:
-    base, commands = http_server
-
-    status, body = _request(f"{base}/ptt/regie/on")
-
-    assert status == 200 and body == {"ok": True, "action": "on"}
-    assert commands == [RemoteCommand("on", REGIE_BUS_ID)]
-
-
-def test_status_is_a_get(http_server) -> None:
-    base, commands = http_server
-
-    assert _request(f"{base}/status", method="GET")[0] == 200
-    assert commands == [RemoteCommand("status")]
-
-
-def test_errors_are_json_and_never_dispatched(http_server) -> None:
-    base, commands = http_server
-
-    status, body = _request(f"{base}/ptt/regie/on", method="GET")
-
-    assert status == 405 and "POST" in body["error"]
-    assert commands == []
-
-
-@pytest.mark.parametrize("header", ["Origin", "Referer"])
-def test_browser_requests_are_refused(http_server, header) -> None:
-    base, commands = http_server
-
-    status, _ = _request(f"{base}/ptt/regie/on", headers={header: "https://example.com"})
-
-    assert status == 403
-    assert commands == []
+# --- Listening address -----------------------------------------------------
 
 
 def test_localhost_only_by_default() -> None:
@@ -215,7 +92,6 @@ def _window(*, online: bool = True, modes: dict[int, str] | None = None, held: d
         _ptt_bus_toggle_state={},
         _ptt_remote_active={},
         _ptt_pad_held={},
-        _remote_lease_generation={},
         _operational_status=ClientOperationalStatus(state, state.value, ""),
         _refresh_state_labels=lambda: None,
         sent=sent,
@@ -227,7 +103,6 @@ def _window(*, online: bool = True, modes: dict[int, str] | None = None, held: d
         "_remote_status_payload",
         "_handle_remote_command",
         "_set_remote_target",
-        "_cancel_remote_lease",
         "_on_pad_pressed",
         "_on_pad_released",
         "_release_pad_holds",

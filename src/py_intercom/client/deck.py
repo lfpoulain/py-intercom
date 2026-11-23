@@ -10,7 +10,7 @@ py-livedeck speaks one generic protocol to every app of the ecosystem:
   body) — answers ``{"ok", "message", "data"}``.
 
 The client describes every key, ready to draw, so the deck has nothing
-hard-coded. Everything here is pure (the ``GET /status`` payload in, dicts
+hard-coded. Everything here is pure (the window's status payload in, dicts
 out): commands become :class:`RemoteCommand` and run on the Qt thread through
 the same path as the keyboard, so every PTT safety rule still applies.
 """

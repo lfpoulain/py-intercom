@@ -100,7 +100,7 @@ Le bouton **Tester micro et casque…** vérifie en 15 secondes le réseau, les 
 <td colspan="2">
 
 ### 🎛️ Pilotable depuis un Stream Deck
-Option **Contrôle à distance** : `POST /ptt/regie/on`, `/off`, `/toggle` et `GET /status` pour Stream Deck, Bitfocus Companion ou vos scripts. Voir le [protocole](docs/protocole.md#contrôle-à-distance-http-du-client).
+Option **Contrôle à distance** : API `/api/deck` pour py-livedeck, le poste décrit lui-même ses touches (une par bus, « Tout couper », état de la liaison). Voir le [protocole](docs/protocole.md#contrôle-à-distance-http-du-client).
 
 ### 🔉 Le programme s'efface quand on vous parle
 Bouton **Baisser quand on me parle** sur la tranche Programme : pendant qu'on vous parle, le Return (le programme) baisse de 15 dB dans votre casque, puis remonte en douceur.

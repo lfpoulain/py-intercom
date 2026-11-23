@@ -1,26 +1,14 @@
-"""HTTP remote control of the client's PTT (Stream Deck, Companion, scripts).
+"""HTTP remote control of the client's PTT: the Stream Deck API ``/api/deck``.
 
-    POST /ptt/<bus>/on             start talking on a bus
-    POST /ptt/<bus>/on?hold_ms=N   same, released after N ms unless renewed
-    POST /ptt/<bus>/off            stop talking on a bus
-    POST /ptt/<bus>/toggle         switch between the two
-    POST /ptt/all/off              release every bus
-    GET  /status                   operational state and PTT state of every bus
-
-<bus> is ``regie``, ``plateau``, ``vmix`` or the numeric bus id. Answers are
-JSON.
-
-Next to these routes, ``/api/deck/...`` serves the Stream Deck contract shared
-with orchestream-v2 and py-livedeck (state, keys, commands, live SSE stream),
-see :mod:`py_intercom.client.deck`. An optional token protects every route:
-once set, each request must carry ``Authorization: Bearer <token>``. The server is off by default and listens on localhost unless the
-operator opens it to the LAN.
+The only routes are the ones of the contract shared with orchestream-v2 and
+py-livedeck (state, keys, commands, live SSE stream), see
+:mod:`py_intercom.client.deck`. An optional token protects them: once set,
+each request must carry ``Authorization: Bearer <token>``. The server is off
+by default and listens on localhost unless the operator opens it to the LAN.
 
 Requests are executed on the Qt thread through the same path as the keyboard
 shortcuts, so the window stays in sync and every safety rule still applies:
-nothing is armed unless the client is online. A controller that renews a
-leased ``on`` while its button is held can never leave a microphone open by
-crashing before its ``off``. Requests carrying an ``Origin``
+nothing is armed unless the client is online. Requests carrying an ``Origin``
 or ``Referer`` header are refused, so a web page open in a browser cannot
 trigger a PTT behind the operator's back. The port is bound exclusively, so a
 second client on the same PC reports it as unavailable instead of sharing it,
@@ -43,14 +31,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from loguru import logger
 from PySide6 import QtCore
 
-from ..common.buses import BUS_BY_ID, FIXED_BUSES
+from ..common.buses import BUS_BY_ID
 
 REMOTE_DEFAULT_PORT = 5080
-REMOTE_ACTIONS = ("on", "off", "toggle")
-# Bounds of a leased "on": short enough to cut a stranded microphone quickly,
-# long enough for a controller to renew it while its button is held.
-REMOTE_HOLD_MS_MIN = 100
-REMOTE_HOLD_MS_MAX = 10_000
 _DISPATCH_TIMEOUT_S = 2.0
 _REQUEST_TIMEOUT_S = 3.0
 _MAX_BODY = 65536
@@ -68,7 +51,6 @@ DECK_HELP = (
 class RemoteCommand:
     action: str  # "status", "on", "off" or "toggle"
     bus_id: int | None = None  # None: every bus (only with "off")
-    hold_ms: int | None = None  # lease of an "on"; None: held until "off"
 
 
 @dataclass
@@ -78,60 +60,6 @@ class RemoteReply:
 
 
 Dispatcher = Callable[[RemoteCommand], RemoteReply]
-
-
-def parse_bus(token: str) -> int | None:
-    token = str(token).strip().lower()
-    for definition in FIXED_BUSES:
-        if token in (definition.key, str(definition.bus_id)):
-            return int(definition.bus_id)
-    return None
-
-
-def _parse_hold_ms(values: list[str]) -> int | None:
-    """The lease of a query string, or None unless it is one bounded integer."""
-    if len(values) != 1 or not (values[0].isascii() and values[0].isdigit()) or len(values[0]) > 5:
-        return None
-    hold_ms = int(values[0])
-    return hold_ms if REMOTE_HOLD_MS_MIN <= hold_ms <= REMOTE_HOLD_MS_MAX else None
-
-
-def route(method: str, path: str) -> RemoteCommand | RemoteReply:
-    """Map an HTTP request line to a command, or to the error to send back."""
-    raw_path, _, query = path.partition("?")
-    parts = [part for part in raw_path.split("/") if part]
-    if parts == ["status"]:
-        if method != "GET":
-            return RemoteReply(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "utilisez GET /status"})
-        return RemoteCommand("status")
-    if len(parts) == 3 and parts[0] == "ptt":
-        if method != "POST":
-            return RemoteReply(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "les commandes PTT exigent POST"})
-        _, bus_token, action = parts
-        action = action.lower()
-        hold_values = urllib.parse.parse_qs(query, keep_blank_values=True).get("hold_ms")
-        if hold_values is not None and (action != "on" or bus_token.lower() == "all"):
-            return RemoteReply(HTTPStatus.BAD_REQUEST, {"error": "hold_ms n'est accepté qu'avec POST /ptt/<bus>/on"})
-        if bus_token.lower() == "all":
-            if action != "off":
-                return RemoteReply(HTTPStatus.BAD_REQUEST, {"error": "seul POST /ptt/all/off est accepté"})
-            return RemoteCommand("off", None)
-        bus_id = parse_bus(bus_token)
-        if bus_id is None:
-            known = ", ".join(definition.key for definition in FIXED_BUSES)
-            return RemoteReply(HTTPStatus.NOT_FOUND, {"error": f"bus inconnu « {bus_token} » ; attendus : {known}"})
-        if action not in REMOTE_ACTIONS:
-            return RemoteReply(HTTPStatus.NOT_FOUND, {"error": "action attendue : on, off ou toggle"})
-        hold_ms = None
-        if hold_values is not None:
-            hold_ms = _parse_hold_ms(hold_values)
-            if hold_ms is None:
-                return RemoteReply(
-                    HTTPStatus.BAD_REQUEST,
-                    {"error": f"hold_ms attendu : entier de {REMOTE_HOLD_MS_MIN} à {REMOTE_HOLD_MS_MAX} (ms)"},
-                )
-        return RemoteCommand(action, bus_id, hold_ms)
-    return RemoteReply(HTTPStatus.NOT_FOUND, {"error": "routes : GET /status, POST /ptt/<bus>/<on|off|toggle>"})
 
 
 def token_ok(expected: str, authorization: str | None) -> bool:
@@ -162,31 +90,24 @@ class _Handler(BaseHTTPRequestHandler):
             if length > 0:
                 body = self.rfile.read(min(length, _MAX_BODY))
         path = self.path.split("?", 1)[0].rstrip("/")
-        deck_route = path == "/api/deck" or path.startswith("/api/deck/")
         if self.headers.get("Origin") or self.headers.get("Referer"):
-            self._refuse(deck_route, HTTPStatus.FORBIDDEN, "FORBIDDEN", "requêtes de navigateur refusées")
+            self._refuse(HTTPStatus.FORBIDDEN, "FORBIDDEN", "requêtes de navigateur refusées")
             return
         if not token_ok(self.server.token, self.headers.get("Authorization")):
             self._refuse(
-                deck_route,
                 HTTPStatus.UNAUTHORIZED,
                 "INVALID_TOKEN",
                 "jeton API absent ou incorrect : en-tête « Authorization: Bearer <jeton> » attendu"
                 " (py-intercom › Réglages › Contrôle à distance)",
             )
             return
-        if deck_route:
+        if path == "/api/deck" or path.startswith("/api/deck/"):
             self._deck(method, path, body)
             return
-        parsed = route(method, self.path)
-        reply = parsed if isinstance(parsed, RemoteReply) else self._dispatch(parsed)
-        if not isinstance(parsed, RemoteReply) and parsed.action != "status":
-            self.server.notify_changed()  # live deck streams look again right away
-        self._send_json(int(reply.status), reply.body)
+        self._refuse(HTTPStatus.NOT_FOUND, "ROUTE_NOT_FOUND", f"route inconnue. Routes : {DECK_HELP}")
 
-    def _refuse(self, deck_route: bool, status: HTTPStatus, code: str, message: str) -> None:
-        body = {"error": {"code": code, "message": message}} if deck_route else {"error": message}
-        self._send_json(int(status), body)
+    def _refuse(self, status: HTTPStatus, code: str, message: str) -> None:
+        self._send_json(int(status), {"error": {"code": code, "message": message}})
 
     # -- /api/deck -----------------------------------------------------------
 

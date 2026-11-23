@@ -256,7 +256,6 @@ def test_token_protects_every_route(deck_server) -> None:
     status, body = _call(f"{base}/api/deck/state")
     assert status == 401 and body["error"]["code"] == "INVALID_TOKEN"
     assert _call(f"{base}/api/deck/state", headers={"Authorization": "Bearer nope"})[0] == 401
-    assert _call(f"{base}/ptt/regie/on", "POST")[0] == 401  # the original routes too
     assert window.commands == []
 
     status, state = _call(f"{base}/api/deck/state", headers={"Authorization": "Bearer s3cret"})
@@ -264,7 +263,17 @@ def test_token_protects_every_route(deck_server) -> None:
     assert _call(f"{base}/api/deck/state?token=s3cret")[0] == 401  # never read from the URL
 
 
-def test_browser_requests_are_refused_on_the_deck_too(deck_server) -> None:
+@pytest.mark.parametrize("path", ["/ptt/regie/on", "/status", "/"])
+def test_old_routes_are_gone(deck_server, path) -> None:
+    base, window, _ = deck_server
+
+    for method in ("GET", "POST"):
+        status, body = _call(f"{base}{path}", method)
+        assert (status, body["error"]["code"]) == (404, "ROUTE_NOT_FOUND")
+    assert window.commands == []
+
+
+def test_browser_requests_are_refused(deck_server) -> None:
     base, window, _ = deck_server
 
     status, body = _call(f"{base}/api/deck/commands/ptt.allOff", "POST", headers={"Origin": "https://evil.example"})

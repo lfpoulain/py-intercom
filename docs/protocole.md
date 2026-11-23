@@ -86,58 +86,20 @@ Le client n'accepte l'audio qu'après `welcome` et la première configuration. I
 
 ## Contrôle à distance (HTTP) du client
 
-Désactivé par défaut. Activé dans le client, il écoute sur `127.0.0.1:5080` (port réglable), ou sur toutes les interfaces si « Accepter les commandes du réseau local » est activé. Toutes les réponses sont du JSON UTF-8.
+Désactivé par défaut. Activé dans le client, il écoute sur `127.0.0.1:5080` (port réglable), ou sur toutes les interfaces si « Accepter les commandes du réseau local » est activé. Toutes les réponses sont du JSON UTF-8. Seule l'API `/api/deck` ci-dessous est servie ; toute autre route répond `404 ROUTE_NOT_FOUND` (les anciennes routes `/ptt/<bus>/...` et `/status` ont été retirées).
 
-| Méthode | Chemin | Effet |
-|---|---|---|
-| `POST` | `/ptt/<bus>/on` | Active le bus |
-| `POST` | `/ptt/<bus>/on?hold_ms=N` | Active le bus pour `N` ms au plus (bail renouvelable) |
-| `POST` | `/ptt/<bus>/off` | Désactive le bus |
-| `POST` | `/ptt/<bus>/toggle` | Inverse le bus |
-| `POST` | `/ptt/all/off` | Relâche tous les bus |
-| `GET` | `/status` | État courant |
+Sémantique des commandes PTT :
 
-`<bus>` : `regie`, `plateau`, `vmix` ou `0`, `1`, `2`, insensible à la casse. Corps de requête vide.
-
-Réponse de `/status` et des commandes réussies :
-
-```json
-{
-  "state": "En ligne",
-  "online": true,
-  "buses": {
-    "regie":   {"mode": "ptt",       "active": true},
-    "plateau": {"mode": "toggle",    "active": false},
-    "vmix":    {"mode": "always_on", "active": true}
-  }
-}
-```
-
-| Code | Cas |
-|---|---|
-| `200` | Commande appliquée ; l'état à jour est renvoyé |
-| `409` | `on` ou `toggle` alors que le client n'est pas « En ligne » (PTT désarmé), ou `off` sur un bus en mode Permanent |
-| `400` | `hold_ms` hors de 100 à 10000, ou ailleurs que sur `POST /ptt/<bus>/on` |
-| `404` | Bus ou route inconnus |
-| `405` | Mauvaise méthode (commande PTT en `GET`) |
-| `403` | Requête de navigateur (en-tête `Origin` ou `Referer`) |
-| `503` | Interface occupée, réessayer |
-
-Les erreurs ont la forme `{"error": "message"}` ; le `409` hors ligne inclut aussi l'état complet.
-
-Sémantique :
-
-- **Mode PTT** : `on`/`off` maintiennent ou relâchent un appui distant, qui s'ajoute au raccourci clavier. Un `off` distant ne coupe pas une touche tenue par l'opérateur.
-- **Mode Toggle** : `on`/`off`/`toggle` fixent l'état de bascule, synchronisé avec le raccourci.
-- **Mode Permanent** : le bus reste actif ; `off` renvoie `409`.
-- **Bail (`hold_ms`)** : un `on?hold_ms=N` (entier de 100 à 10000) est relâché automatiquement après `N` ms, sauf si une nouvelle commande sur ce bus arrive avant : un autre `on?hold_ms` renouvelle le bail, un `on` sans `hold_ms` le transforme en appui sans limite, un `off` l'arrête. Pour un bouton « talkback », envoyer `on?hold_ms=1000` à l'appui puis toutes les 500 ms tant qu'il est tenu, et `off` au relâchement : si le contrôleur plante ou perd le réseau, le micro se referme seul en une seconde. Sans `hold_ms`, l'appui dure jusqu'au `off`. En mode Toggle, l'expiration coupe la bascule ; un appui sur son raccourci ou un clic sur son pad annule le bail.
-- Couper (`off`) est accepté dans tous les états ; activer (`on`, `toggle`) exige « En ligne ».
+- **Mode PTT** : `ptt.on`/`ptt.off` maintiennent ou relâchent un appui distant, qui s'ajoute au raccourci clavier. Un `ptt.off` distant ne coupe pas une touche tenue par l'opérateur.
+- **Mode Toggle** : `ptt.on`/`ptt.off`/`ptt.toggle` fixent l'état de bascule, synchronisé avec le raccourci.
+- **Mode Permanent** : le bus reste actif ; le couper répond `409`.
+- Couper est accepté dans tous les états ; activer (`ptt.on`, `ptt.toggle`) exige « En ligne ».
 - **Dégradé** (contrôle établi, audio UDP interrompu ou flux carte son arrêté) : la transmission est coupée aussitôt, mais les appuis distants, les bascules et les touches tenues sont conservés et reprennent quand la chaîne est revenue stable 0,5 s. Pendant ce temps, un appui sur le raccourci d'une bascule ne peut que la couper.
-- À la perte du contrôle (Reconnexion), à la déconnexion ou au refus du serveur, tout appui distant et toute bascule sont effacés.
+- À la perte du contrôle (Reconnexion), à la déconnexion ou au refus du serveur, tout appui distant et toute bascule sont effacés. Désactiver le contrôle HTTP relâche aussi les appuis distants.
 
 Les commandes sont exécutées sur le thread de l'interface, par le même chemin que les raccourcis clavier.
 
-Jeton facultatif : s'il est renseigné dans le client, **toutes** les routes (`/ptt`, `/status`, `/api/deck`) exigent l'en-tête `Authorization: Bearer <jeton>`, sinon `401` (`INVALID_TOKEN` sous `/api/deck`). Il n'est jamais lu dans l'URL.
+Jeton facultatif : s'il est renseigné dans le client, toutes les requêtes exigent l'en-tête `Authorization: Bearer <jeton>`, sinon `401 INVALID_TOKEN`. Il n'est jamais lu dans l'URL.
 
 ### API Stream Deck commune (`/api/deck`)
 
@@ -148,9 +110,9 @@ Même serveur, même port. C'est le contrat partagé avec orchestream-v2, que py
 | `GET` | `/api/deck/state` | État complet : `token`, `client`, `buses`, `commands`, `keys`, `updatedAt` |
 | `GET` | `/api/deck/events` | `text/event-stream` : `state` à l'ouverture, puis `patch` à chaque changement, `: keepalive` toutes les 25 s au plus (8 flux au plus, sinon `429 TOO_MANY_STREAMS`) |
 | `GET` | `/api/deck/commands` | `{"commands": [...]}` avec les valeurs possibles de `bus` |
-| `POST` | `/api/deck/commands/<id>` | Corps vide, `{}` ou `{"args": {"bus": "regie"}}` ; répond `{"ok": true, "message", "data"}` (`data` : l'état de `/status`) |
+| `POST` | `/api/deck/commands/<id>` | Corps vide, `{}` ou `{"args": {"bus": "regie"}}` ; répond `{"ok": true, "message", "data"}` (`data` : `state`, `operational`, `detail`, `online`, `buses`) |
 
-Commandes : `ptt.toggle`, `ptt.on`, `ptt.off` (argument `bus` : `regie`, `plateau`, `vmix`) et `ptt.allOff`. Elles passent par le même chemin que `/ptt/...`, avec les mêmes règles de sécurité.
+Commandes : `ptt.toggle`, `ptt.on`, `ptt.off` (argument `bus` : `regie`, `plateau`, `vmix`) et `ptt.allOff`.
 
 Touches (`keys`), identifiants stables :
 

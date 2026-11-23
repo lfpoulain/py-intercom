@@ -72,7 +72,7 @@ src/py_intercom/
     ├── audio_io.py          streams PortAudio et callbacks
     ├── status.py            état opérateur (En ligne, Dégradé…)
     ├── hotkeys.py           raccourcis PTT globaux (pynput → Qt)
-    ├── remote.py            contrôle HTTP du PTT (Stream Deck, Companion)
+    ├── remote.py            serveur HTTP du contrôle à distance (jeton, SSE)
     ├── deck.py              API Stream Deck commune /api/deck (py-livedeck)
     ├── preflight.py         test micro, casque, réseau et raccourcis
     ├── gui.py               fenêtre client (pads de parole + réglages)

@@ -683,49 +683,6 @@ def test_key_held_through_a_udp_gap_resumes_and_a_released_one_does_not(qt_app, 
     hotkeys._on_release(Key.f1)
 
 
-# --- Remote lease (hold_ms) ----------------------------------------------------------
-
-
-def test_leased_remote_on_is_released_when_not_renewed(qt_app, client_window) -> None:
-    window = client_window
-    client = _online(window)
-
-    window._handle_remote_command(RemoteCommand("on", REGIE_BUS_ID, hold_ms=100))
-    assert window._ptt_bus_active(REGIE_BUS_ID) is True
-
-    assert _pump(qt_app, lambda: not window._ptt_bus_active(REGIE_BUS_ID))
-    assert client.sent[-1] == (REGIE_BUS_ID, False)
-
-
-def test_leased_toggle_is_cut_when_not_renewed(qt_app, client_window) -> None:
-    window = client_window
-    _online(window)
-    hotkeys = _FakeHotkeys()
-    window._global_ptt = hotkeys
-    window._ptt_bus_modes[PLATEAU_BUS_ID] = "toggle"
-
-    window._handle_remote_command(RemoteCommand("on", PLATEAU_BUS_ID, hold_ms=100))
-
-    assert _pump(qt_app, lambda: not window._ptt_bus_active(PLATEAU_BUS_ID))
-    assert hotkeys.toggle_sync == [(PLATEAU_BUS_ID, True), (PLATEAU_BUS_ID, False)]
-
-
-def test_a_later_command_supersedes_a_pending_lease(qt_app, client_window) -> None:
-    window = client_window
-    _online(window)
-
-    window._handle_remote_command(RemoteCommand("on", REGIE_BUS_ID, hold_ms=100))
-    window._handle_remote_command(RemoteCommand("on", REGIE_BUS_ID, hold_ms=5000))  # renewed
-    window._handle_remote_command(RemoteCommand("on", VMIX_BUS_ID, hold_ms=100))
-    window._handle_remote_command(RemoteCommand("on", VMIX_BUS_ID))  # now held until "off"
-
-    _pump(qt_app, lambda: False, timeout=0.4)
-
-    assert window._ptt_bus_active(REGIE_BUS_ID) is True
-    assert window._ptt_bus_active(VMIX_BUS_ID) is True
-    window._handle_remote_command(RemoteCommand("off", None))
-
-
 def test_wifi_link_choice_is_saved_in_the_preset(client_window) -> None:
     client_window._wifi_link.setChecked(True)
     assert client_window._preset_get("wifi_link", False) is True
